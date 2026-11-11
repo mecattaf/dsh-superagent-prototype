@@ -30,6 +30,8 @@ export interface Trigger {
   human: boolean
   /** Source-declared: the sender addressed the agent, by mentioning it or in a direct message to it. */
   addressed?: 'mention' | 'direct'
+  /** Source-declared: this trigger is an occurrence of a standing order (e.g. a scheduled workflow). */
+  standing?: true
   at: string
   text: string
   channel?: ChannelRef
@@ -120,6 +122,8 @@ export type MandateBasis = Received & { sender?: string; rules?: string[] } & (
   | { via: 'listed'; addressed?: 'mention' | 'direct'; observation?: { mode?: AcceptMode }; authority?: string }
   /** A message of a bot on its Source's bot list: an inferred candidate at most, never an explicit request or a stop. */
   | { via: 'bot'; addressed?: 'mention' | 'direct'; observation: { mode: AcceptMode } }
+  /** A scheduled workflow occurrence from a listed, enabled agency (c4). */
+  | { via: 'schedule'; agency: string; workflow: string; addressed?: 'mention' | 'direct' }
 )
 
 /** Immutable authorization produced by an accept decision; execution is bounded by it and it never changes. */
@@ -235,6 +239,8 @@ export interface Assignment {
 export type TicketInput =
   /** A Trigger on one of its Threads, or attached to it; `human` when a person wrote it. */
   | { id: string; kind: 'trigger'; triggerId: string; at: string; note?: string; human?: true
+    /** Source-declared: this trigger input is an occurrence of a standing order (c0). */
+    standing?: true
     /** It reached the ticket only on a Thread its Executor follows for context. */
     context?: true
     /**

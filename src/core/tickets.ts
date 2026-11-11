@@ -131,7 +131,7 @@ export class Tickets extends EnginePart {
     const existing = ticket.inputs.find(input => input.id === id)
     const at = this.now()
     const input = (inputId: string): TicketInput => ({ id: inputId, kind: 'trigger', triggerId: trigger.id, at, ...(note ? { note } : {}),
-      ...trigger.human ? { human: true } : {} })
+      ...trigger.human ? { human: true } : {}, ...trigger.standing ? { standing: true } : {} })
     if (existing?.kind !== 'trigger') this.addInput(ticket, input(id))
     else if (note && ticket.undelivered.includes(id)) { existing.note = note; ticket.updatedAt = at; this.repo.tickets.save(ticket) }
     // A person sent it to Eval, or the ticket let it go before its worker took it up, read it for context only, or ended after
@@ -240,7 +240,9 @@ export class Tickets extends EnginePart {
     this.repo.tickets.save(ticket)
     if (!liveTicket(ticket) || held) return
     const running = runningAssignment(ticket), latest = latestAssignment(ticket)
-    if (running) this.options.executor.deliver(ticket, running)
+    if (running) {
+      if (!(input.kind === 'trigger' && input.standing)) this.options.executor.deliver(ticket, running)
+    }
     else if (latest?.state === 'pending' && !waitsForPerson(ticket)) this.options.executor.start(ticket, latest)
   }
   /**
@@ -255,8 +257,8 @@ export class Tickets extends EnginePart {
     const policy = this.policy()
     if (policy.paused) return
     if (!policy.revalidate(ticket.mandate)) { this.refuse(ticket); return }
-    // Only a human's message resumes an ended ticket; bot/CI triggers wait alongside inputs from before the ticket ended.
-    const first = ticket.undelivered.map(id => ticket.inputs.find(input => input.id === id)).find(input => input?.kind === 'trigger' && input.human)
+    // Only a human's message or a standing trigger resumes an ended ticket; bot/CI triggers wait alongside inputs from before the ticket ended.
+    const first = ticket.undelivered.map(id => ticket.inputs.find(input => input.id === id)).find(input => input?.kind === 'trigger' && (input.human || input.standing))
     if (first?.kind !== 'trigger') return
     const at = this.now()
     delete ticket.ended; ticket.updatedAt = at
@@ -348,11 +350,15 @@ export class Tickets extends EnginePart {
     const stopping = ticket.assignments.filter(assignment => assignment.state !== 'ended')
     const why = reason && reason !== outcome ? { reason } : {}
     const until = readUntil(ticket)
-    const waiting = this.triggersOf(ticket, ticket.undelivered)
+    const kept = by === 'human' ? [] : ticket.undelivered.filter(id => {
+      const input = ticket.inputs.find(item => item.id === id)
+      return input?.kind === 'trigger' && input.standing
+    })
+    const waiting = this.triggersOf(ticket, ticket.undelivered.filter(id => !kept.includes(id)))
     const left = this.untaken(ticket, ticket.inputs.flatMap(input => input.kind === 'trigger'
-      && (!readBefore(input, until) || ticket.undelivered.includes(input.id)) ? [input.id] : []))
+      && (!readBefore(input, until) || (ticket.undelivered.includes(input.id) && !kept.includes(input.id))) ? [input.id] : []))
     // An end dated earlier, such as a PR's merge, does not move the ticket's last change back.
-    ticket.ended = { at, by, outcome, ...why }; ticket.undelivered = []; ticket.updatedAt = this.now()
+    ticket.ended = { at, by, outcome, ...why }; ticket.undelivered = kept; ticket.updatedAt = this.now()
     delete ticket.attention; delete ticket.delivery
     // The Assignments the end stops end with it; the ticket's end says why.
     for (const assignment of stopping) { assignment.state = 'ended'; assignment.endedAt = at }

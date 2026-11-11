@@ -35,20 +35,22 @@ export class Intake extends EnginePart {
       const thread = this.thread(ref)
       if (!thread.lastAt || trigger.at > thread.lastAt) thread.lastAt = trigger.at
       thread.correlated = [...new Set([...thread.correlated, ...keys.filter(other => other !== thread.key)])]
-      for (const ticketId of thread.subscriptions) {
-        const ticket = this.repo.tickets.get(ticketId)
-        // Only a person's message on a non-context thread resumes an ended ticket; bots and CI do not (the Executor re-reads
-        // threads when it resumes), and a human-stopped ticket receives nothing because its Mandate was withdrawn.
-        const followed = !!thread.context?.includes(ticketId)
-        const resumes = trigger.human && ticket?.ended?.by !== 'human' && !followed
-        if (!ticket || (!liveTicket(ticket) && !resumes)) continue
-        reached.set(ticketId, { ticket, context: followed && (reached.get(ticketId)?.context ?? true) })
+      if (!trigger.standing) {
+        for (const ticketId of thread.subscriptions) {
+          const ticket = this.repo.tickets.get(ticketId)
+          // Only a person's message on a non-context thread resumes an ended ticket; bots and CI do not (the Executor re-reads
+          // threads when it resumes), and a human-stopped ticket receives nothing because its Mandate was withdrawn.
+          const followed = !!thread.context?.includes(ticketId)
+          const resumes = trigger.human && ticket?.ended?.by !== 'human' && !followed
+          if (!ticket || (!liveTicket(ticket) && !resumes)) continue
+          reached.set(ticketId, { ticket, context: followed && (reached.get(ticketId)?.context ?? true) })
+        }
       }
       this.repo.threads.save(thread)
     }
     for (const [ticketId, { ticket, context: followed }] of reached) {
       this.tickets.addInput(ticket, { id: key('input', ticketId, 'trigger', trigger.id), kind: 'trigger', triggerId: trigger.id, at,
-        ...trigger.human ? { human: true } : {}, ...followed ? { context: true } : {} })
+        ...trigger.human ? { human: true } : {}, ...trigger.standing ? { standing: true } : {}, ...followed ? { context: true } : {} })
     }
     const fanout = [...reached.keys()], context = fanout.filter(id => reached.get(id)!.context)
     const disposition = { fanout, ...context.length ? { context } : {}, at }
