@@ -398,6 +398,9 @@ export async function launchRun(options: LaunchRunOptions): Promise<LaunchRunRes
   let answer = ''
   if (typeof parsed === 'string') {
     answer = parsed
+  } else if (parsed && typeof parsed === 'object' && parsed.error && typeof parsed.error.kind === 'string') {
+    // dshd prints a refusal as {"error": {"kind", "message", "hint"}} (FACT: dshd 0.1.0, 11 Nov).
+    answer = parsed.error.kind
   } else if (parsed && typeof parsed === 'object') {
     answer =
       parsed.status ??

@@ -380,3 +380,14 @@ describe('C5.10 launchRun', () => {
     expect(res.outcome).toBe('harvest')
   })
 })
+
+describe('launchRun on the output dshd 0.1.0 prints (captured 11 Nov)', () => {
+  const run = (code: number, stdout: string) => launchRun({ argv: ['/bin/dshd', 'run'], env: {}, exec: async () => ({ code, stdout }) })
+  it('reads a created instance as watch, and the error kinds of refusals', async () => {
+    expect((await run(0, JSON.stringify({ outcome: 'created', name: 'x', state: 'running', result: 'success' }))).outcome).toBe('watch')
+    expect((await run(4, JSON.stringify({ error: { kind: 'task-already-ran', message: 'already ran', hint: 'dshd start --rerun x' } }))).outcome).toBe('harvest')
+    expect(await run(4, JSON.stringify({ error: { kind: 'exists-different-recipe', message: 'differs', hint: 'dshd rm x' } })))
+      .toMatchObject({ outcome: 'held', detail: 'exists-different-recipe' })
+    expect((await run(7, JSON.stringify({ error: { kind: 'systemd-unavailable', message: 'no bus' } }))).outcome).toBe('retry')
+  })
+})
