@@ -59,7 +59,7 @@ describe('watch (C5.11)', () => {
     await w.watch()
     expect(w.calls.filter(args => args[0] === 'stop')).toEqual([['stop', '--json', NAME]])
     expect(occurrenceRow(store, KEY)).toMatchObject({ state: 'failed', reason: 'timeout' })
-    expect(attemptsOf(store, KEY)[0].ended_at).not.toBeNull()
+    expect(attemptsOf(store, KEY)[0]!.ended_at).not.toBeNull()
   })
   it('a workflow that cannot be shown mid-run leaves the run alone instead of timing it out (evaluation review)', async () => {
     const w = world({ started: '2026-11-12T01:00:00.000Z', get: running, show: async () => { throw new Error('scheduled show timed out') } })

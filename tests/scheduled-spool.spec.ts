@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { Store } from '../src/app/store.ts'
-import { intakeOnce } from '../src/scheduled/intake.ts'
+import { intakeOnce, type Log } from '../src/scheduled/intake.ts'
 import { ensureSpool, listIncoming, parseRecord } from '../src/scheduled/spool.ts'
 import { censusOf, quiet, record, recorder, shown, spoolFile } from './scheduled-fixtures.ts'
 
@@ -13,7 +13,7 @@ let spool: string
 let store: Store
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'sched-spool-')); spool = join(dir, 'spool'); ensureSpool(spool); store = new Store(join(dir, 'db.sqlite')) })
 afterEach(() => { store.close(); rmSync(dir, { recursive: true, force: true }) })
-const deps = (log: (event: never, fields?: never) => void = quiet) => ({ spoolDir: spool, store, receive: () => 'stored' as const, show: async () => shown(),
+const deps = (log: Log = quiet) => ({ spoolDir: spool, store, receive: () => 'stored' as const, show: async () => shown(),
   agencies: [{ id: 'master', root: dir, enabled: true }], log, now: () => new Date('2026-11-12T00:00:10Z'), machineId: () => 'm1' })
 /** The heartbeat's hand-off: write under tmp/, then link() into incoming/ (DESIGN 5.3). */
 function handOff(name: string, body: unknown): void {

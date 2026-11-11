@@ -9,7 +9,7 @@ const trigger = (workflow = 'master:nightly', occurrence = `${workflow}@2026-11-
   human: false, standing: true, at: '2026-11-12T00:00:00.000Z', text: 'run', meta: { workflow, occurrence, name: 'Nightly' } })
 const ticket = (id: string, workflow: string, patch: Partial<Ticket> = {}): Ticket => ({ id, createdAt: '2026-11-11T00:00:00.000Z',
   mandate: { basis: { via: 'schedule', workflow } }, assignments: [], inputs: [], undelivered: [], ...patch } as unknown as Ticket)
-function host(tickets: Ticket[] = [], decide = vi.fn(() => ({ kind: 'accept', ticketId: 'T-new' })), triggers: Trigger[] = []) {
+function host(tickets: Ticket[] = [], decide: ReturnType<typeof vi.fn> = vi.fn(() => ({ kind: 'accept', ticketId: 'T-new' })), triggers: Trigger[] = []) {
   const attach = vi.fn((ticketId: string) => tickets.find(t => t.id === ticketId)!)
   const r = recorder()
   return { r, decide, attach, host: { engine: { decide, attach }, log: r.log as never, defer: (run: () => void) => run(),

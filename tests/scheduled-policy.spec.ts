@@ -36,7 +36,7 @@ describe('authority (C5.1)', () => {
     expect(settingsPolicy(settings, sources, []).revalidate(mandate('master'))).toBe(false)
   })
   it('a scheduled Trigger that is not standing is not given a schedule basis', () => {
-    const notStanding = { ...occurrence('master', 'master:nightly'), standing: false }
+    const notStanding = { ...occurrence('master', 'master:nightly'), standing: false } as unknown as Trigger
     const gated = policy.gate(notStanding, undefined as never, [])
     expect(gated.admissible && (gated.basis as { via?: string }).via === 'schedule').toBe(false)
   })
