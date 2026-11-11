@@ -1,0 +1,21 @@
+#!/usr/bin/env node
+// floor upkeep [--dry-run] [--json]: asks the running Scheduled floor to prune by its retention rules and report anomalies
+// (DESIGN 7.6, C9.5, C9.6). The floor does the work (it owns the database); this posts to its panel API on 127.0.0.1.
+const [verb, ...rest] = process.argv.slice(2)
+if (verb !== 'upkeep' || rest.some(arg => !['--dry-run', '--json'].includes(arg))) {
+  process.stderr.write('usage: floor upkeep [--dry-run] [--json]\n')
+  process.exit(2)
+}
+const base = (process.env.SCHEDULED_FLOOR_URL || 'http://127.0.0.1:3082').replace(/\/+$/u, '')
+const dryRun = rest.includes('--dry-run'), json = rest.includes('--json')
+try {
+  const response = await fetch(`${base}/orchestrator/api/scheduled/upkeep`, { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ dryRun }), signal: AbortSignal.timeout(300_000) })
+  const text = await response.text()
+  if (!response.ok) { process.stderr.write(`floor upkeep: HTTP ${response.status}: ${text}\n`); process.exit(1) }
+  const report = JSON.parse(text)
+  process.stdout.write(json ? `${JSON.stringify(report)}\n` : `${report.summary}\n`)
+} catch (error) {
+  process.stderr.write(`floor upkeep: the floor is not reachable at ${base}: ${error instanceof Error ? error.message : String(error)}\n`)
+  process.exit(7)
+}

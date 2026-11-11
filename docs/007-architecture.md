@@ -367,6 +367,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/scheduled/spool.ts` | The heartbeat spool, version 1: record schemas, order, done and rejected moves |
 | `src/scheduled/store.ts` | Accessors of the `sched_workflows`, `sched_occurrences` and `sched_attempts` tables |
 | `src/scheduled/verdict.ts` | `verdictOf`, a `dshd get` record as a verdict |
+| `src/scheduled/upkeep.ts` | `upkeep`, the floor's retention and anomaly report behind `bin/floor upkeep` |
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
 | `src/infra/commands.ts` | `Commands`, the CLI transport: `run`; `api` and `pages`, limited to the configured repository and validated; `lark` as the bot; `git`. `CliError` carries the code a command's output reports, such as a GitHub HTTP status, and a command that prints nothing fails with how it ended, never with its arguments; `validItems` skips and counts the malformed items of a list |
 | `src/infra/environment.ts` | The agent's process environment: command shims, the git configuration and credential helper, `runAsWorker`, and the checks of the environment and of a Ticket's directory |
@@ -467,6 +468,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/scheduled-resume.spec.ts` | Resume of open attempts after a restart |
 | `tests/scheduled-settle.spec.ts` | Verdicts and settling an attempt |
 | `tests/scheduled-standing.spec.ts` | Standing Triggers and Inputs in the core |
+| `tests/scheduled-upkeep.spec.ts` | `floor upkeep`: what retention removes, what it only reports, and no `reset-failed` |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
 
 `tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.

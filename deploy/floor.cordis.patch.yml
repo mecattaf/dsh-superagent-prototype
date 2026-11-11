@@ -2,6 +2,8 @@
 - id: dsh-superagent
   config:
     stateDir: /home/tom/.agency/state/master
+    # Floor mode (DESIGN 7): spool intake, DshdExecutor, no GitHub or Feishu setup. Empty agencies = master at ~.
+    scheduled: { enabled: true }
 - id: agent-default-model
   config: { provider: claude, model: opus, reasoningEffort: medium }
 - id: llm-claude
@@ -19,4 +21,9 @@
 - id: schedule
   disabled: true
 - id: ui-schedule
+  disabled: true
+# The floor has no GitHub or Feishu Source (DESIGN 10.3); the bundle inserts both watch plugins.
+- id: dsh-superagent-github
+  disabled: true
+- id: dsh-superagent-feishu
   disabled: true

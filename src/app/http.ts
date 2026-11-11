@@ -1,4 +1,9 @@
 /** Loopback-only management HTTP routes with same-origin enforcement for the web panel. */
+import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { upkeep } from '../scheduled/upkeep.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -106,7 +111,9 @@ export function stateView(runtime: HttpHost) {
   const settings = runtime.store.settings()
   return { setup: setupView(runtime), load: { ...executorLoad(runtime.store, runtime.executor.activeCount()),
     maxWorkers: settings.executor.maxWorkers },
-    masterId: runtime.masterId, paused: settings.paused, health: runtime.health }
+    masterId: runtime.masterId, paused: settings.paused, health: runtime.health,
+    // The heartbeat updates the floor only while no Eval is in progress (DESIGN 8.1 update rule).
+    scheduled: { evalInProgress: runtime.store.threads.active().some(thread => thread.evaluating !== undefined) } }
 }
 const views = (runtime: HttpHost): ViewHost => ({ store: runtime.store, sources: runtime.sources, links: runtime.links() })
 const setupState = (runtime: HttpHost): SetupState => ({ deployment: runtime.configured() ? runtime.deployment : undefined,
@@ -154,6 +161,16 @@ function routes(runtime: HttpHost): Routes {
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   return {
     'GET state': () => stateView(runtime),
+    // `floor upkeep` (bin/floor): retention and the anomaly report of the Scheduled floor (C9.5, C9.6).
+    'POST scheduled/upkeep': async input => {
+      const scheduled = runtime.machine.scheduled
+      if (!scheduled?.enabled) throw new RouteError(404, 'Not a Scheduled floor')
+      const { dryRun } = z.object({ dryRun: z.boolean().default(false) }).parse(await input.body(4096) ?? {})
+      const home = process.env.HOME ?? '/home/tom'
+      return await upkeep({ store, stateDir: runtime.machine.stateDir, dryRun, dshd: args => runFile(scheduled.dshd, args),
+        deployDir: join(packageRoot(), 'deploy'), profilesDir: join(home, '.dsh', 'profiles'),
+        gcrootsDir: '/nix/var/nix/gcroots/auto' })
+    },
     'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
       executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
     'GET search': ({ query }) => search(views(runtime), query.q ?? '', runtime.sourceLinks),
@@ -244,4 +261,18 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
       } catch (error) { json(res, ...failure(error)) }
     } })]
   return () => { for (const dispose of disposers) dispose() }
+}
+/** Runs one CLI and resolves with its exit code and stdout (dshd prints JSON on both success and refusal). */
+function runFile(file: string, args: string[]): Promise<{ code: number; stdout: string }> {
+  return new Promise(resolve => {
+    execFile(file, args, { maxBuffer: 16 * 1024 * 1024, timeout: 120_000 }, (error, stdout) => {
+      resolve({ code: error ? (typeof (error as { code?: unknown }).code === 'number' ? (error as { code: number }).code : 1) : 0, stdout: String(stdout) })
+    })
+  })
+}
+/** The package's root: the nearest directory above this module holding a package.json (src/app in a checkout, lib in a build). */
+function packageRoot(): string {
+  let directory = dirname(fileURLToPath(import.meta.url))
+  while (!existsSync(join(directory, 'package.json')) && dirname(directory) !== directory) directory = dirname(directory)
+  return directory
 }

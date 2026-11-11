@@ -18,11 +18,11 @@ const rowOf = (rows: readonly Row[], id: string) => rows.find(row => row.id === 
 describe('deploy/floor.cordis.patch.yml', () => {
   it('has exactly the rows of DESIGN 9.3, in order', async () => {
     const rows_ = await rows('floor.cordis.patch.yml')
-    expect(rows_.map(row => row.id)).toEqual(['dsh-superagent', 'agent-default-model', 'llm-claude', 'webserver', 'schedule', 'ui-schedule'])
+    expect(rows_.map(row => row.id)).toEqual(['dsh-superagent', 'agent-default-model', 'llm-claude', 'webserver', 'schedule', 'ui-schedule', 'dsh-superagent-github', 'dsh-superagent-feishu'])
   })
   it('points the bundle at the master state directory and the Claude preset at the subscription guard', async () => {
     const rows_ = await rows('floor.cordis.patch.yml')
-    expect(rowOf(rows_, 'dsh-superagent').config).toEqual({ stateDir: '/home/tom/.agency/state/master' })
+    expect(rowOf(rows_, 'dsh-superagent').config).toEqual({ stateDir: '/home/tom/.agency/state/master', scheduled: { enabled: true } })
     expect(rowOf(rows_, 'agent-default-model').config).toEqual({ provider: 'claude', model: 'opus', reasoningEffort: 'medium' })
     const llm = rowOf(rows_, 'llm-claude').config!
     // The design writes the path as a line continuation; the parsed value is one path ending in the guard's binary.
@@ -36,6 +36,8 @@ describe('deploy/floor.cordis.patch.yml', () => {
     expect(rowOf(rows_, 'webserver').config).toEqual({ port: 3082 })
     expect(rowOf(rows_, 'schedule')).toEqual({ id: 'schedule', disabled: true })
     expect(rowOf(rows_, 'ui-schedule')).toEqual({ id: 'ui-schedule', disabled: true })
+    expect(rowOf(rows_, 'dsh-superagent-github')).toEqual({ id: 'dsh-superagent-github', disabled: true })
+    expect(rowOf(rows_, 'dsh-superagent-feishu')).toEqual({ id: 'dsh-superagent-feishu', disabled: true })
   })
 })
 

@@ -162,6 +162,7 @@ const stateView = (): StateView => ({
   masterId: 'master', paused: server.settings.paused,
   // The panel does not read health; the service script does.
   health: {},
+  scheduled: { evalInProgress: false },
 })
 const settingsView = (): ApiResponse<'GET settings'> => ({
   policyVersion: 'abcdef1234567890',
@@ -292,6 +293,10 @@ const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET state': { answer: stateView },
+  'POST scheduled/upkeep': { body: true, answer: ({ body }) => ({ dryRun: body.dryRun ?? false,
+    removed: { instances: [], runDirs: [], spoolFiles: 0, rows: 0 },
+    anomalies: { orphanInstances: [], failedUnits: [], pastDeadline: [], rejectedSpool: [], invalidWorkflows: [], profileDrift: [], gcRoots: null },
+    summary: 'Nothing to do.' }) },
   'GET overview': { answer: overviewView },
   'GET search': { query: ['q'], answer: async ({ query }) => {
     const q = query.q ?? ''
