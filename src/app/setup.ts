@@ -7,6 +7,7 @@ import { SETUP_FIELDS, resolveDeployment, resolveFeishuBot, workerProbe, type De
 import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
 import type { Settings, SettingsBlock } from '../policy.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
+import { ensureSpool } from '../scheduled/spool.ts'
 
 export interface SetupHost {
   readonly context: Context
@@ -102,10 +103,15 @@ export class Setup {
 }
 /**
  * The Scheduled floor has no repository or chat accounts: Setup is a check that the state directory, its spool and the
- * dshd CLI exist (DESIGN 10.3). The GitHub fields are empty, so nothing that needs them can run.
+ * dshd CLI exist (DESIGN 10.3). The GitHub fields are empty, so nothing that needs them can run. The floor makes its own
+ * spool when the state directory exists: a floor started before the first tick would otherwise wait in setupPending
+ * for good, since Setup is not retried (evaluation review, C4.2).
  */
 export function floorDeployment(machine: Machine): Deployment {
   const scheduled = machine.scheduled!
+  if (existsSync(machine.stateDir)) {
+    try { ensureSpool(join(machine.stateDir, 'spool')) } catch { /* reported as missing below */ }
+  }
   const missing = [machine.stateDir, join(machine.stateDir, 'spool'), scheduled.dshd, scheduled.cli].filter(path => !existsSync(path))
   if (missing.length) throw new SetupError('environmentFailed', { output: `The Scheduled floor needs: ${missing.join(', ')}` })
   return { ...machine, repository: '', github: { cli: '', login: 'scheduled-floor', noreply: '' } }

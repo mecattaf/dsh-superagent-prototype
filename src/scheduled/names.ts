@@ -39,7 +39,9 @@ export function formatInstantUtc(instant: Date | string): string {
  * - run-now: `now-<agency>-<stem>-<yyyymmdd>t<hhmm>z-<last 6 of ULID, lowercase>`
  * - rerun k >= 1: appends `-r<k>`
  * - `/` in agency id becomes `-`
- * - names over 63 bytes are cut to 63 bytes ending in 4 hex of sha256 of the workflow id (`<agency>:<stem>`)
+ * - names over 63 bytes are cut to 63 bytes ending in 4 hex of sha256 of the workflow id (`<agency>:<stem>`); the cut
+ *   falls in `<agency>-<stem>`, so the time, ULID and `-r<k>` stay and no two occurrences, attempts or reruns share a
+ *   name (evaluation review, C5.6: cutting the whole name at 59 bytes made them collide)
  * - always matches `^[a-z0-9]([a-z0-9_-]{0,61}[a-z0-9])?$`
  */
 export function instanceName(options: InstanceNameOptions): string {
@@ -55,31 +57,23 @@ export function instanceName(options: InstanceNameOptions): string {
   const timePart = formatInstantUtc(options.instant)
   const isNow = options.kind === 'now' || options.kind === 'manual' || Boolean(options.ulid && options.kind !== 'scheduled')
 
-  let baseName: string
-  if (isNow) {
-    const ulidPart = options.ulid ? options.ulid.slice(-6).toLowerCase() : ''
-    baseName = ulidPart
-      ? `now-${cleanAgency}-${cleanStem}-${timePart}-${ulidPart}`
-      : `now-${cleanAgency}-${cleanStem}-${timePart}`
-  } else {
-    baseName = `sch-${cleanAgency}-${cleanStem}-${timePart}`
-  }
+  const head = `${isNow ? 'now' : 'sch'}-${cleanAgency}-${cleanStem}`
+  const ulidPart = isNow && options.ulid ? `-${options.ulid.slice(-6).toLowerCase()}` : ''
 
   // Rerun suffix: -r<k> for rerun k >= 1
   const k = options.rerun !== undefined
     ? options.rerun
     : (options.attempt !== undefined && options.attempt > 1 ? options.attempt - 1 : 0)
 
-  let name = k >= 1 ? `${baseName}-r${k}` : baseName
+  const tail = `-${timePart}${ulidPart}${k >= 1 ? `-r${k}` : ''}`
+  const name = `${head}${tail}`
+  if (name.length <= 63) return name
 
-  // If over 63 bytes, cut and end in four hex of sha256 of the workflow id (<agency id>:<stem>)
-  if (name.length > 63) {
-    const workflowId = `${rawAgency}:${options.stem}`
-    const hash4 = createHash('sha256').update(workflowId).digest('hex').slice(0, 4)
-    name = `${name.slice(0, 59)}${hash4}`
-  }
-
-  return name
+  // Over 63 bytes: cut `<agency>-<stem>`, keep the tail, and end in four hex of sha256 of the workflow id.
+  const workflowId = `${rawAgency}:${options.stem}`
+  const hash4 = createHash('sha256').update(workflowId).digest('hex').slice(0, 4)
+  const kept = `${tail}-${hash4}`
+  return `${head.slice(0, 63 - kept.length)}${kept}`
 }
 
 export interface ScheduledLabels {

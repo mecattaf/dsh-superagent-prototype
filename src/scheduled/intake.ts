@@ -3,7 +3,7 @@
  * `sched_occurrences` row; census files reconcile `sched_workflows` and re-admit waiting occurrences. The census is the
  * floor's only clock for scheduling decisions.
  */
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { key, type ReceiveResult, type Trigger } from '../core/index.ts'
 import type { Store } from '../app/store.ts'
@@ -81,14 +81,22 @@ export async function intakeOnce(deps: IntakeDeps): Promise<IntakeResult> {
   const log = deps.log ?? defaultLog
   const now = deps.now ?? (() => new Date())
   const result: IntakeResult = { processed: 0, rejected: 0 }
+  // A file is moved aside at most once; a failure to move it is logged and never stops the pass (second review, 12 Nov).
+  const setAside = (name: string, error: string): void => {
+    try { reject(deps.spoolDir, name, error) } catch (moveError) { log('error', { file: name, reject: String(moveError) }) }
+    log('reject', { file: name, error })
+    result.rejected++
+  }
   for (const name of listIncoming(deps.spoolDir)) {
     let text: string
-    try { text = readFileSync(join(deps.spoolDir, 'incoming', name), 'utf8') } catch { continue }
+    try { text = readFileSync(join(deps.spoolDir, 'incoming', name), 'utf8') } catch (error) {
+      // Gone meanwhile: nothing to do. Unreadable (a directory, no permission): set aside, never retried each poll.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') setAside(name, `unreadable: ${(error as NodeJS.ErrnoException).code ?? String(error)}`)
+      continue
+    }
     const parsed = parseRecord(text)
     if (!parsed.ok) {
-      reject(deps.spoolDir, name, parsed.error)
-      log('reject', { file: name, error: parsed.error })
-      result.rejected++
+      setAside(name, parsed.error)
       continue
     }
     const record = parsed.record
@@ -106,8 +114,10 @@ export async function intakeOnce(deps: IntakeDeps): Promise<IntakeResult> {
       result.processed++
       continue
     }
+    let handedOffMs: number | undefined
+    try { handedOffMs = statSync(join(deps.spoolDir, 'incoming', name)).mtimeMs } catch { /* gone: the move below fails and logs */ }
     try {
-      await occurrenceFile(deps, record, now(), log)
+      await occurrenceFile(deps, record, now(), log, handedOffMs)
       moveDone(deps.spoolDir, name)
       result.processed++
     } catch (error) {
@@ -118,7 +128,10 @@ export async function intakeOnce(deps: IntakeDeps): Promise<IntakeResult> {
   return result
 }
 
-async function occurrenceFile(deps: IntakeDeps, record: OccurrenceRecord | ManualRecord, at: Date, log: Log): Promise<void> {
+/** How long a failing `scheduled show` is retried, poll after poll, before the occurrence is held or refused (evaluation review, C4.8). */
+export const SHOW_RETRY_MS = 600_000
+
+async function occurrenceFile(deps: IntakeDeps, record: OccurrenceRecord | ManualRecord, at: Date, log: Log, handedOffMs?: number): Promise<void> {
   const store = deps.store
   const agencyId = agencyOf(record.workflow)
   const listed = deps.agencies.find(agency => agency.id === agencyId && agency.enabled)
@@ -134,6 +147,9 @@ async function occurrenceFile(deps: IntakeDeps, record: OccurrenceRecord | Manua
   }
   const shown = await deps.show(record.workflow)
   if ('error' in shown) {
+    // Most show failures pass (a timeout, a busy host): leave the file for the next poll, for up to SHOW_RETRY_MS
+    // after its hand-off; only then is the occurrence held (scheduled) or refused (manual).
+    if (handedOffMs !== undefined && at.getTime() >= handedOffMs && at.getTime() - handedOffMs < SHOW_RETRY_MS) throw new Error(`scheduled show failed, retried next poll: ${shown.error}`)
     if (record.kind === 'manual') {
       store.atomic(() => { insertOccurrence(store, { ...base, grp: record.workflow, deadline: null, state: 'refused', reason: `show: ${shown.error}`.slice(0, 300) }) })
       log('intake', { occ: record.occurrence, state: 'refused', reason: 'show-failed' })

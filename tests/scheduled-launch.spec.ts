@@ -268,7 +268,7 @@ describe('C5.9 runEnv', () => {
   })
 })
 
-describe('C5.10 launchRun', () => {
+describe('C5.10 launchRun: dshd outcomes', () => {
   const dummyArgv = ['/run/current-system/sw/bin/dshd', 'run', '--bg', '--json', '--name', 'test-run']
   const dummyEnv = { HOME: '/home/tom' }
 
