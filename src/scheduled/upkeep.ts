@@ -1,6 +1,6 @@
 /**
  * `floor upkeep` (DESIGN 7.6 "Retention", C9.5, C9.6): prunes what the retention rules allow and reports, never fixes,
- * the anomalies. Every removal goes through `dshd rm --json`; the floor never runs `reset-failed` (C5.17).
+ * the anomalies. Every removal goes through `dshd rm --json`; the floor never resets a failed unit (C5.17).
  */
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
