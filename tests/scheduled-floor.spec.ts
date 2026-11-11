@@ -314,6 +314,20 @@ describe('review fixes (12 Nov): run now on a paused workflow, censuses, refusal
     expect(w.store.tickets.list()[0]?.ended).toMatchObject({ outcome: 'dropped' })
     w.store.close()
   })
+  it('sets an unreadable entry aside once, and a failed set-aside never stops the pass (second review)', async () => {
+    const w = floorWorld(() => ({ code: 0, stdout: '{}' }))
+    mkdirSync(join(w.spool, 'incoming', 'odd.json'))
+    spoolFile(w.spool, 'zz-census@1.json', census())
+    expect(await w.intake()).toMatchObject({ processed: 1, rejected: 1 })
+    expect(readFileSync(join(w.spool, 'rejected', 'odd.json.error'), 'utf8')).toContain('unreadable: EISDIR')
+    // rejected/ cannot be made: the bad file stays, the pass still takes the good one.
+    rmSync(join(w.spool, 'rejected'), { recursive: true }); writeFileSync(join(w.spool, 'rejected'), 'not a directory')
+    spoolFile(w.spool, 'a-bad.json', { v: 2, kind: 'schedule' })
+    spoolFile(w.spool, 'zz-census@2.json', census())
+    expect(await w.intake()).toMatchObject({ processed: 1, rejected: 1 })
+    expect(readdirSync(join(w.spool, 'incoming'))).toEqual(['a-bad.json'])
+    w.store.close()
+  })
   it('reads a dshd refusal printed on stderr, and a killed dshd as no success', async () => {
     const refusal = JSON.stringify({ error: { kind: 'invalid-name', message: 'invalid instance name', hint: 'names match' } })
     expect(await launchRun({ argv: ['dshd', 'run'], env: {}, exec: async () => ({ code: 2, stdout: '', stderr: refusal }) }))

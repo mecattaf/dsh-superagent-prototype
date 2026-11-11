@@ -81,14 +81,22 @@ export async function intakeOnce(deps: IntakeDeps): Promise<IntakeResult> {
   const log = deps.log ?? defaultLog
   const now = deps.now ?? (() => new Date())
   const result: IntakeResult = { processed: 0, rejected: 0 }
+  // A file is moved aside at most once; a failure to move it is logged and never stops the pass (second review, 12 Nov).
+  const setAside = (name: string, error: string): void => {
+    try { reject(deps.spoolDir, name, error) } catch (moveError) { log('error', { file: name, reject: String(moveError) }) }
+    log('reject', { file: name, error })
+    result.rejected++
+  }
   for (const name of listIncoming(deps.spoolDir)) {
     let text: string
-    try { text = readFileSync(join(deps.spoolDir, 'incoming', name), 'utf8') } catch { continue }
+    try { text = readFileSync(join(deps.spoolDir, 'incoming', name), 'utf8') } catch (error) {
+      // Gone meanwhile: nothing to do. Unreadable (a directory, no permission): set aside, never retried each poll.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') setAside(name, `unreadable: ${(error as NodeJS.ErrnoException).code ?? String(error)}`)
+      continue
+    }
     const parsed = parseRecord(text)
     if (!parsed.ok) {
-      reject(deps.spoolDir, name, parsed.error)
-      log('reject', { file: name, error: parsed.error })
-      result.rejected++
+      setAside(name, parsed.error)
       continue
     }
     const record = parsed.record
