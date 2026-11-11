@@ -55,6 +55,8 @@ export interface HttpHost {
   configured(): boolean
   links(): LinkTarget
   ticketEnvironment(ticket: Ticket): Variable[]
+  /** The Scheduled floor's health, on the floor only (DESIGN 7.2, C4.12). */
+  scheduledHealth?(): { machineChanged: boolean }
   checkSetup(): void
   requestPass(): void
   models(): Promise<ModelCatalog>
@@ -112,8 +114,15 @@ export function stateView(runtime: HttpHost) {
   return { setup: setupView(runtime), load: { ...executorLoad(runtime.store, runtime.executor.activeCount()),
     maxWorkers: settings.executor.maxWorkers },
     masterId: runtime.masterId, paused: settings.paused, health: runtime.health,
-    // The heartbeat updates the floor only while no Eval is in progress (DESIGN 8.1 update rule).
-    scheduled: { evalInProgress: runtime.store.threads.active().some(thread => thread.evaluating !== undefined) } }
+    scheduled: scheduledView(runtime) }
+}
+/**
+ * The state view's `scheduled` part: whether an Eval is in progress (the heartbeat updates the floor only while none is,
+ * DESIGN 8.1 update rule) and `machine_changed` while intake is paused on another machine's census (DESIGN 7.2, C4.12).
+ */
+export function scheduledView(runtime: Pick<HttpHost, 'store' | 'scheduledHealth'>) {
+  return { evalInProgress: runtime.store.threads.active().some(thread => thread.evaluating !== undefined),
+    machine_changed: runtime.scheduledHealth?.().machineChanged ?? false }
 }
 const views = (runtime: HttpHost): ViewHost => ({ store: runtime.store, sources: runtime.sources, links: runtime.links() })
 const setupState = (runtime: HttpHost): SetupState => ({ deployment: runtime.configured() ? runtime.deployment : undefined,

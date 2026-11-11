@@ -1,9 +1,11 @@
-/** Another machine's census pauses intake (C4.12, the intake half). PROVE P4.9. */
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
+/** Another machine's census pauses intake and the state view reports machine_changed (C4.12). PROVE P4.9. */
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Store } from '../src/app/store.ts'
+import { scheduledView } from '../src/app/http.ts'
+import { Floor, recordedMachineId } from '../src/scheduled/floor.ts'
 import { intakeOnce } from '../src/scheduled/intake.ts'
 import { ensureSpool } from '../src/scheduled/spool.ts'
 import { censusOf, quiet, record, shown, spoolFile } from './scheduled-fixtures.ts'
@@ -33,5 +35,27 @@ describe('machine id (C4.12)', () => {
     spoolFile(spool, 'census@20261112T0000Z.json', censusOf(dir, [{}]))
     expect((await intakeOnce(deps)).paused).toBeUndefined()
     expect(readdirSync(join(spool, 'incoming'))).toEqual([])
+  })
+  it('the floor compares with heartbeat.json\'s recorded id, and the state view reports machine_changed while paused', async () => {
+    expect(recordedMachineId(dir)).toBeUndefined()
+    writeFileSync(join(dir, 'heartbeat.json'), JSON.stringify({ v: 1, machineId: 'm1', lastTick: '2026-11-12T00:00:00.000Z' }))
+    expect(recordedMachineId(dir)).toBe('m1')
+    const floor = new Floor({
+      config: { enabled: true, pollSeconds: 5, cli: '/bin/false', dshd: '/bin/false', maxWorkers: 1, agencies: [{ id: 'master', root: dir, enabled: true }] },
+      stateDir: dir, store, effects: { handle: () => undefined } as never, engine: () => ({}) as never, receive: () => 'stored',
+      paused: () => false, closing: () => false, other: {} as never,
+    })
+    const view = () => scheduledView({ store, scheduledHealth: () => ({ machineChanged: floor.machineChanged }) })
+    expect(view()).toEqual({ evalInProgress: false, machine_changed: false })
+    spoolFile(spool, 'census@20261112T0000Z.json', censusOf(dir, [{}], { machineId: 'm2' }))
+    await floor.poll()
+    expect(floor.machineChanged).toBe(true)
+    expect(view().machine_changed).toBe(true)
+    expect(readdirSync(join(spool, 'incoming'))).toEqual(['census@20261112T0000Z.json'])
+    rmSync(join(spool, 'incoming', 'census@20261112T0000Z.json'))
+    spoolFile(spool, 'census@20261112T0100Z.json', censusOf(dir, [{}]))
+    await floor.poll()
+    expect(floor.machineChanged).toBe(false)
+    expect(view().machine_changed).toBe(false)
   })
 })
