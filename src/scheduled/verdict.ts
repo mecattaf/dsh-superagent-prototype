@@ -43,7 +43,8 @@ export function verdictOf(get: DshdGet): Verdict {
   const child = get.lastRun?.child ?? null
 
   // Still running
-  if (state === 'running' || state === 'starting') return 'running'
+  // `stopping` is the stop sequence of a run still settling: look again (finding 10).
+  if (state === 'running' || state === 'starting' || state === 'stopping') return 'running'
 
   // Cut by power loss
   if (state === 'interrupted' && ending === 'interrupted') return 'cut-power'
