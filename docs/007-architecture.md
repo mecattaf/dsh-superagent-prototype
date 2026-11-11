@@ -469,6 +469,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/scheduled-settle.spec.ts` | Verdicts and settling an attempt |
 | `tests/scheduled-standing.spec.ts` | Standing Triggers and Inputs in the core |
 | `tests/scheduled-upkeep.spec.ts` | `floor upkeep`: what retention removes, what it only reports, and no `reset-failed` |
+| `tests/floor-claude.spec.ts` | `bin/floor-claude`: the subscription guard with cwd HOME, `--bare` refused, `~/.claude/settings.local.json` checked |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
 
 `tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.

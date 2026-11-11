@@ -1,0 +1,9 @@
+#!/bin/sh
+# floor-claude (DESIGN 9.3 seam S4, C7.3): the llm-claude executablePath of
+# the floor profiles. Runs the subscription guard (floor-claude.py, Agency
+# Web's guard.py minus its cwd == HOME refusal) under an explicit Python,
+# then the guard execs the pinned Claude Code. No PATH lookup: a dshd unit's
+# PATH has no python3 or claude on the NAS. Both are overridable for tests.
+user=${USER:-$(id -un)}
+exec "${FLOOR_PYTHON:-/etc/profiles/per-user/$user/bin/python3}" -I "${0%/*}/floor-claude.py" \
+  "${FLOOR_CLAUDE:-/etc/profiles/per-user/$user/bin/claude}" "$@"
