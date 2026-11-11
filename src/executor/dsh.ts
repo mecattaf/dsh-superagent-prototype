@@ -524,6 +524,8 @@ export class DshExecutor implements Executor {
   resume(): void {
     // Launch pending tickets oldest first (in acceptance order).
     for (const ticket of this.host.store.tickets.open().sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+      // Scheduled tickets run as dshd instances; DshdExecutor resumes them from its own rows.
+      if ((ticket.mandate.basis as { via?: string }).via === 'schedule') continue
       const running = runningAssignment(ticket), latest = latestAssignment(ticket)
       if (running) {
         // A restart within this process left DSH's Sessions, jobs and subagents running: they stop first. The inbox keeps an

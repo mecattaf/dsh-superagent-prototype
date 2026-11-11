@@ -352,6 +352,21 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/views/settings.ts` | The settings page's view: each block with its revision, each Source's settings with its kind's form, and the execution environment |
 | `src/app/views/overview.ts` | The overview: Tickets that need a person, problems, the last day's flow and the Executor's load |
 | `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
+| `src/executor/dshd.ts` | `DshdExecutor`, which runs each attempt of a scheduled occurrence as one dshd instance (`sched-launch` and `watch` effects), and `RoutingExecutor`, which sends Tickets with a `schedule` Mandate there and every other Ticket to the DshExecutor |
+| `src/scheduled/admission.ts` | `admit`, the six admission steps of a scheduled occurrence in order |
+| `src/scheduled/cli.ts` | `schedCli`, the floor's calls to the `scheduled` CLI: `show`, `env`, `gate`, `check` |
+| `src/scheduled/default-route.ts` | The default route: an `unavailable` Eval of a standing scheduled Trigger accepts it (title the workflow name) or attaches it to the workflow's Ticket |
+| `src/scheduled/floor.ts` | `Floor`, the Scheduled floor's composition: spool poll, DshdExecutor, default route, resume |
+| `src/scheduled/harvest.ts` | `harvest`: a run's final answer, invocation and `report.json` |
+| `src/scheduled/intake.ts` | Spool intake: occurrence and manual files become a standing Trigger and a `sched_occurrences` row; the census reconcile |
+| `src/scheduled/launch.ts` | `renderTask`, `writeTaskOnce`, `runEnv`, `runArgv` and `launchRun`, one dshd launch |
+| `src/scheduled/log.ts` | `floorLog`, the one-line `floor:` decision log |
+| `src/scheduled/names.ts` | `instanceName` and `labels` of a scheduled run |
+| `src/scheduled/resume.ts` | `planResume`, what each open attempt needs after a floor restart |
+| `src/scheduled/settle.ts` | `settle`, an ended attempt's verdict, report and check into an occurrence state |
+| `src/scheduled/spool.ts` | The heartbeat spool, version 1: record schemas, order, done and rejected moves |
+| `src/scheduled/store.ts` | Accessors of the `sched_workflows`, `sched_occurrences` and `sched_attempts` tables |
+| `src/scheduled/verdict.ts` | `verdictOf`, a `dshd get` record as a verdict |
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
 | `src/infra/commands.ts` | `Commands`, the CLI transport: `run`; `api` and `pages`, limited to the configured repository and validated; `lark` as the bot; `git`. `CliError` carries the code a command's output reports, such as a GitHub HTTP status, and a command that prints nothing fails with how it ended, never with its arguments; `validItems` skips and counts the malformed items of a list |
 | `src/infra/environment.ts` | The agent's process environment: command shims, the git configuration and credential helper, `runAsWorker`, and the checks of the environment and of a Ticket's directory |
@@ -443,6 +458,15 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/draft.spec.ts`, `tests/prompt-config.spec.ts`, `tests/markdown.spec.ts`, `tests/marks.spec.ts` | Draft states, merges and the save bar's line; the prompt configuration by section and the line diff; the Markdown subset and its links; the mark of every state the views classify |
 | `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |
+| `tests/scheduled-deploy.spec.ts` | The floor and floor-worker DSH profile patches |
+| `tests/scheduled-floor.spec.ts` | Authority of scheduled Triggers, admission order, spool intake, and one occurrence end to end through the default route, launch, watch and settle |
+| `tests/scheduled-launch.spec.ts` | task.md, the run environment, the dshd argv and launch outcomes |
+| `tests/scheduled-log.spec.ts` | The `floor:` log line |
+| `tests/scheduled-migration.spec.ts` | Migration 12 and the `sched_*` accessors |
+| `tests/scheduled-names.spec.ts` | Scheduled instance names and labels |
+| `tests/scheduled-resume.spec.ts` | Resume of open attempts after a restart |
+| `tests/scheduled-settle.spec.ts` | Verdicts and settling an attempt |
+| `tests/scheduled-standing.spec.ts` | Standing Triggers and Inputs in the core |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
 
 `tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.

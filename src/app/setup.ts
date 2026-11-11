@@ -1,4 +1,6 @@
 /** Probes repository and account CLIs, configures the worker execution environment and command shims, and tracks setup readiness. */
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { UserError } from '../core/index.ts'
 import { SETUP_FIELDS, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
@@ -74,6 +76,7 @@ export class Setup {
     return workerProbe(context.subprocess, machine.stateDir, machine.stateDir, lifetime)
   }
   private async resolve(settings: Settings): Promise<Deployment> {
+    if (this.host.machine.scheduled?.enabled) return floorDeployment(this.host.machine)
     const { context, machine, lifetime } = this.host
     const probe = this.probe()
     const deployment = await resolveDeployment(machine, settings.sources.github?.config, probe)
@@ -96,4 +99,14 @@ export class Setup {
     })
     return resolved
   }
+}
+/**
+ * The Scheduled floor has no repository or chat accounts: Setup is a check that the state directory, its spool and the
+ * dshd CLI exist (DESIGN 10.3). The GitHub fields are empty, so nothing that needs them can run.
+ */
+export function floorDeployment(machine: Machine): Deployment {
+  const scheduled = machine.scheduled!
+  const missing = [machine.stateDir, join(machine.stateDir, 'spool'), scheduled.dshd, scheduled.cli].filter(path => !existsSync(path))
+  if (missing.length) throw new SetupError('environmentFailed', { output: `The Scheduled floor needs: ${missing.join(', ')}` })
+  return { ...machine, repository: '', github: { cli: '', login: 'scheduled-floor', noreply: '' } }
 }

@@ -20,13 +20,28 @@ export const Config = s.object({
     .description('Pages of thread context one assessment may read.').volatile(),
   admissionContextTimeoutMs: s.number().min(LIMITS.admissionContextTimeoutMs.min).max(LIMITS.admissionContextTimeoutMs.max).step(1)
     .default(15000).description('Time limit of one context read during an assessment, in milliseconds.').volatile(),
+  scheduled: s.object({
+    enabled: s.boolean().default(false).description('Run as the Scheduled floor: spool intake, DshdExecutor, no GitHub or Feishu setup.'),
+    pollSeconds: s.number().min(1).max(3600).step(1).default(5).description('Spool poll interval, in seconds.'),
+    cli: s.string().default('/etc/profiles/per-user/tom/bin/scheduled').description('The scheduled CLI.'),
+    dshd: s.string().default('/run/current-system/sw/bin/dshd').description('The dshd CLI.'),
+    maxWorkers: s.number().min(1).max(16).step(1).default(2).description('Scheduled runs at once.'),
+    // Items are `{id, root, enabled}`; `floorConfig` checks them (a typed object schema here makes the Config type unnameable).
+    agencies: s.array(s.any()).default([]).description('Listed agencies `{id, root, enabled}`; empty means the master agency at the home directory.'),
+  }).description('Scheduled floor (DESIGN 7).'),
 })
+export interface ScheduledConfig {
+  enabled: boolean; pollSeconds: number; cli: string; dshd: string; maxWorkers: number
+  agencies: { id: string; root: string; enabled: boolean }[]
+}
 export type DeploymentConfig = ReturnType<typeof Config>
 export interface Machine {
   stateDir: string
   promptMaxChars: Volatile<number>
   admissionContextMaxPages: Volatile<number>
   admissionContextTimeoutMs: Volatile<number>
+  /** Present and `enabled` only on the Scheduled floor. */
+  scheduled?: ScheduledConfig
 }
 const MOVED: Record<string, string> = {
   repository: 'on the GitHub Source', branchPrefix: 'in the prepare command of the Execution settings', github: 'on the GitHub Source',
@@ -39,7 +54,19 @@ export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
   const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
-  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
+  const scheduled = (config as { scheduled?: Partial<ScheduledConfig> }).scheduled
+  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs,
+    ...scheduled?.enabled ? { scheduled: floorConfig(scheduled) } : {} }
+}
+/** Fills the floor's defaults; an empty agency list lists the master agency at the home directory (DESIGN 4). */
+export function floorConfig(config: Partial<ScheduledConfig>): ScheduledConfig {
+  const home = process.env.HOME ?? '/home/tom'
+  return { enabled: !!config.enabled, pollSeconds: config.pollSeconds ?? 5, cli: config.cli ?? '/etc/profiles/per-user/tom/bin/scheduled',
+    dshd: config.dshd ?? '/run/current-system/sw/bin/dshd', maxWorkers: config.maxWorkers ?? 2,
+    agencies: config.agencies?.length ? config.agencies.map(agency => {
+      if (typeof agency?.id !== 'string' || typeof agency.root !== 'string') throw new Error('scheduled.agencies items need string id and root')
+      return { id: agency.id, root: agency.root, enabled: agency.enabled ?? true }
+    }) : [{ id: 'master', root: home, enabled: true }] }
 }
 
 export const GithubAccountsSchema = z.object({

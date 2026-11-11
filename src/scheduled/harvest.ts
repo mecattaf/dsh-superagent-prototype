@@ -60,10 +60,22 @@ export async function harvest(opts: HarvestOptions): Promise<HarvestResult> {
   // Step 1: run dshd read --json -n 100000 <name>
   const { stdout } = await exec('dshd', ['read', '--json', '-n', '100000', name])
 
-  // Step 2: parse JSONL output
-  const lines = stdout.split('\n').filter(l => l.trim() !== '')
+  // Step 2: `dshd read --json` prints one envelope `{name, invocationId, complete, streams, lines}` whose `lines` are the
+  // run's output lines, the DSH JSON events among them (FACT: captured from dshd-release 0.2.2-rc.1, 11 Nov). A JSONL
+  // stream of events is accepted too.
+  let lines = stdout.split('\n').filter(l => l.trim() !== '')
   let complete = false
   let lastFinalLine: Record<string, unknown> | null = null
+  try {
+    const envelope = JSON.parse(stdout) as Record<string, unknown>
+    if (envelope && Array.isArray(envelope['lines'])) {
+      complete = envelope['complete'] === true
+      if (typeof envelope['invocationId'] === 'string') invocationId = envelope['invocationId']
+      lines = (envelope['lines'] as unknown[]).filter((line): line is string => typeof line === 'string')
+    }
+  } catch {
+    // JSONL or plain text
+  }
 
   for (const line of lines) {
     try {

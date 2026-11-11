@@ -164,7 +164,18 @@ export function policyEffects(tickets: readonly Ticket[], old: Settings, now: Se
   return effects
 }
 /** Build the active Policy for gating incoming Triggers and revalidating existing Ticket Mandates. */
-export function settingsPolicy(settings: Settings, sources: SourceScope): Policy {
+/**
+ * A standing `scheduled` Trigger is admissible `explicit` with basis `schedule` only when its agency is listed and enabled
+ * (C5.1); the list comes from the floor's plugin configuration, never from a Trigger.
+ */
+export function scheduleGate(trigger: Trigger, agencies: readonly { id: string; enabled: boolean }[]): GateResult {
+  const agency = trigger.actor.id
+  const workflow = typeof trigger.meta.workflow === 'string' ? trigger.meta.workflow : ''
+  const listed = agencies.some(item => item.id === agency && item.enabled)
+  if (!listed || !workflow.startsWith(`${agency}:`)) return { admissible: false, reason: 'agency_not_listed' }
+  return { admissible: true, strength: 'explicit', basis: { source: trigger.source, scope: trigger.meta, via: 'schedule', agency, workflow } }
+}
+export function settingsPolicy(settings: Settings, sources: SourceScope, agencies?: readonly { id: string; enabled: boolean }[]): Policy {
   const version = policyVersion(settings)
   const mode = settings.eval.mode
   /** Gate non-human triggers: only listed bots (as inferred candidates) and senderless system/CI events may pass; other bots are rejected. */
@@ -189,6 +200,7 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
   return {
     version, paused: settings.paused, evalTimeoutMs: settings.eval.timeoutSeconds * 1000,
     gate(trigger: Trigger, thread, tickets) {
+      if (trigger.source === 'scheduled' && trigger.standing) return scheduleGate(trigger, agencies ?? [])
       if (!trigger.human) return machineGate(trigger)
       const allowed = allowedSender(settings, trigger.actor)
       const scope = listened(sources, trigger.source, trigger.meta)
@@ -213,6 +225,8 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
     revalidate(mandate: Mandate) {
       // Revalidation rules follow docs/002 (Eval path; Resume revalidates).
       const { basis } = mandate
+      // A schedule Mandate holds while its agency stays listed and enabled.
+      if (basis.via === 'schedule') return (agencies ?? []).some(item => item.id === basis.agency && item.enabled)
       const { source } = basis
       const current = source && basis.scope ? listened(sources, source, basis.scope) : undefined
       if (current && !current.listened) return false
