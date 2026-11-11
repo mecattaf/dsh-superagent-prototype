@@ -162,7 +162,7 @@ const stateView = (): StateView => ({
   masterId: 'master', paused: server.settings.paused,
   // The panel does not read health; the service script does.
   health: {},
-  scheduled: { evalInProgress: false },
+  scheduled: { evalInProgress: false, machine_changed: false },
 })
 const settingsView = (): ApiResponse<'GET settings'> => ({
   policyVersion: 'abcdef1234567890',

@@ -16,7 +16,7 @@ import { admit } from '../scheduled/admission.ts'
 import { harvest } from '../scheduled/harvest.ts'
 import { agencyOf, FINAL, readmittable, type ShownWorkflow } from '../scheduled/intake.ts'
 import type { CensusRecord } from '../scheduled/spool.ts'
-import { launchRun, renderTask, runArgv, runEnv, writeTaskOnce, type ExecFunction } from '../scheduled/launch.ts'
+import { answersSince, launchRun, renderTask, runArgv, runEnv, writeTaskOnce, type ExecFunction } from '../scheduled/launch.ts'
 import { floorLog as defaultLog, type FloorEvent, type FloorField } from '../scheduled/log.ts'
 import { instanceName, labels } from '../scheduled/names.ts'
 import { settle, type SettleResult, type Verdict as SettleVerdict } from '../scheduled/settle.ts'
@@ -302,13 +302,17 @@ export class DshdExecutor implements Executor {
       kind: occ.kind === 'manual' ? 'manual' : 'scheduled', ...ulid ? { ulid } : {}, rerun: previous.length })
     const runDir = join(root, '.agency', 'runs', name)
     const spec = shown.spec
-    const cut = rerun ? previous.at(-1) : undefined
+    const last = rerun ? previous.at(-1) : undefined
+    // A rerun after a held, blocked attempt carries the person's answer; any other rerun follows a cut attempt (C7.10).
+    const answers = last && occ.state === 'held' ? answersSince(ticket.inputs, id => store.triggers.get(id)?.text, last.ended_at) : []
+    const cut = answers.length === 0 ? last : undefined
     const text = renderTask({
       spec: { id: occ.workflow_id, name: spec.name, revision: shown.revision, prompt: spec.job?.prompt ?? '' },
       occurrence: { key: occ.occurrence, instant: occ.instant, missed: occ.missed, ...occ.deadline ? { deadline: occ.deadline } : {} },
       attempt,
       history: previous.map(row => ({ attempt: row.attempt, instance: row.instance, ending: row.ending, report: row.report })),
       interrupted: cut ? `Attempt ${cut.attempt} (${cut.instance}) was cut; its journal: journalctl --user -u dshd@${cut.instance}.service` : null,
+      answers,
     })
     if (writeTaskOnce(runDir, text) === 'different') {
       store.atomic(() => { updateOccurrence(store, occ.occurrence, { state: 'held', reason: 'task.md differs (bug)', updated_at: iso(at) }) })

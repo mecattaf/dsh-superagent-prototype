@@ -42,6 +42,19 @@ export interface RenderTaskInput {
   interrupted?: boolean | string | null | { note?: string; [key: string]: unknown }
   check?: string | number | boolean | { exitCode?: number; stdout?: string; output?: string; [key: string]: unknown } | null
   editedSince?: string | null
+  /** A person's answers to the question a held attempt asked, for the rerun they start (C7.10). */
+  answers?: string[] | null
+}
+
+/**
+ * The texts of the human Inputs a Ticket took after `since` (the held attempt's end): what the rerun's task.md carries
+ * as the answer (DESIGN 7.6, C7.10). Context-only Inputs and the occurrences' own Triggers are not answers.
+ */
+export function answersSince(inputs: readonly { kind: string; human?: true; context?: true; at: string; triggerId?: string }[],
+  textOf: (triggerId: string) => string | undefined, since: string | null | undefined): string[] {
+  return inputs.filter(input => input.kind === 'trigger' && input.human && !input.context && input.triggerId && (!since || input.at > since))
+    .sort((a, b) => a.at.localeCompare(b.at))
+    .map(input => textOf(input.triggerId!)?.trim() ?? '').filter(text => text !== '')
 }
 
 /**
@@ -109,6 +122,16 @@ export function renderTask(input: RenderTaskInput): string {
     lines.push('```diff')
     lines.push(String(input.diff).trim())
     lines.push('```')
+  }
+
+  if (input.answers && input.answers.length > 0) {
+    lines.push('')
+    lines.push('## Answer to the held question')
+    lines.push('The previous attempt stopped blocked; this is the answer it waited for:')
+    for (const answer of input.answers) {
+      lines.push('')
+      lines.push(answer)
+    }
   }
 
   // Interrupted line if any

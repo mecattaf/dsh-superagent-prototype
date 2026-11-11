@@ -29,10 +29,20 @@ export interface FloorHost {
   other: Executor
 }
 
+/** The machine id the heartbeat recorded in `heartbeat.json` beside the spool, if any (DESIGN 7.2). */
+export function recordedMachineId(stateDir: string): string | undefined {
+  try {
+    const value = JSON.parse(readFileSync(join(stateDir, 'heartbeat.json'), 'utf8')) as { machineId?: unknown }
+    return typeof value.machineId === 'string' && value.machineId !== '' ? value.machineId : undefined
+  } catch { return undefined }
+}
+
 /** The Scheduled floor: owns the spool poll, the DshdExecutor and its routing executor, and the default route hook. */
 export class Floor {
   readonly dshd: DshdExecutor
   readonly executor: Executor
+  /** The last spool pass found a census whose machineId differs from heartbeat.json's: intake is paused (C4.12). */
+  machineChanged = false
   private timer: NodeJS.Timeout | undefined
   private polling = false
   private readonly spoolDir: string
@@ -66,12 +76,13 @@ export class Floor {
     this.polling = true
     try {
       const cli = schedCli({ path: this.host.config.cli })
-      await intakeOnce({
+      const result = await intakeOnce({
         spoolDir: this.spoolDir, store: this.host.store, receive: this.host.receive,
         show: async id => await (cli.show(id) as Promise<ShownWorkflow>).catch((error: unknown) => ({ error: String(error) })),
         agencies: this.host.config.agencies, census: async record => { await this.dshd.onCensus(record) },
-        machineId: () => { try { return readFileSync('/etc/machine-id', 'utf8').trim() } catch { return undefined } },
+        machineId: () => recordedMachineId(this.host.stateDir),
       })
+      this.machineChanged = result.paused === 'machine_changed'
     } catch (error) { floorLog('error', { poll: 'spool', error: String(error) }) }
     finally { this.polling = false }
   }

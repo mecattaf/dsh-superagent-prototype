@@ -459,16 +459,24 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/draft.spec.ts`, `tests/prompt-config.spec.ts`, `tests/markdown.spec.ts`, `tests/marks.spec.ts` | Draft states, merges and the save bar's line; the prompt configuration by section and the line diff; the Markdown subset and its links; the mark of every state the views classify |
 | `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |
+| `tests/scheduled-admission.spec.ts` | The admission gate, steps 1 to 6, with stub `scheduled gate` and `check` |
+| `tests/scheduled-census.spec.ts` | Census reconcile: removed, invalid, window end, supersede and disable |
+| `tests/scheduled-default-route.spec.ts` | The default route: accept the first occurrence, attach the next |
 | `tests/scheduled-deploy.spec.ts` | The floor and floor-worker DSH profile patches |
 | `tests/scheduled-floor.spec.ts` | Authority of scheduled Triggers, admission order, spool intake, and one occurrence end to end through the default route, launch, watch and settle |
+| `tests/scheduled-intake.spec.ts` | Spool intake: one `show` per file, the standing Trigger, repeats and refusals |
 | `tests/scheduled-launch.spec.ts` | task.md, the run environment, the dshd argv and launch outcomes |
 | `tests/scheduled-log.spec.ts` | The `floor:` log line |
+| `tests/scheduled-machine.spec.ts` | A census from another machine pauses intake |
 | `tests/scheduled-migration.spec.ts` | Migration 12 and the `sched_*` accessors |
 | `tests/scheduled-names.spec.ts` | Scheduled instance names and labels |
+| `tests/scheduled-policy.spec.ts` | Authority of scheduled occurrences through the floor's Policy |
 | `tests/scheduled-resume.spec.ts` | Resume of open attempts after a restart |
 | `tests/scheduled-settle.spec.ts` | Verdicts and settling an attempt |
+| `tests/scheduled-spool.spec.ts` | The spool hand-off, census-first order and rejects |
 | `tests/scheduled-standing.spec.ts` | Standing Triggers and Inputs in the core |
 | `tests/scheduled-upkeep.spec.ts` | `floor upkeep`: what retention removes, what it only reports, and no `reset-failed` |
+| `tests/scheduled-watch.spec.ts` | The watch effect: poll, timeout, harvest, settle and a lost instance |
 | `tests/floor-claude.spec.ts` | `bin/floor-claude`: the subscription guard with cwd HOME, `--bare` refused, `~/.claude/settings.local.json` checked |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
 

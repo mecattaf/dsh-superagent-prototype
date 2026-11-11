@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   renderTask,
+  answersSince,
   writeTaskOnce,
   runEnv,
   runArgv,
@@ -389,5 +390,25 @@ describe('launchRun on the output dshd 0.1.0 prints (captured 11 Nov)', () => {
     expect(await run(4, JSON.stringify({ error: { kind: 'exists-different-recipe', message: 'differs', hint: 'dshd rm x' } })))
       .toMatchObject({ outcome: 'held', detail: 'exists-different-recipe' })
     expect((await run(7, JSON.stringify({ error: { kind: 'systemd-unavailable', message: 'no bus' } }))).outcome).toBe('retry')
+  })
+})
+
+describe('the answer to a held occurrence (C7.10)', () => {
+  const inputs = [
+    { id: 'i1', kind: 'trigger', triggerId: 't-occ', at: '2026-11-12T00:00:00.000Z', standing: true as const },
+    { id: 'i2', kind: 'trigger', triggerId: 't-old', at: '2026-11-12T00:05:00.000Z', human: true as const },
+    { id: 'i3', kind: 'trigger', triggerId: 't-ctx', at: '2026-11-12T01:00:00.000Z', human: true as const, context: true as const },
+    { id: 'i4', kind: 'trigger', triggerId: 't-yes', at: '2026-11-12T01:02:00.000Z', human: true as const },
+  ]
+  const texts: Record<string, string> = { 't-occ': 'Scheduled occurrence', 't-old': 'before the hold', 't-ctx': 'context only', 't-yes': 'Yes: delete /srv/old, only that directory.' }
+  it('takes the human Inputs after the held attempt ended, not context or the occurrence Trigger', () => {
+    expect(answersSince(inputs, id => texts[id], '2026-11-12T00:30:00.000Z')).toEqual(['Yes: delete /srv/old, only that directory.'])
+  })
+  it('task.md of the rerun carries the answer', () => {
+    const text = renderTask({ spec: { id: 'master:probe-held', prompt: 'Do it.' }, occurrence: { key: 'master:probe-held@x' }, attempt: 1,
+      answers: ['Yes: delete /srv/old, only that directory.'] })
+    expect(text).toContain('## Answer to the held question')
+    expect(text).toContain('Yes: delete /srv/old, only that directory.')
+    expect(text.indexOf('## Answer to the held question')).toBeLessThan(text.indexOf('# Job Prompt'))
   })
 })
