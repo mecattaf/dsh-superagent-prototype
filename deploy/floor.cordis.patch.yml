@@ -13,9 +13,17 @@
     idleTimeoutMs: 1800000
     maxProcesses: 2
 # The panel and the tunnel need a fixed port; the same-origin guard
-# checks Host 127.0.0.1:3082 (surface b.8.3).
+# checks Host 127.0.0.1:3082 (surface b.8.3). A patch's config replaces
+# the composed block whole, so host and compression are restated: with
+# `{ port: 3082 }` alone the webserver refuses `$.host missing` and the
+# floor does not start (strix rehearsal, 12 Nov 03:16Z).
 - id: webserver
-  config: { port: 3082 }
+  config:
+    host: 127.0.0.1
+    port: 3082
+    compression: gzip
+    compressionLevel: 1
+    compressionThresholdBytes: 1024
 # One scheduler only: DSH's own Schedule stays off (Agency Web
 # precedent, dsh-claude-web.patch.yml).
 - id: schedule

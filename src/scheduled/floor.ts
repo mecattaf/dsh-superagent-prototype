@@ -61,6 +61,7 @@ export class Floor {
     onDomainEvent({ get engine() { return host.engine() }, store: host.store }, event)
   }
   start(): void {
+    if (this.timer) return // started already: one poll timer, one resume
     ensureSpool(this.spoolDir)
     this.dshd.resume(name => this.host.effects.pending('watch', name))
     const every = Math.max(1, this.host.config.pollSeconds) * 1000

@@ -33,7 +33,8 @@ describe('deploy/floor.cordis.patch.yml', () => {
   })
   it('pins the panel port and disables DSH\'s own Schedule, the floor being the only scheduler', async () => {
     const rows_ = await rows('floor.cordis.patch.yml')
-    expect(rowOf(rows_, 'webserver').config).toEqual({ port: 3082 })
+    // The patch replaces the composed block whole: the webserver refuses a config without host (strix rehearsal).
+    expect(rowOf(rows_, 'webserver').config).toEqual({ host: '127.0.0.1', port: 3082, compression: 'gzip', compressionLevel: 1, compressionThresholdBytes: 1024 })
     expect(rowOf(rows_, 'schedule')).toEqual({ id: 'schedule', disabled: true })
     expect(rowOf(rows_, 'ui-schedule')).toEqual({ id: 'ui-schedule', disabled: true })
     expect(rowOf(rows_, 'dsh-superagent-github')).toEqual({ id: 'dsh-superagent-github', disabled: true })
