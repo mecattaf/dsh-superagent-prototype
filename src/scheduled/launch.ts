@@ -342,8 +342,9 @@ const defaultExec: ExecFunction = (file, args, { env }) => {
       stderr += chunk
     })
     child.on('error', reject)
-    child.on('close', code => {
-      resolve({ code: code ?? 0, stdout, stderr })
+    child.on('close', (code, signal) => {
+      // Killed by a signal (a timeout): never read as success.
+      resolve({ code: code ?? (signal ? 128 : 1), stdout, stderr })
     })
   })
 }
@@ -393,6 +394,15 @@ export async function launchRun(options: LaunchRunOptions): Promise<LaunchRunRes
     parsed = JSON.parse(stdout.trim())
   } catch {
     // Not JSON
+  }
+  // dshd prints a refusal on stderr, stdout empty (FACT: dshd 0.1.0, 12 Nov: exit 2 invalid-name).
+  if (parsed === null && res.stderr) {
+    try {
+      const fromErr = JSON.parse(res.stderr.trim())
+      if (fromErr && typeof fromErr === 'object' && fromErr.error) parsed = fromErr
+    } catch {
+      // Not JSON
+    }
   }
 
   let answer = ''

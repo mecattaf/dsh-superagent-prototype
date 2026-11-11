@@ -9,7 +9,7 @@ if (verb !== 'upkeep' || rest.some(arg => !['--dry-run', '--json'].includes(arg)
 const base = (process.env.SCHEDULED_FLOOR_URL || 'http://127.0.0.1:3082').replace(/\/+$/u, '')
 const dryRun = rest.includes('--dry-run'), json = rest.includes('--json')
 try {
-  const response = await fetch(`${base}/orchestrator/api/scheduled/upkeep`, { method: 'POST', headers: { 'content-type': 'application/json' },
+  const response = await fetch(`${base}/orchestrator/api/scheduled/upkeep`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-orchestrator-request': '1' },
     body: JSON.stringify({ dryRun }), signal: AbortSignal.timeout(300_000) })
   const text = await response.text()
   if (!response.ok) { process.stderr.write(`floor upkeep: HTTP ${response.status}: ${text}\n`); process.exit(1) }

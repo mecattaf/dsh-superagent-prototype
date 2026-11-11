@@ -17,6 +17,9 @@ import { routeDefault, onDomainEvent } from '../src/scheduled/default-route.ts'
 import { ensureSpool } from '../src/scheduled/spool.ts'
 import { occurrence as occurrenceRow, attemptsOf, type SchedOccurrence } from '../src/scheduled/store.ts'
 import { DshdExecutor, RoutingExecutor } from '../src/executor/dshd.ts'
+import { launchRun } from '../src/scheduled/launch.ts'
+import { verdictOf } from '../src/scheduled/verdict.ts'
+import { workflow as workflowRow } from '../src/scheduled/store.ts'
 
 let dir: string
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'sched-floor-')) })
@@ -202,5 +205,122 @@ describe('one occurrence end to end (C5.3, C5.8-C5.10)', () => {
     expect(routeDefault({ engine, store, log: quiet }, store.triggers.get(occurrenceTriggerId('master:nightly@2026-11-13T00:00:00.000Z'))!)).toBe('attach')
     expect(store.tickets.list()).toHaveLength(1)
     store.close()
+  })
+})
+
+/** One floor on the real Store and Engine with a fake dshd and CLI; `run` answers `dshd run`. */
+function floorWorld(run: (args: string[]) => { code: number; stdout: string; stderr?: string }) {
+  const store = new Store(join(dir, 'db.sqlite'))
+  const spool = join(dir, 'spool'); ensureSpool(spool)
+  mkdirSync(join(dir, '.agency', 'workflows'), { recursive: true })
+  const handlers = new Map<string, (payload: never) => Promise<void>>()
+  const queue: { kind: string; key: string; payload: unknown }[] = []
+  const effects = { enqueue: (kind: string, key: string, payload: unknown) => { queue.push({ kind, key, payload }) },
+    handle: (kind: string, handler: (payload: never) => Promise<void>) => { handlers.set(kind, handler) } }
+  const calls: string[][] = []
+  const box = { state: 'running' as 'running' | 'done' }
+  const exec = vi.fn(async (_file: string, args: string[]) => {
+    calls.push(args)
+    if (args[0] === 'run') return run(args)
+    if (args[0] === 'get') return { code: 0, stdout: JSON.stringify(box.state === 'running' ? { state: 'running', lastRun: null }
+      : { state: 'stopped', lastRun: { ending: 'exited', child: { exitCode: 0 }, invocationId: 'inv1', endedAt: 1794448000 } }) }
+    if (args[0] === 'read') return { code: 0, stdout: JSON.stringify({ name: args.at(-1), invocationId: 'inv1', complete: true, streams: ['stdout'],
+      lines: [JSON.stringify({ type: 'final', sessionId: 's1', reason: { kind: 'completed' }, text: 'Probe done.' })] }) }
+    return { code: 0, stdout: '{}' }
+  })
+  const file = join(dir, '.agency/workflows/nightly.jsonc')
+  const paused = { ...shown({ enabled: false }), path: file }
+  const cli = { show: vi.fn(async () => paused), env: vi.fn(async () => ({ SCHED_OCCURRENCE: 'x' })),
+    check: vi.fn(async () => ({ holds: false, exit: 1 })), gate: vi.fn(async () => ({ deferred: null })) }
+  let engine!: Engine
+  const dshd = new DshdExecutor({ get engine() { return engine }, store, effects: effects as never, cli, paused: () => false, closing: () => false,
+    maxWorkers: () => 2, exec, baseEnv: { PATH: '/usr/bin', HOME: dir }, log: quiet, now: () => new Date('2026-11-12T00:01:00Z') })
+  const options: EngineOptions = { repo: store, scope: { scope: () => ({ listened: true, observed: false }) },
+    policy: () => ({ version: 'v1', paused: false, evalTimeoutMs: 600_000, gate: t => scheduleGate(t, [{ id: 'master', enabled: true }]),
+      revalidate: () => true, admitsInferred: () => false }),
+    assessor: { request: vi.fn(), release: vi.fn() } as Assessor, executor: new RoutingExecutor(dshd, { start: vi.fn(), deliver: vi.fn(), stop: vi.fn() }),
+    outbox: { send: () => {}, status: () => undefined, withdraw: () => {} }, emit: event => { onDomainEvent({ engine, store, log: quiet }, event) } }
+  engine = new Engine(options)
+  const drain = async () => {
+    for (let guard = 0; queue.length && guard < 20; guard++) {
+      const item = queue.shift()!
+      try { await handlers.get(item.kind)!(item.payload as never) } catch (error) { if (!(error instanceof Later)) throw error; queue.push(item); return }
+    }
+  }
+  const intake = async () => await intakeOnce({ spoolDir: spool, store, receive: t => engine.receive(t), show: async () => paused, log: quiet,
+    agencies: [{ id: 'master', root: dir, enabled: true }], now: () => new Date('2026-11-12T00:00:10Z'), machineId: () => 'm1' })
+  const manual = (ulid: string) => spoolFile(spool, `master~nightly@manual~${ulid}.json`, { v: 1, kind: 'manual', occurrence: `master:nightly@manual:${ulid}`,
+    workflow: 'master:nightly', agency: dir, file, instant: '2026-11-12T00:00:00.000Z', missed: 0, revision: 'rev1', by: 'probe', inputs: {},
+    at: '2026-11-12T00:00:00.000Z' })
+  return { store, spool, calls, box, engine: () => engine, drain, intake, manual, file }
+}
+
+describe('review fixes (12 Nov): run now on a paused workflow, censuses, refusals', () => {
+  it('runs a manual occurrence of a paused workflow that no census has listed yet, then completes its Ticket', async () => {
+    const w = floorWorld(args => ({ code: 0, stdout: JSON.stringify({ name: args[args.indexOf('--name') + 1], action: 'started' }) }))
+    w.manual('01K9ZZZZZZZZZZZZZZZZZZZZZZ')
+    await w.intake()
+    const occ = 'master:nightly@manual:01K9ZZZZZZZZZZZZZZZZZZZZZZ'
+    expect(occurrenceRow(w.store, occ)?.state).toBe('queued')
+    expect(routeDefault({ engine: w.engine(), store: w.store, log: quiet }, w.store.triggers.get(occurrenceTriggerId(occ))!)).toBe('accept')
+    await w.drain()
+    expect(w.calls.some(args => args[0] === 'run')).toBe(true)
+    expect(occurrenceRow(w.store, occ)?.state).toBe('running')
+    expect(workflowRow(w.store, 'master:nightly')).toMatchObject({ state: 'disabled', file: w.file })
+    // A census of the paused workflow arrives while it runs: the manual run is not cancelled.
+    spoolFile(w.spool, 'census@1.json', census(false))
+    await w.intake()
+    expect(occurrenceRow(w.store, occ)?.state).toBe('running')
+    w.box.state = 'done'
+    const name = attemptsOf(w.store, occ)[0]!.instance
+    writeFileSync(join(dir, '.agency', 'runs', name, 'report.json'), JSON.stringify({ state: 'done', summary: 'Probe done.' }))
+    await w.drain()
+    expect(occurrenceRow(w.store, occ)?.state).toBe('done')
+    expect(w.store.tickets.list()[0]?.ended).toMatchObject({ outcome: 'completed' })
+    w.store.close()
+  })
+  it('keeps a queued manual run of a paused workflow when the census says disabled, and cancels a scheduled one', async () => {
+    const w = floorWorld(() => ({ code: 0, stdout: '{}' }))
+    spoolFile(w.spool, 'master~nightly@1.json', record('2026-11-12T00:00:00.000Z'))
+    await w.intake()
+    spoolFile(w.spool, 'census@1.json', census(false))
+    await w.intake()
+    expect(occurrenceRow(w.store, 'master:nightly@2026-11-12T00:00:00.000Z')).toMatchObject({ state: 'cancelled', reason: 'disabled' })
+    w.manual('01K9YYYYYYYYYYYYYYYYYYYYYY')
+    await w.intake()
+    spoolFile(w.spool, 'census@2.json', census(false))
+    await w.intake()
+    expect(occurrenceRow(w.store, 'master:nightly@manual:01K9YYYYYYYYYYYYYYYYYYYYYY')?.state).toBe('queued')
+    w.store.close()
+  })
+  it('reads a proposal in a census as no state of its live workflow', async () => {
+    const w = floorWorld(() => ({ code: 0, stdout: '{}' }))
+    const withProposal = { ...census(true), workflows: [...census(true).workflows,
+      { id: 'master:nightly', file: join(dir, '.agency/workflows/proposed/nightly.jsonc'), state: 'valid', enabled: false, revision: 'rev2', problems: [] }] }
+    spoolFile(w.spool, 'census@1.json', withProposal)
+    await w.intake()
+    expect(workflowRow(w.store, 'master:nightly')).toMatchObject({ state: 'valid', revision: 'rev1' })
+    w.store.close()
+  })
+  it('settles a launch dshd could not start as failed with no attempt, and ends the Ticket dropped', async () => {
+    const w = floorWorld(() => ({ code: 1, stdout: '' }))
+    w.manual('01K9XXXXXXXXXXXXXXXXXXXXXX')
+    await w.intake()
+    const occ = 'master:nightly@manual:01K9XXXXXXXXXXXXXXXXXXXXXX'
+    routeDefault({ engine: w.engine(), store: w.store, log: quiet }, w.store.triggers.get(occurrenceTriggerId(occ))!)
+    await w.drain()
+    expect(occurrenceRow(w.store, occ)).toMatchObject({ state: 'failed' })
+    expect(attemptsOf(w.store, occ)).toEqual([])
+    expect(w.store.tickets.list()[0]?.ended).toMatchObject({ outcome: 'dropped' })
+    w.store.close()
+  })
+  it('reads a dshd refusal printed on stderr, and a killed dshd as no success', async () => {
+    const refusal = JSON.stringify({ error: { kind: 'invalid-name', message: 'invalid instance name', hint: 'names match' } })
+    expect(await launchRun({ argv: ['dshd', 'run'], env: {}, exec: async () => ({ code: 2, stdout: '', stderr: refusal }) }))
+      .toMatchObject({ outcome: 'held', detail: 'invalid-name' })
+    const busy = JSON.stringify({ error: { kind: 'exists-different-recipe', message: 'x', hint: 'y' } })
+    expect(await launchRun({ argv: ['dshd', 'run'], env: {}, exec: async () => ({ code: 4, stdout: '', stderr: busy }) }))
+      .toMatchObject({ outcome: 'held', detail: 'exists-different-recipe' })
+    expect(verdictOf({ state: 'stopping', lastRun: null } as never)).toBe('running')
   })
 })

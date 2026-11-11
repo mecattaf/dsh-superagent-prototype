@@ -14,13 +14,13 @@ import { Later, type Effects } from '../app/effects.ts'
 import type { Store } from '../app/store.ts'
 import { admit } from '../scheduled/admission.ts'
 import { harvest } from '../scheduled/harvest.ts'
-import { FINAL, readmittable, type ShownWorkflow } from '../scheduled/intake.ts'
+import { agencyOf, FINAL, readmittable, type ShownWorkflow } from '../scheduled/intake.ts'
 import type { CensusRecord } from '../scheduled/spool.ts'
 import { launchRun, renderTask, runArgv, runEnv, writeTaskOnce, type ExecFunction } from '../scheduled/launch.ts'
 import { floorLog as defaultLog, type FloorEvent, type FloorField } from '../scheduled/log.ts'
 import { instanceName, labels } from '../scheduled/names.ts'
 import { settle, type SettleResult, type Verdict as SettleVerdict } from '../scheduled/settle.ts'
-import { attemptsOf, insertAttempt, occurrence as occurrenceRow, updateAttempt, updateOccurrence, workflow as workflowRow,
+import { attemptsOf, insertAttempt, occurrence as occurrenceRow, updateAttempt, updateOccurrence, upsertWorkflow, workflow as workflowRow,
   type SchedOccurrence } from '../scheduled/store.ts'
 import { verdictOf, type DshdGet } from '../scheduled/verdict.ts'
 
@@ -113,7 +113,8 @@ export class DshdExecutor implements Executor {
       const ticket = this.ticketOfWorkflow(occ.workflow_id)
       const assignment = ticket && latestAssignment(ticket)
       if (!ticket || !liveTicket(ticket) || !assignment || assignment.state === 'ended') continue
-      this.host.effects.enqueue('sched-launch', assignment.id, { ticketId: ticket.id, assignmentId: assignment.id, occurrence: occ.occurrence })
+      // One effect per occurrence: the queue upserts on its key, so a shared key would keep only the last one.
+      this.host.effects.enqueue('sched-launch', `${assignment.id}:${occ.occurrence}`, { ticketId: ticket.id, assignmentId: assignment.id, occurrence: occ.occurrence })
     }
     const awaiting = this.host.store.db.prepare(`SELECT * FROM sched_occurrences WHERE state='awaiting'`).all() as unknown as SchedOccurrence[]
     for (const occ of awaiting) {
@@ -121,7 +122,7 @@ export class DshdExecutor implements Executor {
         const checked = await this.host.cli.check(occ.workflow_id, occ.occurrence, occ.attempt)
         if (!checked.holds) continue
         this.host.store.atomic(() => { updateOccurrence(this.host.store, occ.occurrence, { state: 'done', reason: 'check holds at census', updated_at: iso(at) }) })
-        this.finish(occ.workflow_id, 'done', 'The outcome check holds now.')
+        this.finish(undefined, occ.workflow_id, 'done', 'The outcome check holds now.')
       } catch (error) { this.log('error', { occ: occ.occurrence, error: String(error) }) }
     }
   }
@@ -191,9 +192,12 @@ export class DshdExecutor implements Executor {
     if (assignment?.state === 'pending') this.host.engine.assignmentStarted(ticketId, assignmentId)
     if (inputId) this.host.engine.inputsDelivered(ticketId, assignmentId, [inputId])
   }
-  /** Ends the workflow's Ticket for a final occurrence: `ready` for done, else `failed` then `dropped`. */
-  private finish(workflowId: string, state: string, summary: string, question?: string): void {
-    const ticket = this.ticketOfWorkflow(workflowId)
+  /**
+   * Ends the Ticket for a final occurrence: `ready` for done, `blocked` for held, else `dropped`. The Ticket comes from the
+   * caller when it has one: `sched_workflows.ticket_id` is unset until a census has listed the workflow.
+   */
+  private finish(ticketId: string | undefined, workflowId: string, state: string, summary: string, question?: string): void {
+    const ticket = (ticketId ? this.host.store.tickets.get(ticketId) : undefined) ?? this.ticketOfWorkflow(workflowId)
     if (!ticket || !liveTicket(ticket)) return
     const assignment = latestAssignment(ticket)
     if (!assignment || assignment.state === 'ended') return
@@ -203,8 +207,9 @@ export class DshdExecutor implements Executor {
         if (state === 'done' || state === 'satisfied') this.host.engine.report(ticket.id, { state: 'ready', summary })
         else if (state === 'held') this.host.engine.report(ticket.id, { state: 'blocked', summary, question: question ?? summary })
         else {
-          this.host.engine.report(ticket.id, { state: 'failed', summary })
-          this.host.engine.report(ticket.id, { state: 'dropped', summary: `Occurrence ${state}; the workflow waits for its next occurrence.` })
+          // `dropped`, not `failed` first: a failed report strips the Ticket's undelivered standing Inputs (assignments.ts
+          // report), which would strand the workflow's occurrences already waiting on it (finding 6, 12 Nov review).
+          this.host.engine.report(ticket.id, { state: 'dropped', summary: `Occurrence ${state}: ${summary} The workflow waits for its next occurrence.`.slice(0, 2000) })
         }
       })
     } catch (error) { this.log('error', { workflow: workflowId, report: state, error: String(error) }) }
@@ -221,7 +226,7 @@ export class DshdExecutor implements Executor {
     const picked = payload.occurrence ? { occurrence: payload.occurrence, inputId: this.inputOf(ticket, payload.occurrence) } : this.nextInput(ticket)
     if (!picked) {
       this.log('defer', { ticket: ticket.id, decision: 'nothing-to-run' })
-      if (assignment.state === 'pending') this.finish(this.workflowOf(ticket) ?? '', 'cancelled', 'Nothing left to run.')
+      if (assignment.state === 'pending') this.finish(ticket.id, this.workflowOf(ticket) ?? '', 'cancelled', 'Nothing left to run.')
       return
     }
     const occ = occurrenceRow(store, picked.occurrence)
@@ -230,7 +235,7 @@ export class DshdExecutor implements Executor {
     store.atomic(() => { store.db.prepare('UPDATE sched_workflows SET ticket_id=? WHERE id=?').run(ticket.id, occ.workflow_id) })
     if (FINAL.has(occ.state)) {
       this.take(ticket.id, assignment.id, picked.inputId)
-      this.finish(occ.workflow_id, occ.state, `Occurrence ${occ.occurrence} is ${occ.state}${occ.reason ? `: ${occ.reason}` : ''}.`)
+      this.finish(ticket.id, occ.workflow_id, occ.state, `Occurrence ${occ.occurrence} is ${occ.state}${occ.reason ? `: ${occ.reason}` : ''}.`)
       return
     }
     if (occ.state === 'running' || (occ.state === 'held' && !payload.rerun)) return
@@ -239,6 +244,15 @@ export class DshdExecutor implements Executor {
       store.atomic(() => { updateOccurrence(store, occ.occurrence, { state: 'held', reason: 'invalid', updated_at: iso(at) }) })
       this.log('held', { occ: occ.occurrence, reason: 'invalid' })
       return
+    }
+    // A manual run can arrive before any census lists its workflow (run now on a file just written): the show at hand
+    // proves the file, so record the workflow from it; the next census reconciles the row (finding 1, 12 Nov review).
+    if (!workflowRow(store, occ.workflow_id) && typeof shown.path === 'string') {
+      store.atomic(() => {
+        upsertWorkflow(store, { id: occ.workflow_id, agency: agencyOf(occ.workflow_id), file: shown.path as string,
+          state: shown.spec?.enabled ? 'valid' : 'disabled', revision: shown.revision ?? null, problems: '[]', ticket_id: ticket.id,
+          first_seen: iso(at), changed_at: iso(at) })
+      })
     }
     const running = store.db.prepare(`SELECT grp FROM sched_occurrences WHERE state='running'`).all() as unknown as { grp: string }[]
     const decision = payload.rerun ? { decision: running.some(row => row.grp === occ.grp) ? 'wait-group' : 'launch' as const }
@@ -249,7 +263,7 @@ export class DshdExecutor implements Executor {
       case 'cancelled': case 'missed': case 'satisfied':
         store.atomic(() => { updateOccurrence(store, occ.occurrence, { state: decision.decision, reason: (decision as { reason?: string }).reason ?? null, updated_at: iso(at) }) })
         this.take(ticket.id, assignment.id, picked.inputId)
-        this.finish(occ.workflow_id, decision.decision, `Occurrence ${occ.occurrence}: ${decision.decision}.`)
+        this.finish(ticket.id, occ.workflow_id, decision.decision, `Occurrence ${occ.occurrence}: ${decision.decision}.`)
         return
       case 'held':
         store.atomic(() => { updateOccurrence(store, occ.occurrence, { state: 'held', reason: (decision as { reason?: string }).reason ?? 'invalid', updated_at: iso(at) }) })
@@ -301,7 +315,15 @@ export class DshdExecutor implements Executor {
     if (result.outcome === 'held') {
       store.atomic(() => { updateOccurrence(store, occ.occurrence, { state: 'held', reason: result.detail.slice(0, 300), updated_at: iso(at) }) })
       this.log('held', { occ: occ.occurrence, name, reason: result.detail })
-      this.finish(occ.workflow_id, 'held', `dshd refused ${name}: ${result.detail}`)
+      this.finish(ticket.id, occ.workflow_id, 'held', `dshd refused ${name}: ${result.detail}`)
+      return
+    }
+    if (result.outcome === 'failed') {
+      // dshd did not start the run (start-failed, exit 1, an unknown answer): no attempt exists to watch (finding 5).
+      store.atomic(() => { updateOccurrence(store, occ.occurrence, { state: 'failed', reason: `launch: ${result.detail}`.slice(0, 300), updated_at: iso(at) }) })
+      this.log('settle', { occ: occ.occurrence, name, state: 'failed', reason: result.detail })
+      this.take(ticket.id, assignment.id, inputId)
+      this.finish(ticket.id, occ.workflow_id, 'failed', `dshd could not start ${name}: ${result.detail}`)
       return
     }
     store.atomic(() => {
@@ -364,7 +386,7 @@ export class DshdExecutor implements Executor {
     }
     if (result.occurrence === 'queued') return
     const summary = harvested.report?.summary ?? (harvested.answer ? harvested.answer.slice(0, 1500) : `Run ${payload.name}: ${verdict}.`)
-    this.finish(occ.workflow_id, result.occurrence, summary, result.attention)
+    this.finish(payload.ticketId, occ.workflow_id, result.occurrence, summary, result.attention)
   }
 
   /** dshd no longer knows the instance: relaunch once as a rerun, then settle `failed` (DESIGN 7.6 resume). */
@@ -383,7 +405,7 @@ export class DshdExecutor implements Executor {
       updateAttempt(store, payload.occurrence, payload.attempt, payload.rerun, { ended_at: iso(at), ending: 'not-found' })
       updateOccurrence(store, payload.occurrence, { state: 'failed', reason: 'instance-lost', updated_at: iso(at) })
     })
-    this.finish(occ.workflow_id, 'failed', `Instance ${payload.name} was lost twice.`)
+    this.finish(payload.ticketId, occ.workflow_id, 'failed', `Instance ${payload.name} was lost twice.`)
   }
 }
 
@@ -403,6 +425,7 @@ const defaultExec: ExecFunction = async (file, args, { env }) => {
     child.stdout.on('data', chunk => { stdout += chunk })
     child.stderr.on('data', chunk => { stderr += chunk })
     child.on('error', reject)
-    child.on('close', code => { resolve({ code: code ?? 0, stdout, stderr }) })
+    // A process killed by a signal (a timeout) has no exit code: never read it as success.
+    child.on('close', (code, signal) => { resolve({ code: code ?? (signal ? 128 : 1), stdout, stderr }) })
   })
 }

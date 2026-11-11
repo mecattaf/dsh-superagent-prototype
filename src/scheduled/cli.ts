@@ -43,8 +43,9 @@ const defaultExec: CliExec = (file, args, options) => {
       stderr += chunk
     })
     child.on('error', reject)
-    child.on('close', code => {
-      resolve({ code: code ?? 0, stdout, stderr })
+    child.on('close', (code, signal) => {
+      // Killed at the timeout: a check that never answered does not hold, a gate that never answered defers.
+      resolve({ code: code ?? (signal ? 128 : 1), stdout, stderr })
     })
   })
 }

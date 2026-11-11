@@ -193,6 +193,8 @@ export function reconcile(store: Store, census: CensusRecord, at: Date, log: Log
   store.atomic(() => {
     const seen = new Set<string>()
     for (const entry of census.workflows) {
+      // A proposal carries its live workflow's id (discover.mjs); it is not that workflow (finding 3).
+      if (/\/\.agency\/workflows\/proposed\//u.test(entry.file)) continue
       seen.add(entry.id)
       const before = workflowRow(store, entry.id)
       const state = entry.state === 'invalid' ? 'invalid' : entry.enabled ? 'valid' : 'disabled'
@@ -221,7 +223,9 @@ export function reconcile(store: Store, census: CensusRecord, at: Date, log: Log
 }
 
 function cancelWaiting(store: Store, workflowId: string, reason: string, at: Date, log: Log): void {
-  const rows = store.db.prepare(`SELECT occurrence FROM sched_occurrences WHERE workflow_id=? AND state IN ('queued','deferred','held')`)
+  // Disabled stops scheduled occurrences only: run now works on a paused workflow (DESIGN 7.3; finding 2).
+  const kinds = reason === 'disabled' ? ` AND kind<>'manual'` : ''
+  const rows = store.db.prepare(`SELECT occurrence FROM sched_occurrences WHERE workflow_id=? AND state IN ('queued','deferred','held')${kinds}`)
     .all(workflowId) as unknown as { occurrence: string }[]
   for (const row of rows) {
     updateOccurrence(store, row.occurrence, { state: 'cancelled', reason, updated_at: iso(at) })
