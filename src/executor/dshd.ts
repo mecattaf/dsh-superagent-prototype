@@ -65,7 +65,8 @@ declare module '../app/effects.ts' {
 }
 
 const DSHD = '/run/current-system/sw/bin/dshd'
-const DEFAULT_TIMEOUT_MS = 30 * 60_000
+/** The schema's longest job.timeout: the bound on a run whose workflow cannot be shown mid-run (evaluation review, C5.11). */
+const UNSHOWN_TIMEOUT_MS = 24 * 3600_000
 const iso = (date: Date) => date.toISOString()
 /** The agency root of a workflow file `<root>/.agency/workflows/[proposed/]<stem>.jsonc`. */
 export const rootOfFile = (file: string): string => file.replace(/\/\.agency\/workflows\/(?:proposed\/)?[^/]+\.jsonc$/u, '')
@@ -201,6 +202,15 @@ export class DshdExecutor implements Executor {
     if (!ticket || !liveTicket(ticket)) return
     const assignment = latestAssignment(ticket)
     if (!assignment || assignment.state === 'ended') return
+    // Another occurrence of this workflow is running on the same Ticket: a report now would end the Ticket, and ending it
+    // stops every open attempt of the workflow, that run included. Its own settle reports for the Ticket instead
+    // (evaluation review, C5.5 and C5.12).
+    const busy = this.host.store.db.prepare(`SELECT o.occurrence FROM sched_occurrences o WHERE o.workflow_id=? AND (o.state='running'
+      OR EXISTS (SELECT 1 FROM sched_attempts a WHERE a.occurrence=o.occurrence AND a.ended_at IS NULL)) LIMIT 1`).get(workflowId) as { occurrence: string } | undefined
+    if (busy) {
+      this.log('defer', { workflow: workflowId, decision: 'ticket-busy', running: busy.occurrence, report: state })
+      return
+    }
     try {
       this.host.store.atomic(() => {
         if (assignment.state === 'pending') this.host.engine.assignmentStarted(ticket.id, assignment.id)
@@ -348,10 +358,13 @@ export class DshdExecutor implements Executor {
     let verdict = verdictOf(get) as string
     if (verdict === 'running') {
       const shown = await this.host.cli.show(occ.workflow_id).catch(() => undefined) as ShownWorkflow | undefined
-      const timeout = shown?.spec?.job?.timeout_ms ?? DEFAULT_TIMEOUT_MS
+      // A workflow that cannot be shown now (removed, invalid, a CLI timeout) leaves its running attempt alone (DESIGN
+      // 7.2), up to the schema's longest timeout; the validator fills job.timeout_ms (3 h by default) otherwise.
+      const timeout = shown?.spec?.job?.timeout_ms ?? UNSHOWN_TIMEOUT_MS
       const started = attemptsOf(store, occ.occurrence).find(row => row.instance === payload.name)?.started_at
       if (!started || Date.parse(started) + timeout > this.now().getTime()) throw new Later('still running')
-      await this.dshd(['stop', '--json', payload.name])
+      const stopped = await this.dshd(['stop', '--json', payload.name])
+      if (stopped.code !== 0) throw new Error(`dshd stop ${payload.name} exited ${stopped.code}`)
       verdict = 'timeout'
     }
     const harvested = await harvest({ name: payload.name, runDir: join(payload.root, '.agency', 'runs', payload.name),

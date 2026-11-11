@@ -15,7 +15,7 @@ import { admit } from '../src/scheduled/admission.ts'
 import { intakeOnce, occurrenceTriggerId, type ShownWorkflow } from '../src/scheduled/intake.ts'
 import { routeDefault, onDomainEvent } from '../src/scheduled/default-route.ts'
 import { ensureSpool } from '../src/scheduled/spool.ts'
-import { occurrence as occurrenceRow, attemptsOf, type SchedOccurrence } from '../src/scheduled/store.ts'
+import { occurrence as occurrenceRow, attemptsOf, type SchedOccurrence, insertOccurrence } from '../src/scheduled/store.ts'
 import { DshdExecutor, RoutingExecutor } from '../src/executor/dshd.ts'
 import { launchRun } from '../src/scheduled/launch.ts'
 import { floorDeployment } from '../src/app/setup.ts'
@@ -253,8 +253,29 @@ function floorWorld(run: (args: string[]) => { code: number; stdout: string; std
   const manual = (ulid: string) => spoolFile(spool, `master~nightly@manual~${ulid}.json`, { v: 1, kind: 'manual', occurrence: `master:nightly@manual:${ulid}`,
     workflow: 'master:nightly', agency: dir, file, instant: '2026-11-12T00:00:00.000Z', missed: 0, revision: 'rev1', by: 'probe', inputs: {},
     at: '2026-11-12T00:00:00.000Z' })
-  return { store, spool, calls, box, engine: () => engine, drain, intake, manual, file }
+  return { store, spool, calls, box, engine: () => engine, drain, intake, manual, file, cli, dshd }
 }
+
+describe('evaluation review fixes', () => {
+  it('a census that finds an awaiting occurrence done leaves the run of a newer occurrence of the workflow alone (C5.12)', async () => {
+    const w = floorWorld(args => ({ code: 0, stdout: JSON.stringify({ name: args[args.indexOf('--name') + 1], action: 'started' }) }))
+    w.manual('01K9ZZZZZZZZZZZZZZZZZZZZZZ')
+    await w.intake()
+    const occ = 'master:nightly@manual:01K9ZZZZZZZZZZZZZZZZZZZZZZ'
+    routeDefault({ engine: w.engine(), store: w.store, log: quiet }, w.store.triggers.get(occurrenceTriggerId(occ))!)
+    await w.drain()
+    expect(occurrenceRow(w.store, occ)?.state).toBe('running')
+    // An earlier occurrence ran, its check did not hold, and it waits; now the check holds.
+    w.store.atomic(() => { insertOccurrence(w.store, { occurrence: 'master:nightly@2026-11-11T00:00:00.000Z', workflow_id: 'master:nightly',
+      kind: 'schedule', instant: '2026-11-11T00:00:00.000Z', missed: 0, deadline: null, grp: 'master:nightly', state: 'awaiting', reason: 'check',
+      attempt: 1, reruns: 0, next_try_at: null, by: null, inputs: null, updated_at: '2026-11-11T01:00:00.000Z' }) })
+    w.cli.check.mockResolvedValue({ holds: true, exit: 0 })
+    await w.dshd.onCensus(census(true) as never)
+    expect(occurrenceRow(w.store, 'master:nightly@2026-11-11T00:00:00.000Z')?.state).toBe('done')
+    expect(w.calls.some(args => args[0] === 'stop')).toBe(false)
+    expect(occurrenceRow(w.store, occ)?.state).toBe('running')
+  })
+})
 
 describe('review fixes (12 Nov): run now on a paused workflow, censuses, refusals', () => {
   it('runs a manual occurrence of a paused workflow that no census has listed yet, then completes its Ticket', async () => {

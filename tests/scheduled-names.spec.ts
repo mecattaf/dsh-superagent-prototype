@@ -99,9 +99,27 @@ describe('C5.6 instanceName & labels', () => {
     expect(name.length).toBe(63)
     expect(name.endsWith(expectedHash4)).toBe(true)
     expect(NAME_REGEX.test(name)).toBe(true)
-    // First 59 chars match prefix
-    const rawExpectedPrefix = 'sch-mecattaf-long-department-agency-name-extremely-long-work'
-    expect(name.slice(0, 59)).toBe(rawExpectedPrefix.slice(0, 59))
+    // The cut falls in <agency>-<stem>: the time stays, just before the hash.
+    expect(name.endsWith(`-20261112t0000z-${expectedHash4}`)).toBe(true)
+    expect(name.startsWith('sch-mecattaf-long-department-agency-name')).toBe(true)
+  })
+
+  it('keeps long names of distinct occurrences, attempts and reruns distinct (evaluation review)', () => {
+    const agency = 'mecattaf/long-department-agency-name'
+    const stem = 'extremely-long-workflow-stem-that-overflows'
+    const names = new Set([
+      instanceName({ agency, stem, instant: '2026-11-12T00:00:00Z' }),
+      instanceName({ agency, stem, instant: '2026-11-13T00:00:00Z' }),
+      instanceName({ agency, stem, instant: '2026-11-12T00:00:00Z', rerun: 1 }),
+      instanceName({ agency, stem, instant: '2026-11-12T00:00:00Z', rerun: 2 }),
+      instanceName({ agency, stem, instant: '2026-11-12T00:00:00Z', kind: 'manual', ulid: '01K9ZZZZZZZZZZZZZZZZAAAAAA' }),
+      instanceName({ agency, stem, instant: '2026-11-12T00:00:00Z', kind: 'manual', ulid: '01K9ZZZZZZZZZZZZZZZZBBBBBB' }),
+    ])
+    expect(names.size).toBe(6)
+    for (const name of names) {
+      expect(name.length).toBeLessThanOrEqual(63)
+      expect(NAME_REGEX.test(name)).toBe(true)
+    }
   })
 
   it('handles run-now names with reruns that exceed 63 bytes', () => {
