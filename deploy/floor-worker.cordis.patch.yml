@@ -1,0 +1,11 @@
+# ~/.dsh/profiles/floor-worker/cordis.patch.yml
+- id: agent-preset-registry
+  config: { default: claude }
+- id: agent-default-model
+  config: { provider: claude, model: opus, reasoningEffort: medium }
+- id: llm-claude
+  config:
+    executablePath: "/home/tom/.dsh/profiles/floor/node_modules/\
+      dsh-superagent/bin/floor-claude"
+    idleTimeoutMs: 1800000
+    maxProcesses: 1

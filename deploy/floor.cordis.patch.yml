@@ -1,0 +1,22 @@
+# ~/.dsh/profiles/floor/cordis.patch.yml   (canonical: fork deploy/)
+- id: dsh-superagent
+  config:
+    stateDir: /home/tom/.agency/state/master
+- id: agent-default-model
+  config: { provider: claude, model: opus, reasoningEffort: medium }
+- id: llm-claude
+  config:
+    executablePath: "/home/tom/.dsh/profiles/floor/node_modules/\
+      dsh-superagent/bin/floor-claude"
+    idleTimeoutMs: 1800000
+    maxProcesses: 2
+# The panel and the tunnel need a fixed port; the same-origin guard
+# checks Host 127.0.0.1:3082 (surface b.8.3).
+- id: webserver
+  config: { port: 3082 }
+# One scheduler only: DSH's own Schedule stays off (Agency Web
+# precedent, dsh-claude-web.patch.yml).
+- id: schedule
+  disabled: true
+- id: ui-schedule
+  disabled: true
