@@ -17,7 +17,7 @@ import type { SettingsVersion, Store } from './store.ts'
 import { Versions } from './versions.ts'
 import { KV, type Key } from '../kv.ts'
 
-export const SCHEMA_VERSION = 11
+export const SCHEMA_VERSION = 12
 /** The oldest database schema version this build can open and migrate directly. */
 export const OLDEST_SCHEMA = 10
 /** Returns an error message explaining why `version` cannot be opened: older schemas need a new state directory. */
@@ -613,4 +613,74 @@ function assessmentTriggers(store: Store): void {
     store.db.prepare(`INSERT INTO effect (kind, key, value, seq, due, since) VALUES ('assessment', ?, ?, ?, ?, ?) ON CONFLICT(kind, key) DO NOTHING`)
       .run(evaluation.id, JSON.stringify({ triggerId: evaluation.triggerIds[0] }), ++seq, Date.now(), new Date().toISOString())
   }
+}
+
+/**
+ * Migration 11 → 12: adds the sched_* tables (sched_workflows, sched_occurrences, sched_attempts),
+ * index sched_occ_state, and views sched_history_v1 and sched_attempts_v1 (DESIGN 5.4).
+ * Also seeds scheduled.census.last = null so the KV key exists before the first census.
+ * Additive only; no existing rows are touched.
+ */
+export function migrateTo12(store: Store): void {
+  store.db.exec(`
+    CREATE TABLE IF NOT EXISTS sched_workflows (
+      id          TEXT PRIMARY KEY,
+      agency      TEXT NOT NULL,
+      file        TEXT NOT NULL,
+      state       TEXT NOT NULL,
+      revision    TEXT,
+      problems    TEXT,
+      ticket_id   TEXT,
+      first_seen  TEXT NOT NULL,
+      changed_at  TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS sched_occurrences (
+      occurrence  TEXT PRIMARY KEY,
+      workflow_id TEXT NOT NULL,
+      kind        TEXT NOT NULL,
+      instant     TEXT NOT NULL,
+      missed      INTEGER NOT NULL DEFAULT 0,
+      deadline    TEXT,
+      grp         TEXT NOT NULL,
+      state       TEXT NOT NULL,
+      reason      TEXT,
+      attempt     INTEGER NOT NULL DEFAULT 0,
+      reruns      INTEGER NOT NULL DEFAULT 0,
+      next_try_at TEXT,
+      by          TEXT,
+      inputs      TEXT,
+      updated_at  TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS sched_occ_state ON sched_occurrences (state, grp);
+    CREATE TABLE IF NOT EXISTS sched_attempts (
+      occurrence  TEXT NOT NULL,
+      attempt     INTEGER NOT NULL,
+      rerun       INTEGER NOT NULL DEFAULT 0,
+      instance    TEXT NOT NULL,
+      revision    TEXT NOT NULL,
+      invocation  TEXT,
+      started_at  TEXT NOT NULL,
+      ended_at    TEXT,
+      ending      TEXT,
+      exit_code   INTEGER,
+      report      TEXT,
+      PRIMARY KEY (occurrence, attempt, rerun)
+    );
+    CREATE VIEW IF NOT EXISTS sched_history_v1 AS
+      SELECT o.occurrence, o.workflow_id AS workflow, o.kind,
+             o.instant AS due_at, o.missed, o.state, o.reason, o.attempt,
+             a.instance, a.revision, a.started_at, a.ended_at,
+             substr(a.report, 1, 1500) AS report, o.by, o.updated_at
+      FROM sched_occurrences o
+      LEFT JOIN sched_attempts a ON a.occurrence = o.occurrence
+       AND a.attempt = o.attempt
+       AND a.rerun = (SELECT max(rerun) FROM sched_attempts
+                      WHERE occurrence = o.occurrence AND attempt = o.attempt);
+    CREATE VIEW IF NOT EXISTS sched_attempts_v1 AS
+      SELECT occurrence, attempt, rerun, instance, revision, invocation,
+             started_at, ended_at, ending, exit_code, report
+      FROM sched_attempts;
+  `)
+  // Seed scheduled.census.last = null so the key exists before the first census runs.
+  if (store.get(KV.scheduled.censusLast) === undefined) store.set(KV.scheduled.censusLast, null)
 }
