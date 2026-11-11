@@ -3,7 +3,7 @@
  * end to end through the default route (C5.3), DshdExecutor launch, watch, harvest and settle, on the real Store and
  * Engine with a fake dshd and a fake `scheduled` CLI.
  */
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -18,6 +18,7 @@ import { ensureSpool } from '../src/scheduled/spool.ts'
 import { occurrence as occurrenceRow, attemptsOf, type SchedOccurrence } from '../src/scheduled/store.ts'
 import { DshdExecutor, RoutingExecutor } from '../src/executor/dshd.ts'
 import { launchRun } from '../src/scheduled/launch.ts'
+import { floorDeployment } from '../src/app/setup.ts'
 import { verdictOf } from '../src/scheduled/verdict.ts'
 import { workflow as workflowRow } from '../src/scheduled/store.ts'
 
@@ -327,6 +328,37 @@ describe('review fixes (12 Nov): run now on a paused workflow, censuses, refusal
     expect(await w.intake()).toMatchObject({ processed: 1, rejected: 1 })
     expect(readdirSync(join(w.spool, 'incoming'))).toEqual(['a-bad.json'])
     w.store.close()
+  })
+  it('retries a failing show at the next poll for ten minutes, then holds the occurrence (evaluation review, C4.8)', async () => {
+    const store = new Store(join(dir, 'db.sqlite'))
+    const spool = join(dir, 'spool'); ensureSpool(spool)
+    let fail = true
+    const at = new Date('2026-11-12T00:00:10Z')
+    const deps = { spoolDir: spool, store, receive: () => 'stored' as const, show: async () => fail ? { error: 'timeout' } : shown(), log: quiet,
+      agencies: [{ id: 'master', root: dir, enabled: true }], now: () => at, machineId: () => 'm1' }
+    spoolFile(spool, 'master~nightly@1.json', record('2026-11-12T00:00:00.000Z'))
+    utimesSync(join(spool, 'incoming', 'master~nightly@1.json'), at, at)
+    await intakeOnce(deps)
+    expect(occurrenceRow(store, 'master:nightly@2026-11-12T00:00:00.000Z')).toBeUndefined()
+    expect(readdirSync(join(spool, 'incoming'))).toEqual(['master~nightly@1.json'])
+    fail = false
+    await intakeOnce(deps)
+    expect(occurrenceRow(store, 'master:nightly@2026-11-12T00:00:00.000Z')?.state).toBe('queued')
+    // A show that keeps failing past ten minutes holds a scheduled occurrence, as before.
+    fail = true
+    spoolFile(spool, 'master~nightly@2.json', record('2026-11-13T00:00:00.000Z'))
+    const old = new Date(at.getTime() - 11 * 60_000)
+    utimesSync(join(spool, 'incoming', 'master~nightly@2.json'), old, old)
+    await intakeOnce(deps)
+    expect(occurrenceRow(store, 'master:nightly@2026-11-13T00:00:00.000Z')).toMatchObject({ state: 'held', reason: 'invalid' })
+    store.close()
+  })
+  it('makes its own spool at Setup when the state directory exists (evaluation review, C4.2)', () => {
+    const stateDir = join(dir, 'state'); mkdirSync(stateDir)
+    const bin = join(dir, 'bin'); writeFileSync(bin, '')
+    expect(() => floorDeployment({ stateDir, scheduled: { enabled: true, dshd: bin, cli: bin } } as never)).not.toThrow()
+    expect(readdirSync(join(stateDir, 'spool')).sort()).toEqual(['done', 'incoming', 'rejected', 'tmp'])
+    expect(() => floorDeployment({ stateDir: join(dir, 'absent'), scheduled: { enabled: true, dshd: bin, cli: bin } } as never)).toThrow(/needs/)
   })
   it('reads a dshd refusal printed on stderr, and a killed dshd as no success', async () => {
     const refusal = JSON.stringify({ error: { kind: 'invalid-name', message: 'invalid instance name', hint: 'names match' } })

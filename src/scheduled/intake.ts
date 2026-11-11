@@ -3,7 +3,7 @@
  * `sched_occurrences` row; census files reconcile `sched_workflows` and re-admit waiting occurrences. The census is the
  * floor's only clock for scheduling decisions.
  */
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { key, type ReceiveResult, type Trigger } from '../core/index.ts'
 import type { Store } from '../app/store.ts'
@@ -114,8 +114,10 @@ export async function intakeOnce(deps: IntakeDeps): Promise<IntakeResult> {
       result.processed++
       continue
     }
+    let handedOffMs: number | undefined
+    try { handedOffMs = statSync(join(deps.spoolDir, 'incoming', name)).mtimeMs } catch { /* gone: the move below fails and logs */ }
     try {
-      await occurrenceFile(deps, record, now(), log)
+      await occurrenceFile(deps, record, now(), log, handedOffMs)
       moveDone(deps.spoolDir, name)
       result.processed++
     } catch (error) {
@@ -126,7 +128,10 @@ export async function intakeOnce(deps: IntakeDeps): Promise<IntakeResult> {
   return result
 }
 
-async function occurrenceFile(deps: IntakeDeps, record: OccurrenceRecord | ManualRecord, at: Date, log: Log): Promise<void> {
+/** How long a failing `scheduled show` is retried, poll after poll, before the occurrence is held or refused (evaluation review, C4.8). */
+export const SHOW_RETRY_MS = 600_000
+
+async function occurrenceFile(deps: IntakeDeps, record: OccurrenceRecord | ManualRecord, at: Date, log: Log, handedOffMs?: number): Promise<void> {
   const store = deps.store
   const agencyId = agencyOf(record.workflow)
   const listed = deps.agencies.find(agency => agency.id === agencyId && agency.enabled)
@@ -142,6 +147,9 @@ async function occurrenceFile(deps: IntakeDeps, record: OccurrenceRecord | Manua
   }
   const shown = await deps.show(record.workflow)
   if ('error' in shown) {
+    // Most show failures pass (a timeout, a busy host): leave the file for the next poll, for up to SHOW_RETRY_MS
+    // after its hand-off; only then is the occurrence held (scheduled) or refused (manual).
+    if (handedOffMs !== undefined && at.getTime() >= handedOffMs && at.getTime() - handedOffMs < SHOW_RETRY_MS) throw new Error(`scheduled show failed, retried next poll: ${shown.error}`)
     if (record.kind === 'manual') {
       store.atomic(() => { insertOccurrence(store, { ...base, grp: record.workflow, deadline: null, state: 'refused', reason: `show: ${shown.error}`.slice(0, 300) }) })
       log('intake', { occ: record.occurrence, state: 'refused', reason: 'show-failed' })
