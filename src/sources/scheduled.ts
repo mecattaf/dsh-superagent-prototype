@@ -94,7 +94,8 @@ export function scheduledTrigger(record: OccurrenceRecord, occurrence: string, e
   const meta: ScheduledMeta = { occurrence, namespace: record.namespace, item: record.item, cwd: record.cwd, kind: record.kind, due,
     missed: extra.missed, revision: record.revision, ...record.pair ? { pair: record.pair } : {}, ...extra.superseded ? { superseded: true as const } : {} }
   return {
-    id: key(SOURCE, record.cwd, record.item, record.kind === 'manual' ? `run:${record.run!}` : due),
+    // The namespace is the producer's agency: two agencies may give one working directory items of one name.
+    id: key(SOURCE, record.namespace, record.cwd, record.item, record.kind === 'manual' ? `run:${record.run!}` : due),
     source: SOURCE,
     threads: [occurrenceThread(occurrence)],
     // An occurrence has no sender: an empty actor id uses the admission cell of an unlisted sender who does not address the agent.
@@ -169,7 +170,7 @@ export async function readInbox(ctx: Pick<SourceContext, 'receive' | 'threads'>,
   }
   // Within one item, only the latest due runs; a record with that same due is the same occurrence and answers duplicate.
   const latest = new Map<string, number>()
-  const itemOf = (record: OccurrenceRecord) => JSON.stringify([record.cwd, record.item])
+  const itemOf = (record: OccurrenceRecord) => JSON.stringify([record.namespace, record.cwd, record.item])
   for (const { record } of entries) {
     if (record.kind === 'schedule') latest.set(itemOf(record), Math.max(latest.get(itemOf(record)) ?? -Infinity, Date.parse(record.due)))
   }

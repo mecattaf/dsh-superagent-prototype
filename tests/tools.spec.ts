@@ -1,4 +1,6 @@
 /** Session tool registration, role-scoped resource reads, and routing/settings tool contracts. */
+import { Context } from '@deepseek-ai/cordis'
+import { ToolRuntime, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { TICKET_STATES } from '../src/app/cards.ts'
 import { builtInBase, builtInParts, defaultPrompts } from '../src/app/prompts.ts'
@@ -104,25 +106,24 @@ it('keeps the main Session\'s resources from an Executor Session, which lists on
   expect(offered).not.toMatch(/preview/i)
 })
 
-/** DSH's lossless JSON rule for a tool's `parameters`: finite numbers, plain arrays, plain objects with only enumerable string keys. */
-function lossless(value: unknown): boolean {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true
-  if (typeof value === 'number') return Number.isFinite(value) && !Object.is(value, -0)
-  if (typeof value !== 'object') return false
-  if (Array.isArray(value)) {
-    return Object.getPrototypeOf(value) === Array.prototype && Reflect.ownKeys(value).length === value.length + 1 && value.every(lossless)
-  }
-  if (![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false
-  return Reflect.ownKeys(value).every(key => typeof key === 'string' && Object.getOwnPropertyDescriptor(value, key)!.enumerable)
-    && Object.values(value).every(lossless)
-}
-
-it('registers every tool\'s parameters as lossless JSON, which the tool registry\'s schema projection requires', async () => {
-  const { sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
-  for (const session of [h.runtime.masterId, sessionId]) {
-    const tools = [...h.tools.get(session)!.values()] as unknown as { name: string; parameters: unknown }[]
+it('registers every tool so that DSH\'s own tool registry projects its schema with lossless parameters and runs a read through execute', async () => {
+  const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  const reads = new Map([[h.runtime.masterId, { resource: 'tickets' }], [sessionId, { resource: `ticket/${ticket.id}` }]])
+  for (const [session, read] of reads) {
+    const tools = [...h.tools.get(session)!.values()] as unknown as ToolDefinition[]
     expect(tools.length, session).toBeGreaterThan(0)
-    for (const { name, parameters } of tools) expect(lossless(parameters), name).toBe(true)
+    // The real registry, not a copy of its rule: `schemas()` detaches each tool's parameters and throws on one that is not lossless JSON.
+    const ctx = new Context()
+    ctx.reflect.provide('systemPrompt', { tools: () => () => {}, section: () => () => {} })
+    const registry = new ToolRuntime(ctx, {})
+    for (const tool of tools) registry.register(tool)
+    const schemas = registry.schemas()
+    expect(schemas.map(({ name }) => name).sort(), session).toEqual(tools.map(({ name }) => name).sort())
+    for (const { name, parameters } of schemas) expect(parameters, name).toEqual(tools.find(tool => tool.name === name)!.parameters)
+    // One read through the registry's execute: the arguments snapshot, the output schema, the lossless value check and the render.
+    const result = await registry.execute({ callId: 'call-1' as never, name: 'orchestrator_read', arguments: read, signal: new AbortController().signal })
+    expect(result, session).toMatchObject({ isError: false, value: await h.runTool(session, 'orchestrator_read', read) })
+    expect(result.content.length, session).toBeGreaterThan(0)
   }
 })
 
