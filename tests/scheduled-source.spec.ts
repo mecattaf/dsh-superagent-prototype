@@ -123,6 +123,16 @@ describe('scheduled Source', () => {
     expect(h.done()).toEqual(['a.1.json', 'a.json'])
   })
 
+  it('ends a round at an abort, and leaves the records it did not receive in the inbox for the next round', async () => {
+    const h = host()
+    drop(h.inbox, 'run-a.json', manual(h.work, RUN_A)); drop(h.inbox, 'run-b.json', manual(h.work, RUN_B))
+    const controller = new AbortController()
+    const receive = async (trigger: Trigger) => { const result = await h.ctx.receive(trigger); controller.abort(); return result }
+    expect(await readInbox({ threads: h.ctx.threads, receive }, h.inbox, controller.signal)).toMatchObject({ read: 1 })
+    expect(h.receive).toHaveBeenCalledTimes(1)
+    expect(h.done()).toEqual(['run-a.json'])
+    expect(h.waiting()).toEqual(['run-b.json'])
+  })
   it('keys a manual run by its run id, so two runs of one item are two Triggers', async () => {
     const h = host()
     const first = manual(h.work, RUN_A), second = manual(h.work, RUN_B)
