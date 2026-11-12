@@ -1,0 +1,3 @@
+# msgpackr-extract is an optional native speed-up of msgpackr, which effect depends on; msgpackr works without it.
+allowBuilds:
+  msgpackr-extract: false
