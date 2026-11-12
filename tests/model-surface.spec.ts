@@ -147,7 +147,7 @@ async function start() {
   runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
   // The optional Sources too, so their tools and text count against the budget; no run starts here.
   runtime.sources.register(scheduledKind(ScheduledConfig({})))
-  runtime.sources.register(workflowKind({ startRun: () => { throw new Error('no run starts in this spec') }, status: () => [] }))
+  runtime.sources.register(workflowKind({ startRun: () => { throw new Error('no run starts in this spec') }, status: () => [], ticketEnded: () => {} }))
   const settings = runtime.store.settings()
   const allowed = { feishu: { allowed: [{ id: MEMBER, name: 'Alice' }], syncChat: CHAT }, github: { allowed: [{ id: 'alice' }] } }
   const feishuSource = { enabled: true, config: { cli: BOT, chats: [{ chatId: CHAT, listen: 'all' }], directMessages: true } }
