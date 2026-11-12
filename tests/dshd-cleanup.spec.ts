@@ -93,6 +93,8 @@ describe('dshd.removeEnded', () => {
   })
   it('never removes a unit that runs or ran another invocation, carries another orchestrator\'s labels, dshd cannot tell about, or names no Session', async () => {
     await start({ removeEnded: true })
+    const settings = h!.runtime.store.settings()
+    h!.runtime.store.saveSettings({ ...settings, executor: { ...settings.executor, maxWorkers: 5 } })
     const running = await h!.acceptedTicket(request('1'))
     const rerun = await h!.acceptedTicket(request('5'))
     const foreign = await h!.acceptedTicket(request('9'))
