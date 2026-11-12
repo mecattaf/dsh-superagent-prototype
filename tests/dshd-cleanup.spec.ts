@@ -130,6 +130,38 @@ describe('dshd.removeEnded', () => {
     expect(binding(ticket)).toMatchObject({ state: 'ended', sessionId: 'session-g', removedAt: expect.any(String) })
     expect(fake.removals).toEqual([])
   })
+  it('sweeps at a start the units of Tickets that ended while it was off, and keeps those of open Tickets', async () => {
+    await start()
+    const done = await h!.acceptedTicket(request('1'))
+    const failed = await h!.acceptedTicket(request('5'))
+    fake.end(nameOf(done.ticket), { lines: runLines('session-d', 'Done.') })
+    fake.end(nameOf(failed.ticket), { exitCode: 2, lines: runLines('session-f', 'Tests fail.') })
+    await later(); await later()
+    expect(stored(done.ticket).ended?.outcome).toBe('completed')
+    expect(stored(failed.ticket).ended).toBeUndefined()
+    // A start with the key still off sweeps nothing.
+    await h!.restart(); await later()
+    expect(fake.removals).toEqual([])
+    await h!.restart({ executor: 'dshd', dshd: testDshd({ pairs: PAIRS, defaultPair: 'opus', removeEnded: true }) }); await later()
+    expect(fake.removals).toEqual([nameOf(done.ticket)])
+    expect(binding(done.ticket)).toMatchObject({ state: 'ended', sessionId: 'session-d', removedAt: expect.any(String) })
+    expect(fake.instances.has(nameOf(failed.ticket))).toBe(true)
+    expect(binding(failed.ticket)).not.toHaveProperty('removedAt')
+    // The next start finds nothing left to remove.
+    await h!.restart({ executor: 'dshd', dshd: testDshd({ pairs: PAIRS, defaultPair: 'opus', removeEnded: true }) }); await later()
+    expect(fake.removals).toEqual([nameOf(done.ticket)])
+  })
+  it('leaves at a start the units another host launched to that host', async () => {
+    await start()
+    const { ticket } = await h!.acceptedTicket(request('1'))
+    fake.end(nameOf(ticket), { lines: runLines('session-h', 'Done.') })
+    await later(); await later()
+    const assignmentId = stored(ticket).assignments[0]!.id
+    h!.runtime.store.set(BINDING(assignmentId), { ...binding(ticket)!, host: 'another-host' })
+    await h!.restart({ executor: 'dshd', dshd: testDshd({ pairs: PAIRS, defaultPair: 'opus', removeEnded: true }) }); await later()
+    expect(fake.removals).toEqual([])
+    expect(h!.runtime.effects.pending('dshd-rm', assignmentId)).toBe(false)
+  })
   it('retries a removal dshd fails, and removes the unit then', async () => {
     await start({ removeEnded: true })
     fake.failNext('rm', 7, 'systemd-unavailable')
