@@ -109,7 +109,7 @@ describe('the window of a workflow run', () => {
     expect(nodes[0]).not.toHaveProperty('trigger_id')
     expect(h.store.threads.get(`workflow:${String(h.store.triggers.get(nodes[1]!.trigger_id!)!.threads[0]!.id)}`)?.evaluating).toBeUndefined()
   })
-  it('W2c an unavailable node raises no other attempt: with maxAttempts 3 its one Trigger is offered three times, then no more', async () => {
+  it('W2e an unavailable node raises no other attempt: with maxAttempts 3 its one Trigger is offered three times, then no more', async () => {
     let clock = Date.parse('2026-11-12T01:00:00Z')
     const { h, directory } = start({ now: () => new Date(clock).toISOString(), config: { maxAttempts: 3 } })
     await h.started
@@ -125,8 +125,10 @@ describe('the window of a workflow run', () => {
       await new Promise(resolve => setTimeout(resolve, 15))
     }
     const a1 = h.floor.status(run)[0]!.nodes.find(node => node.label === 'a1')!
-    // An attempt follows only a Ticket that settled, which an unavailable Decision never gives.
-    expect(a1).toMatchObject({ state: 'held', trigger_id: expect.stringMatching(/-a1$/) })
+    // An attempt follows only a Ticket that settled, which an unavailable Decision never gives. Its Eval expired three times,
+    // so the node reads unavailable for a timeout, not held: nobody decided to hold it.
+    expect(a1).toMatchObject({ state: 'unavailable', reason: 'Assessment timed out', trigger_id: expect.stringMatching(/-a1$/) })
+    expect(h.context.triggers.decision(a1.trigger_id!)).toMatchObject({ kind: 'unavailable', reason: [{ code: 'timeout' }] })
     expect(h.candidates.filter(item => h.label(item.triggers[0]!.id) === 'a1').map(item => item.triggers[0]!.id))
       .toEqual([a1.trigger_id, a1.trigger_id, a1.trigger_id])
     expect(h.journal(run)).not.toContain('"type":"failed"')
