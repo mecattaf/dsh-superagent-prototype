@@ -60,3 +60,21 @@ it('refuses keys of the previous configuration before registering anything', asy
   expect(ctx.on).not.toHaveBeenCalled()
   expect(ctx.inject).not.toHaveBeenCalled()
 })
+
+it('with the engine off, builds no Runtime and leaves DSH its generated settings page for the entry', async () => {
+  const { ctx, configure } = context()
+  const built = runtimes.length
+  await apply(ctx as never, Config({ stateDir: '/srv/state', engine: false }))
+  expect(runtimes).toHaveLength(built)
+  expect(ctx.inject).not.toHaveBeenCalled()
+  expect(configure).not.toHaveBeenCalled()
+  expect(ctx.effect).not.toHaveBeenCalled()
+  expect(ctx.logger.info).toHaveBeenCalledOnce()
+})
+
+it('runs the engine unless the configuration turns it off', async () => {
+  expect(Config({ stateDir: '/srv/state' }).engine).toBe(true)
+  const built = runtimes.length
+  await apply(context().ctx as never, Config({ stateDir: '/srv/state', engine: true }))
+  expect(runtimes).toHaveLength(built + 1)
+})

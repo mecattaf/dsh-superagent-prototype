@@ -9,6 +9,10 @@ export const inject = ['agents', 'sessionController', 'sessionPersistence', 'wor
 export { Config }
 export async function apply(ctx: Context, config: DeploymentConfig): Promise<void> {
   const machine = machineOf(config)
+  // With the engine off, the entry stays inert: no Runtime, so no state directory lock, database, process environment change,
+  // route, tool or `orchestrator` service, and the Source plugins that inject that service wait. DSH keeps its generated
+  // settings page for the entry, where the engine can be turned on, as there is no management panel without it.
+  if (config.engine === false) { ctx.logger.info('dsh-superagent engine is off in this process; it opens nothing in %s', machine.stateDir); return }
   // The management panel provides its own settings UI, so disable DSH's auto-generated settings page.
   ctx.inject(['settings'], child => { child.effect(() => child.settings.configure({ auto: false }, ctx.fiber)) })
   // Volatile limits update in place without a restart; account changes restart dsh-superagent. DSH's settings service stops
