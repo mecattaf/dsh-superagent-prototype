@@ -42,7 +42,11 @@ export interface SessionsHost {
  * What Sessions registered for an agent it decorated: the releases of its prompt section, tools and skill scope, the scope
  * its skills are registered in, and the skills of one prompt revision; for a worker's subagent, only its tool limits.
  */
-interface SessionBinding { disposers: (() => void)[]; scope?: Context; skills?: { revision: number; dispose: () => void }; subagent?: true }
+interface SessionBinding {
+  disposers: (() => void)[]; scope?: Context; skills?: { revision: number; dispose: () => void }; subagent?: true
+  /** On the main Session once its own tools are registered: the registrations of each Source kind's tools, by kind. */
+  kinds?: Map<string, (() => void)[]>
+}
 
 /** The agent presets Executor Sessions and the main Session are created with, which the bundle's patch defines. */
 export const WORKER_PRESET = 'dsh-superagent-worker', ROUTER_PRESET = 'dsh-superagent-router'
@@ -96,6 +100,8 @@ export class Sessions {
   private readonly bindings = new Map<Agent, SessionBinding>()
   private readonly retryHealth = new RetryHealth()
   private readonly ctx: Context
+  /** The main-Session tools of registered Source kinds, by kind, which the main Session receives beside its own. */
+  private readonly kindTools = new Map<string, readonly Tool[]>()
   /** Registers ordered `relay` and `notice` effect handlers that deliver to the main Session. */
   constructor(private readonly host: SessionsHost) {
     this.ctx = host.context
@@ -202,10 +208,33 @@ export class Sessions {
   mayRead(sessionId: string, revision: number): boolean {
     return revision === this.promptVersion(sessionId).revision || (this.host.store.get(KV.sessions.prompts(sessionId)) ?? []).includes(revision)
   }
+  /**
+   * Adds a Source kind's tools to the main Session: at once when it is decorated, else when it is. Source plugins register
+   * their kinds once dsh-superagent is ready, after the main Session was decorated. The disposer removes them again.
+   */
+  addMainTools(kind: string, tools: readonly Tool[]): () => void {
+    this.kindTools.set(kind, tools)
+    const master = this.ctx.agents.get(this.host.masterId as SessionId)
+    const binding = master && this.bindings.get(master)
+    if (master && binding?.kinds) this.registerKind(master, binding.kinds, kind, tools)
+    return () => {
+      if (this.kindTools.get(kind) === tools) this.kindTools.delete(kind)
+      for (const { kinds } of this.bindings.values()) {
+        for (const dispose of kinds?.get(kind)?.splice(0) ?? []) dispose()
+        kinds?.delete(kind)
+      }
+    }
+  }
+  private registerKind(agent: Agent, kinds: Map<string, (() => void)[]>, kind: string, tools: readonly Tool[]): void {
+    const disposers: (() => void)[] = []
+    kinds.set(kind, disposers)
+    const register = this.registerTool(agent, disposers)
+    for (const tool of tools) register(tool.name, tool.description, tool.schema, tool.execute)
+  }
   /** Returns a tool registrar for `agent` that renders tool output as JSON text and attaches `output.image` as an image when present. */
-  private registerTool(agent: Agent, binding: SessionBinding): RegisterTool {
+  private registerTool(agent: Agent, disposers: (() => void)[]): RegisterTool {
     return (name, description, schema, execute) => {
-      binding.disposers.push(agent.ctx.tools.register({ name, description, parameters: z.toJSONSchema(schema),
+      disposers.push(agent.ctx.tools.register({ name, description, parameters: z.toJSONSchema(schema),
         output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => {
           const text = { type: 'text' as const, text: JSON.stringify(value) }
           const image = value && typeof value === 'object' && 'image' in value ? (value as { image: never }).image : undefined
@@ -257,9 +286,12 @@ export class Sessions {
     await skillScope
     // Bail out if the agent was disposed while awaiting the skill scope.
     if (this.bindings.get(agent) !== binding) return
-    const register = this.registerTool(agent, binding)
+    const register = this.registerTool(agent, binding.disposers)
     for (const tool of host.tools(agent, ticket)) register(tool.name, tool.description, tool.schema, tool.execute)
     if (master) {
+      const kinds = binding.kinds = new Map()
+      for (const [kind, tools] of this.kindTools) this.registerKind(agent, kinds, kind, tools)
+      binding.disposers.push(() => { for (const disposers of kinds.values()) for (const dispose of disposers.splice(0)) dispose() })
       binding.disposers.push(agent.ctx.tools.restrict({ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'] }),
         agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent))))
     } else {
