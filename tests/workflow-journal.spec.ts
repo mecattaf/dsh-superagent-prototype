@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
 import { Store } from '../src/app/store.ts'
 import { HealthBoard } from '../src/infra/health.ts'
-import { KV } from '../src/kv.ts'
+import { family, KV } from '../src/kv.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { sourceContextOf, type SourceContextDeps } from '../src/app/source-context.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
@@ -63,6 +63,22 @@ it('KvJournal reads no line of another run whose id begins with the same charact
     new KvJournal(context(store), id).append({ type: 'launched' })
   }
   expect(KvJournal.text(context(store), 'wf-1')).toBe('{"type":"launched"}\n')
+  store.close()
+})
+it('KvJournal reads a run\'s lines by their line numbers, whatever order the Store lists them in', () => {
+  const directory = newDirectory(); directories.push(directory)
+  const store = new Store(join(directory, 'orchestrator.sqlite'))
+  const state = context(store).state
+  const run: WorkflowRun = { id: 'wf-5', name: 'n', scriptPath: '/s.js', scriptSha256: '', cwd: directory, state: 'running', startedAt: '', seq: 0 }
+  state.set(KV.workflow.run(run.id), run)
+  const journal = new KvJournal(context(store), run.id)
+  journal.append({ type: 'launched' })
+  journal.append({ type: 'failed', key: 'k', agentId: 'a1' })
+  // The Store's key listing has no ORDER BY, so it promises no order; here it lists the lines last first.
+  const real = context(store)
+  const reversed = { ...real, state: { ...real.state, keys: (family => real.state.keys(family).reverse()) as typeof real.state.keys } }
+  expect(reversed.state.keys(family<unknown>(KV.workflow.journal(run.id, '')))).toHaveLength(2)
+  expect(KvJournal.text(reversed, run.id)).toBe('{"type":"launched"}\n{"type":"failed","key":"k","agentId":"a1"}\n')
   store.close()
 })
 it('KvJournal writes nothing once its signal aborted', () => {
