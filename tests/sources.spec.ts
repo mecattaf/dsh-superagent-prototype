@@ -12,7 +12,7 @@ import { apply as applyGithub, githubKind, pollFailure, pollRound } from '../src
 import { pollThreads as pollGithubThreads } from '../src/sources/github.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { sourceTool, type SourceKind } from '../src/sources/kind.ts'
-import { startRuntime } from './fixtures/host.ts'
+import { feishu, startRuntime } from './fixtures/host.ts'
 import { z } from 'zod'
 import { cursorAt, POLL_HORIZON_MS } from '../src/sources/poll.ts'
 import { Store } from '../src/app/store.ts'
@@ -1430,6 +1430,26 @@ describe('a Source kind\'s main-Session tools', () => {
     expect(host.tools.get(host.runtime.masterId)!.has('orchestrator_probe_echo')).toBe(false)
     host.runtime.sources.register(probe('orchestrator_probe_echo'))
     expect(host.tools.get(host.runtime.masterId)!.has('orchestrator_probe_echo')).toBe(true)
+    await host.stop()
+  })
+  it('a kind\'s tools reach a main Session that DSH creates again, unless the kind unregistered, and never a worker\'s Session', async () => {
+    const host = await startRuntime()
+    const main = host.runtime.masterId
+    // DSH creates the main Session's agent again; Sessions decorates the new agent as it decorated the first.
+    const recreate = async () => {
+      host.agents.delete(main)
+      await host.controller.create({ sessionId: main })
+      await (host.runtime as unknown as { ctx: { parallel(name: string, event: unknown): Promise<unknown> } }).ctx.parallel('agent/created', { agent: host.agents.get(main) })
+    }
+    const unregister = host.runtime.sources.register(probe('orchestrator_probe_echo'))
+    await recreate()
+    expect(await host.runTool(main, 'orchestrator_probe_echo', { text: 'again' })).toEqual({ text: 'again' })
+    const { sessionId } = await host.acceptedTicket(feishu('1', '@bot 修一下回归'))
+    expect(host.tools.get(sessionId)?.size).toBeGreaterThan(0)
+    expect(host.tools.get(sessionId)!.has('orchestrator_probe_echo')).toBe(false)
+    unregister()
+    await recreate()
+    expect(host.tools.get(main)!.has('orchestrator_probe_echo')).toBe(false)
     await host.stop()
   })
 })

@@ -270,6 +270,17 @@ describe('scheduled occurrences on the dshd executor', () => {
     expect(fake.runs.map(recipe => recipe.cwd)).toEqual([cwd])
   })
 
+  it('lists no execution variables on a scheduled Ticket\'s page under executor dshd, whose unit receives none of them', async () => {
+    await start()
+    const [id] = drop(record(agency()))
+    await round()
+    const ticket = await accept(id!)
+    // The Source still declares its variables; they stay in this process, and the brief carries the occurrence.
+    expect(h!.runtime.ticketEnvironment(stored(ticket)).map(variable => variable.key)).toContain('DSH_SUPERAGENT_SCHEDULED_ITEM')
+    expect(Object.keys(fake.runs[0]!.env).filter(key => key.startsWith('DSH_SUPERAGENT_'))).toEqual([])
+    expect(await h!.api('GET', `tickets/${ticket.id}`)).toMatchObject({ status: 200, body: { environment: [] } })
+  })
+
   it('an undelivered machine Input does not keep an ended unit\'s Ticket from completing', async () => {
     await start()
     const cwd = agency()

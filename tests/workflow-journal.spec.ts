@@ -40,6 +40,31 @@ it('KvJournal lines read back after reopening the Store parse equal to a MemoryJ
   expect(KvJournal.text(context(store), 'wf-10')).toBe('')
   store.close()
 })
+it('KvJournal reads a journal of more than ten lines back in the order it was written', async () => {
+  const directory = newDirectory(); directories.push(directory)
+  const store = new Store(join(directory, 'orchestrator.sqlite'))
+  const source = `export const meta = { name: 'steps', description: 'Six calls in a row' }\nfor (const n of [1, 2, 3, 4, 5, 6]) await agent('step ' + n)\n`
+  const run: WorkflowRun = { id: 'wf-3', name: 'steps', scriptPath: '/steps.js', scriptSha256: '', cwd: directory, state: 'running', startedAt: '', seq: 0 }
+  context(store).state.set(KV.workflow.run(run.id), run)
+  await runWorkflow(source, { backend: backend(), runId: run.id, journal: new KvJournal(context(store), run.id), newAgentId: counter() })
+  const memory = new MemoryJournal()
+  await runWorkflow(source, { backend: backend(), runId: run.id, journal: memory, newAgentId: counter() })
+  expect(memory.events.length).toBeGreaterThan(10)
+  const order = (text: string) => text.trim().split('\n').map(line => { const event = JSON.parse(line) as { type: string; key?: string }; return `${event.type} ${event.key ?? ''}` })
+  expect(order(KvJournal.text(context(store), run.id))).toEqual(order(memory.text()))
+  expect(KvJournal.load(context(store), run.id)).toEqual(parseJournal(memory.text()))
+  store.close()
+})
+it('KvJournal reads no line of another run whose id begins with the same characters', () => {
+  const directory = newDirectory(); directories.push(directory)
+  const store = new Store(join(directory, 'orchestrator.sqlite'))
+  for (const id of ['wf-1', 'wf-10']) {
+    context(store).state.set(KV.workflow.run(id), { id, name: 'n', scriptPath: '/s.js', scriptSha256: '', cwd: directory, state: 'running', startedAt: '', seq: 0 })
+    new KvJournal(context(store), id).append({ type: 'launched' })
+  }
+  expect(KvJournal.text(context(store), 'wf-1')).toBe('{"type":"launched"}\n')
+  store.close()
+})
 it('KvJournal writes nothing once its signal aborted', () => {
   const directory = newDirectory(); directories.push(directory)
   const store = new Store(join(directory, 'orchestrator.sqlite'))

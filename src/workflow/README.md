@@ -1,6 +1,6 @@
 # `src/workflow`: the workflow interpreter, vendored
 
-This directory is Substrate's workflow interpreter, copied into this repository as a library. It runs a Claude Code workflow script (`export const meta = ...` and a body with top-level `await` and `return`) against a `Backend`, journals every `agent()` call, and replays or resumes a run from that journal. Nothing in `src` imports it yet: a later change wraps it in a Cordis plugin with a Backend of its own.
+This directory is Substrate's workflow interpreter, copied into this repository as a library. It runs a Claude Code workflow script (`export const meta = ...` and a body with top-level `await` and `return`) against a `Backend`, journals every `agent()` call, and replays or resumes a run from that journal. Only the workflow Source, `src/sources/workflow*.ts`, imports it: that Cordis plugin gives it a Backend of its own, and [docs/009-workflows.md](../../docs/009-workflows.md) describes it.
 
 ## Provenance
 

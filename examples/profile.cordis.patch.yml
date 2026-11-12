@@ -7,9 +7,22 @@
 - id: dsh-superagent
   config:
     stateDir: <absolute path, for example /home/me/.dsh/state/superagent>
+    # Optional dshd executor: uncomment to run each Assignment as one dshd headless unit (docs/006-deployment.md, Workers on dshd).
+    # executor: dshd
+    # dshd:
+    #   pairs:
+    #     <pair>: { profile: <headless profile> }
+    #     <second pair>: { profile: <another headless profile>, maxWorkers: 1 }
+    #   defaultPair: <pair>
+    # A profile that loads this bundle only for its agent presets, such as a pair's headless profile, keeps the entry inert:
+    # engine: false
 # Feishu is optional: uncomment to enable its Source, then set the bot's lark-cli on the Feishu Source.
 # - id: dsh-superagent-feishu
 #   disabled: false
 # Scheduled is optional: uncomment to read occurrence records from <stateDir>/inbox/scheduled.
 # - id: dsh-superagent-scheduled
+#   disabled: false
+# Workflows are optional: uncomment to run workflow scripts, one Ticket per agent() call; its nodes need the settings in
+# docs/006-deployment.md, Workflows.
+# - id: dsh-superagent-workflow
 #   disabled: false

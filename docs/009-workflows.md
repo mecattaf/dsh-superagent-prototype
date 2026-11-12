@@ -1,6 +1,6 @@
 # 009 Workflows
 
-This document describes the workflow Source: how a workflow script's `agent()` calls become Tickets, what a deployment configures for it, and how a run resumes. It builds on [001 Domain model](001-domain.md), [002 Authorization](002-authorization.md), [003 Execution](003-execution.md) and [008 Cookbook](008-cookbook.md).
+This document describes the workflow Source: how a workflow script's `agent()` calls become Tickets, what a deployment configures for it, and how a run resumes. It builds on [001 Domain model](001-domain.md), [002 Authorization](002-authorization.md), [003 Execution](003-execution.md), [006 Deployment](006-deployment.md) and [008 Cookbook](008-cookbook.md).
 
 ## What it is
 
@@ -15,14 +15,7 @@ The workflow Source is the plugin `dsh-superagent-workflow`, inserted disabled b
 
 ## Settings a deployment gives it
 
-The plugin's Config holds machine settings, set on the row `dsh-superagent-workflow` of a profile's `cordis.patch.yml`. Changing any key but `pollMs` restarts the plugin, which resumes every run from its journal:
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `pollMs` | 2000 | How often a node that waits reads its Ticket; a change applies at the next poll, without a restart |
-| `concurrency` | 16 | `agent()` calls of one run in flight; the Executor's `maxWorkers` still caps the Tickets that run |
-| `maxAttempts` | 1 | Attempts at each call, each a new Trigger; with 1, a failed node or a reply that does not match its schema is `null` |
-| `pair` | empty | The compute pair of a run that names none; empty leaves it to the Executor |
+[006 Deployment](006-deployment.md) lists the plugin's Config keys, set on the row `dsh-superagent-workflow` of a profile's `cordis.patch.yml`, and an example rule for its nodes. Changing any key but `pollMs` restarts the plugin, which resumes every run from its journal.
 
 A node is a senderless Trigger, so the gate admits it only through the Source's admission table, and only as an inferred candidate. Three settings make the next node proceed by default; the Source sets none of them:
 
@@ -56,6 +49,7 @@ The main Session assesses node candidates as it assesses any inferred candidate.
 - A node's result is the summary of its Ticket's `ready` report, verbatim, once the Ticket ended completed; a node with a schema parses it as one JSON value, inside one code fence at most.
 - A node has no answer when that summary is no JSON value and the node has a schema, or when the summary only says the unit exited 0, which the dshd Executor reports for a worker that gave no final answer. The interpreter treats no answer as it treats any: it tries the node again while attempts remain, else the node is `null`, with `no structured output` or `no text output` in its journal line.
 - A Ticket that ends otherwise, or whose worker reports `failed` or `blocked`, makes the node `null` with the reason in its journal line. A resumed run answers that line with the same `null`, and never raises the node again.
+- A node's Ticket whose worker reported `failed` or `blocked`, which the dshd Executor reports for a unit that could not launch or did not exit 0, stays open and waits for a person, as any such Ticket does ([003 Execution](003-execution.md)): the failure is recorded and left in view, not cleared. The run has its `null` and reads that Ticket no more, so a **Retry** runs the work again but its answer reaches no run. A person who has read the failure ends the Ticket with **Stop**, or `POST tickets/<id>/stop`; work the node should still do needs a new run.
 - At start, the plugin resumes every run that has not ended. A node with a result or a failure in the journal answers from it. A node whose Trigger the Engine already has waits for that Trigger's Ticket, and one whose Trigger never reached the Engine raises it once.
 - When the plugin stops, every node that waits parks: its run writes nothing more until the next start.
 - A run's journal reads back as one JSON line per record: `SELECT value FROM kv WHERE key LIKE 'workflow-journal:<run>:%' ORDER BY key`. The script it ran is the record `workflow-script:<sha256>`.
