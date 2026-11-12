@@ -47,7 +47,7 @@ export const Config = s.object({
     args: s.array(s.string()).default(['--approval-policy', 'never']).description('dsh headless options placed before --json and the task.'),
     watchSeconds: s.number().min(5).max(600).step(1).default(30).description('How long one dshd wait follows a unit before looking again.'),
     briefArgvMaxChars: s.number().min(1000).max(120000).step(1).default(64000)
-      .description('Longest brief passed as the task argument; a longer one is written to a file under stateDir, removed once its Ticket has ended.'),
+      .description('Longest brief passed as the task argument; a longer one is written to a file under stateDir.'),
   }).default({}).description('The dshd executor; read only when executor is dshd.'),
 })
 export type DeploymentConfig = ReturnType<typeof Config>
