@@ -376,6 +376,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/infra/paths.ts` | The package's root, where packaged files are |
 | `src/infra/text.ts` | Word counts and the chat message limit, `fill` and `sameName` |
 | `src/infra/health.ts` | The `HealthBoard`, every part's health entry, each claimed by its one writer |
+| `src/infra/lock.ts` | The staleness of the state directory and inbox locks, and `lockReleased`, the bounded wait for a lock a process killed before its shutdown left |
 | `src/sources/kind.ts` | The `SourceKind` protocol, with `tools`, the fork's one addition to it |
 | `src/sources/registry.ts` | `SourceRegistry` |
 | `src/sources/host.ts` | `SourceHost`, `SourceContext`, `Health`, `health` and the fixed health texts |

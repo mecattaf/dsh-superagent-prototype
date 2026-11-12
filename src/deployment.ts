@@ -28,7 +28,7 @@ export const Config = s.object({
   engine: s.boolean().default(true)
     .description('Whether this process runs dsh-superagent. Off, the entry loads but takes no lock, opens no database, changes no process environment, registers no route or tool and starts no Session, so a process that loads the bundle only for its agent presets stays inert.'),
   lockWaitMs: s.number().min(0).max(300_000).step(1).default(35_000)
-    .description('How long a start waits for the state directory lock while another process holds it, in milliseconds. The lock of a process that died goes stale within 30 s and is taken over; a live holder is refused once the time is up. 0: refuse at once.'),
+    .description('How long a start waits for the state directory lock, and the scheduled Source for its inbox lock, while another process holds it, in milliseconds. The lock of a process that died goes stale within 30 s and is taken over; a live holder is refused once the time is up. 0: refuse at once.'),
   promptMaxChars: s.number().min(LIMITS.promptMaxChars.min).max(LIMITS.promptMaxChars.max).step(1).default(100000)
     .description('Largest saved prompt configuration, in characters.').volatile(),
   admissionContextMaxPages: s.number().min(LIMITS.admissionContextMaxPages.min).max(LIMITS.admissionContextMaxPages.max).step(1).default(10)

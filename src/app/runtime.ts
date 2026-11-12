@@ -10,14 +10,14 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-subprocess'
-import { existsSync, mkdirSync } from 'node:fs'
+import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { setTimeout as sleep } from 'node:timers/promises'
-import { check, lockSync } from 'proper-lockfile'
+import { lockSync } from 'proper-lockfile'
 import { Engine, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
+import { LOCK_STALE_MS } from '../infra/lock.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
@@ -53,20 +53,6 @@ import { executorTools, type ExecutorToolsHost } from './tools/executor.ts'
 // Source plugins interact with dsh-superagent exclusively through the `SourceHost` service interface.
 declare module '@deepseek-ai/cordis' { interface Context { orchestrator: SourceHost } }
 const now = (): string => new Date().toISOString()
-/** Age at which a state directory lock that its holder stopped refreshing counts as left by a process that died (proper-lockfile `stale`). */
-const LOCK_STALE_MS = 30_000
-
-/**
- * Wait, for at most `waitMs`, until no live process holds the state directory lock. A process killed before its shutdown leaves the lock
- * behind until it goes stale, so a start right after such a kill takes it over instead of failing. Returns when the lock is free, the time
- * is up or `signal` aborts; the Runtime's own lock then refuses a holder that is still alive.
- */
-export async function lockReleased(stateDir: string, waitMs: number, signal: AbortSignal): Promise<void> {
-  const deadline = Date.now() + waitMs
-  while (!signal.aborted && Date.now() < deadline && existsSync(stateDir) && await check(stateDir, { stale: LOCK_STALE_MS })) {
-    await sleep(Math.min(1_000, deadline - Date.now()), undefined, { signal }).catch(() => { /* Aborted: the loop ends. */ })
-  }
-}
 
 /**
  * Composition root of dsh-superagent that connects `Store`, `Setup`, `Engine`, `SourceRegistry`, `Effects`, `Outbox`, `Passes`, `Sessions`, `Settings`, `Prompts`, `DshExecutor`, and `MasterAssessor`.

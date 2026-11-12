@@ -414,7 +414,7 @@ describe('scheduled plugin entry', () => {
     const release = lockSync(h.inbox, { stale: 30_000 })
     try {
       const stop = mount(h)
-      await vi.waitFor(() => { expect(h.board.all.scheduled).toMatchObject({ state: 'error', detail: expect.stringContaining('already being held') }) }, { timeout: 5_000 })
+      await vi.waitFor(() => { expect(h.board.all.scheduled).toMatchObject({ state: 'error', detail: expect.stringContaining('already being held') }) }, { timeout: 4_000 })
       await stop()
     } finally { release() }
     expect(h.waiting()).toEqual(['a.json'])
@@ -429,7 +429,7 @@ describe('scheduled plugin entry', () => {
     const refreshed = new Date(Date.now() - 29_000)
     utimesSync(`${h.inbox}.lock`, refreshed, refreshed)
     const stop = mount(h)
-    await vi.waitFor(() => { expect(h.board.all.scheduled).toMatchObject({ state: 'ready', detail: expect.stringMatching(/^Read 1;/) }) }, { timeout: 5_000 })
+    await vi.waitFor(() => { expect(h.board.all.scheduled).toMatchObject({ state: 'ready', detail: expect.stringMatching(/^Read 1;/) }) }, { timeout: 4_000 })
     expect(h.done()).toEqual(['a.json'])
     await stop()
     expect(existsSync(`${h.inbox}.lock`)).toBe(false)
