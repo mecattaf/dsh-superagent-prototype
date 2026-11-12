@@ -1413,21 +1413,23 @@ describe('a Source kind\'s main-Session tools', () => {
   const probe = (name: string): SourceKind => ({ kind: 'probe', title: { zh: 'probe', en: 'probe' }, description: { zh: 'probe', en: 'probe' },
     schema: z.object({}).strict(), fields: [], health: ['probe'],
     tools: [sourceTool({ name, description: 'Echo the text.', schema: z.object({ text: z.string() }).strict(), execute: async ({ text }) => ({ text }) })] })
-  it('reach the main Session when the kind registers after the main Session was decorated, and leave it when the kind unregisters', async () => {
+  it('a kind\'s tools must be prefixed orchestrator_<kind>_ and reach the main Session', async () => {
+    const host = await startRuntime()
+    expect(() => host.runtime.sources.register(probe('orchestrator_echo'))).toThrow('does not start with orchestrator_probe_')
+    expect(host.runtime.sources.kind('probe')).toBeUndefined()
+    expect(host.tools.get(host.runtime.masterId)!.has('orchestrator_echo')).toBe(false)
+    host.runtime.sources.register(probe('orchestrator_probe_echo'))
+    expect(await host.runTool(host.runtime.masterId, 'orchestrator_probe_echo', { text: 'hi' })).toEqual({ text: 'hi' })
+    await host.stop()
+  })
+  it('a kind\'s tools reach a main Session decorated before the kind registered, leave it when the kind unregisters, and come back', async () => {
     const host = await startRuntime()
     const unregister = host.runtime.sources.register(probe('orchestrator_probe_echo'))
     expect(await host.runTool(host.runtime.masterId, 'orchestrator_probe_echo', { text: 'hi' })).toEqual({ text: 'hi' })
     unregister()
     expect(host.tools.get(host.runtime.masterId)!.has('orchestrator_probe_echo')).toBe(false)
-    // Registered again, before or after the main Session was decorated, the kind's tools come back.
     host.runtime.sources.register(probe('orchestrator_probe_echo'))
     expect(host.tools.get(host.runtime.masterId)!.has('orchestrator_probe_echo')).toBe(true)
-    await host.stop()
-  })
-  it('must be named orchestrator_<kind>_, or the kind does not register', async () => {
-    const host = await startRuntime()
-    expect(() => host.runtime.sources.register(probe('orchestrator_echo'))).toThrow('does not start with orchestrator_probe_')
-    expect(host.runtime.sources.kind('probe')).toBeUndefined()
     await host.stop()
   })
 })

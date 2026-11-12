@@ -1,7 +1,7 @@
 import { rmSync } from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Trigger } from '../src/core/index.ts'
-import { FIXTURE, newDirectory, workflowHost, type WorkflowHost } from './fixtures/workflow.ts'
+import { FIXTURE, neverStopped, newDirectory, requeue, workflowHost, type WorkflowHost } from './fixtures/workflow.ts'
 
 const B1 = '{"a1": "alpha t", "a2": "beta t"}'
 const RESULT = { a1: 'DONE', a2: 'DONE', b1: { a1: 'alpha t', a2: 'beta t' } }
@@ -33,7 +33,7 @@ async function firstWave(h: WorkflowHost, cwd: string) {
 }
 
 describe('workflow runs', () => {
-  it('W0 runs the three-node fixture with exactly three Triggers, offering b1 only once both results of the first wave are journaled', async () => {
+  it('W0 three-node fixture completes with exactly three Triggers', async () => {
     const { host: h, directory } = start()
     const run = await firstWave(h, directory)
     const journal = lines(h, run)
@@ -51,7 +51,7 @@ describe('workflow runs', () => {
     expect(new Set(h.receive.mock.calls.map(([item]) => (item as Trigger).threads[0]!.id)).size).toBe(3)
     expect(h.floor.status(run)[0]!.nodes.map(node => [node.label, node.state])).toEqual([['a1', 'done'], ['a2', 'done'], ['b1', 'done']])
   })
-  it('K1 restarts while b1 runs: no new Trigger, Ticket or launch, and ending b1 completes the run', async () => {
+  it('K1 floor killed while b1 runs: no new Trigger, Ticket or launch after restart', async () => {
     const { host: h1, directory } = start()
     const run = await firstWave(h1, directory)
     h1.accept('b1')
@@ -68,7 +68,7 @@ describe('workflow runs', () => {
     expect(h2.run(run)).toMatchObject({ state: 'completed', result: RESULT })
     expect(h2.executor.start).not.toHaveBeenCalled()
   })
-  it('K2 restarts after the result of a2 and before b1 was taken in: b1 is offered once', async () => {
+  it('K2 killed after a2\'s result line and before b1 is offered: b1 offered once', async () => {
     const { host: h1, directory } = start()
     await h1.started
     const take = h1.receive.getMockImplementation()!
@@ -88,7 +88,7 @@ describe('workflow runs', () => {
     await until(() => h2.run(run)?.state !== 'running')
     expect(h2.run(run)).toMatchObject({ state: 'completed', result: RESULT })
   })
-  it('K3 restarts after b1\'s Ticket ended and before its result was journaled: b1 settles from its Ticket', async () => {
+  it('K3 killed after b1\'s Ticket ended and before its result line: b1 settles from the Ticket', async () => {
     const { host: h1, directory } = start()
     const run = await firstWave(h1, directory)
     h1.accept('b1')
@@ -103,7 +103,24 @@ describe('workflow runs', () => {
     expect(lines(h2, run).filter(line => line.type === 'result')).toHaveLength(3)
     expect(h2.run(run)).toMatchObject({ state: 'completed', result: RESULT })
   })
-  it('K5 a node whose ticket fails returns null once and is not tried again', async () => {
+  it('K4 a held node waits and the same Trigger proceeds once requeued', async () => {
+    const { host: h, directory } = start()
+    const run = await firstWave(h, directory)
+    const b1 = h.hold('b1')
+    // Five polls later the node still waits: holding it is no failure and raises nothing new.
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(h.run(run)?.state).toBe('running')
+    expect(h.journal(run)).not.toContain('"type":"failed"')
+    expect(h.floor.status(run)[0]!.nodes.find(node => node.label === 'b1')).toMatchObject({ state: 'held', trigger_id: b1 })
+    requeue(h, b1)
+    expect(h.floor.status(run)[0]!.nodes.find(node => node.label === 'b1')?.state).toBe('offered')
+    h.accept('b1'); h.report('b1', B1)
+    await until(() => h.run(run)?.state !== 'running')
+    expect(h.run(run)).toMatchObject({ state: 'completed', result: RESULT })
+    expect(h.receive.mock.calls.map(([item]) => (item as Trigger).id).filter(id => id === b1)).toHaveLength(1)
+    neverStopped(h)
+  })
+  it('K5 a node whose unit fails returns null and is not retried', async () => {
     const { host: h, directory } = start()
     const run = await firstWave(h, directory)
     h.accept('b1'); h.report('b1', 'the files were missing', 'failed')
@@ -125,7 +142,7 @@ describe('workflow runs', () => {
     expect(h.run(run)).toMatchObject({ state: 'completed', result: RESULT })
     expect(h.store.tickets.list()).toHaveLength(4)
   })
-  it('K6 a failed node is replayed as null on resume, never raised again', async () => {
+  it('K6 a failed node is replayed as null on resume, never re-dispatched', async () => {
     const { host: h1, directory } = start()
     await h1.started
     const { run_id: run } = h1.floor.startRun({ script: FIXTURE, cwd: directory, args: { tag: 't' } })

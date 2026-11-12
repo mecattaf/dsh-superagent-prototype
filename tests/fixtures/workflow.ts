@@ -6,7 +6,7 @@
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { vi } from 'vitest'
+import { expect, vi } from 'vitest'
 import { Engine, type Assignment, type Candidate, type ReceiveResult, type Ticket, type Trigger } from '../../src/core/index.ts'
 import { sourceContextOf, type SourceContextDeps } from '../../src/app/source-context.ts'
 import { Store } from '../../src/app/store.ts'
@@ -29,10 +29,13 @@ export const WORKFLOW_SETTINGS = {
 }
 export const newDirectory = (): string => mkdtempSync(join(tmpdir(), 'workflow-'))
 
-/** One process's worth of the workflow Source on the Store in `directory`, with `slots` workers. */
-export function workflowHost(directory: string, options: { slots?: number; config?: Partial<FloorConfig>; now?: () => string } = {}) {
+/**
+ * One process's worth of the workflow Source on the Store in `directory`, with `slots` workers. `settings` replaces the seeded
+ * settings of a new Store, and `config` the Source's machine settings, polling every 5 ms unless it names its own `pollMs`.
+ */
+export function workflowHost(directory: string, options: { slots?: number; config?: Partial<FloorConfig>; now?: () => string; settings?: unknown } = {}) {
   const store = new Store(join(directory, 'orchestrator.sqlite'))
-  if (store.get(KV.settings.revision) === undefined) store.saveSettings(SettingsSchema.parse(WORKFLOW_SETTINGS))
+  if (store.get(KV.settings.revision) === undefined) store.saveSettings(SettingsSchema.parse(options.settings ?? WORKFLOW_SETTINGS))
   const sources = new SourceRegistry(() => store.settings(), new HealthBoard())
   const candidates: Candidate[] = []
   const launches: string[] = [], pending: { ticket: string; assignment: string }[] = [], running = new Set<string>()
@@ -103,3 +106,16 @@ export function workflowHost(directory: string, options: { slots?: number; confi
     context, label, started }
 }
 export type WorkflowHost = ReturnType<typeof workflowHost>
+/** Requeues a held node's Trigger, as `orchestrator_trigger_requeue` does, and runs the pass that offers it again. */
+export function requeue(h: WorkflowHost, trigger: string): void {
+  expect(h.engine.reevaluate(trigger)).toBe(true)
+  h.engine.evaluateDue()
+}
+/**
+ * No Ticket was stopped. The Engine asks the Executor to stop the Assignments of every Ticket that ends, a completed one too,
+ * so each `stop` call must be for a Ticket that had already completed.
+ */
+export function neverStopped(h: WorkflowHost): void {
+  expect(h.store.tickets.list().map(ticket => ticket.ended?.outcome)).not.toContain('stopped')
+  expect(h.executor.stop.mock.calls.map(([ticket]) => ticket.ended?.outcome)).toEqual(h.executor.stop.mock.calls.map(() => 'completed'))
+}

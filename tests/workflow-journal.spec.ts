@@ -21,7 +21,7 @@ function context(store: Store) {
 const counter = () => { let n = 0; return () => `a${String(++n).padStart(16, '0')}` }
 const backend = () => new MockBackend({ turns: () => 0 })
 
-it('KvJournal lines read back after the Store reopens parse as the same run\'s journal in memory does', async () => {
+it('KvJournal lines read back after reopening the Store parse equal to a MemoryJournal of the same run', async () => {
   const directory = newDirectory(); directories.push(directory)
   const path = join(directory, 'orchestrator.sqlite')
   const source = readFileSync(FIXTURE, 'utf8')

@@ -31,7 +31,7 @@ const commit = (reference: unknown, value: unknown) => { (reference as Record<sy
 const script = (name: string, body: string) => `export const meta = { name: '${name}', description: 'A test script' }\n${body}\n`
 
 describe('orchestrator_workflow_start', () => {
-  it('starts one run per trigger_id: the same request again returns the run it started', async () => {
+  it('start is idempotent on trigger_id', async () => {
     const { h, directory } = start()
     await h.started
     const request = { script: FIXTURE, cwd: directory, args: { tag: 't' }, trigger_id: 'request-1' }
@@ -41,7 +41,7 @@ describe('orchestrator_workflow_start', () => {
     expect(h.floor.status()).toHaveLength(1)
     expect(h.floor.startRun({ ...request, trigger_id: 'request-2' }).run_id).not.toBe(first.run_id)
   })
-  it('resumes a run with the script it started with, not the file as it is now', async () => {
+  it('a resumed run uses the pinned script, not the edited file', async () => {
     const { h: h1, directory } = start()
     await h1.started
     const path = join(directory, 'fixture.workflow.js')
@@ -54,7 +54,7 @@ describe('orchestrator_workflow_start', () => {
     await until(() => h2.receive.mock.calls.length === 2)
     expect(received(h2)).toEqual([['a1', 'duplicate'], ['a2', 'duplicate']])
   })
-  it('resolves workflow() beside the script, then in <cwd>/.claude/workflows, and resumes with the children it read', async () => {
+  it('nested workflow() resolves beside the script, then <cwd>/.claude/workflows, and is pinned', async () => {
     const { h: h1, directory } = start()
     await h1.started
     mkdirSync(join(directory, 'scripts')); mkdirSync(join(directory, '.claude', 'workflows'), { recursive: true })
@@ -75,7 +75,7 @@ describe('orchestrator_workflow_start', () => {
     await until(() => h2.run(run)?.state !== 'running')
     expect(h2.run(run)).toMatchObject({ state: 'completed', result: ['child done', 'shared done'] })
   })
-  it('refuses a workflow() inside a child, as the interpreter nests one level only', async () => {
+  it('nested workflow() refuses a workflow() inside a child, as the interpreter nests one level only', async () => {
     const { h, directory } = start()
     await h.started
     writeFileSync(join(directory, 'top.workflow.js'), script('top', 'return await workflow("middle")'))
@@ -85,7 +85,7 @@ describe('orchestrator_workflow_start', () => {
     await until(() => h.run(run)?.state !== 'running')
     expect(h.run(run)).toMatchObject({ state: 'failed', error: expect.stringContaining('nesting is limited') })
   })
-  it('refuses a relative or missing cwd, a script it cannot read, and a script without a valid meta', async () => {
+  it('start refuses a relative or missing cwd and an invalid meta, and a script it cannot read', async () => {
     const { h, directory } = start()
     await h.started
     writeFileSync(join(directory, 'bad.js'), 'return 1\n')
