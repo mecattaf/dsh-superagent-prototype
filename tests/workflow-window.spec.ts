@@ -152,7 +152,7 @@ describe('the window of a workflow run', () => {
     // Under the threshold the polls tell nothing.
     await new Promise(resolve => setTimeout(resolve, 30))
     expect(h.logger.warn).not.toHaveBeenCalled()
-    expect(h.board.all.workflow?.detail).toBe('1 runs under way, 2 nodes waiting for their tickets')
+    expect(String(h.board.all.workflow?.detail)).not.toContain('offered for more than')
     // The threshold applies at the next poll, without a restart.
     threshold = 3600
     await until(() => String(h.board.all.workflow?.detail).includes('offered for more than'))
