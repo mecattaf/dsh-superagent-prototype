@@ -15,7 +15,7 @@ import type { HealthEntry } from '../infra/health.ts'
 import { KV } from '../kv.ts'
 import { LIMITS } from '../limits.ts'
 import { WorkerSlots, batchOf, inputMessage, sourceTrigger, ticketExecution } from './dsh.ts'
-import { DshdCli, DshdUnavailable, invocationOf, type DshdPort, type DshdRead, type DshdRecipe, type DshdStatus } from './dshd-cli.ts'
+import { DshdCli, DshdUnanswered, DshdUnavailable, invocationOf, type DshdPort, type DshdRead, type DshdRecipe, type DshdStatus } from './dshd-cli.ts'
 import type { ExecutorPort } from './port.ts'
 
 declare module '../app/effects.ts' {
@@ -60,7 +60,7 @@ const EXTRA_LABEL = /^superagent\.[a-z0-9._-]+$/
 const UNIT_NAME = /^[a-z0-9]([a-z0-9_-]{0,61}[a-z0-9])?$/
 const RUNNING = new Set(['running', 'starting', 'stopping'])
 const UNCERTAIN = new Set(['masked', 'orphaned', 'inconsistent', 'unknown'])
-/** Tries of a launch while dshd is unavailable (exit 7) before the Assignment is recorded failed. */
+/** Tries of a launch while dshd is unavailable (exit 7) or does not answer before the Assignment is recorded failed. */
 const UNAVAILABLE_TRIES = 3
 /** Longest worker answer the summary of a unit that did not complete carries; a completed unit's answer is its whole result. */
 const FINAL_CHARS = 3800
@@ -182,7 +182,7 @@ export class DshdExecutor implements ExecutorPort {
   private readonly slots: WorkerSlots
   private readonly dshd: DshdPort
   private readonly hostname: () => string
-  /** Launch attempts made so far while dshd was unavailable, by Assignment ID. */
+  /** Launch attempts made so far while dshd was unavailable or did not answer, by Assignment ID. */
   private readonly unavailable = new Map<string, number>()
   /** Launches under way, by Assignment ID, with their pair, which per-pair limits and stops consult. */
   private readonly launching = new Map<string, string>()
@@ -278,14 +278,24 @@ export class DshdExecutor implements ExecutorPort {
     try { await this.launch(ticket, assignment, stored); this.unavailable.delete(assignmentId) }
     catch (error) {
       if (this.host.closing() || error instanceof Later) throw error
-      if (error instanceof DshdUnavailable) {
+      // A run dshd did not answer may have started the unit: the next try repeats the frozen recipe, which dshd answers for that unit.
+      const unanswered = error instanceof DshdUnanswered
+      if (error instanceof DshdUnavailable || unanswered) {
         const tries = (this.unavailable.get(assignmentId) ?? 0) + 1
         this.unavailable.set(assignmentId, tries)
-        if (tries < UNAVAILABLE_TRIES) throw error
+        if (tries < UNAVAILABLE_TRIES && this.stillPending(ticketId, assignmentId)) throw error
       }
       this.unavailable.delete(assignmentId)
       this.launchFailed(ticketId, assignmentId, error)
+      // No later try binds a unit that run may have started, so its stop looks for it under the frozen name and labels.
+      if (unanswered) this.host.effects.enqueue('dshd-stop', assignmentId, { ticketId, assignmentId, reason: 'dshd did not answer its launch' })
     } finally { this.launching.delete(assignmentId); this.slots.free(ticketId) }
+  }
+  /** Whether the Assignment is still the live Ticket's pending one, which a launch may start. */
+  private stillPending(ticketId: string, assignmentId: string): boolean {
+    const ticket = this.host.store.tickets.get(ticketId)
+    const assignment = ticket && latestAssignment(ticket)
+    return !!ticket && liveTicket(ticket) && assignment?.id === assignmentId && assignment.state === 'pending'
   }
   private async launch(ticket: Ticket, assignment: Assignment, stored: DshdBinding | undefined): Promise<void> {
     const binding = stored ?? await this.bindingOf(ticket, assignment)
@@ -352,9 +362,7 @@ export class DshdExecutor implements ExecutorPort {
     const bound: DshdBinding = { ...binding, state: 'running', ...(status.id ? { instanceId: status.id } : {}), ...(invocationId ? { invocationId } : {}) }
     store.atomic(() => {
       store.set(BINDING(assignmentId), bound)
-      const ticket = store.tickets.get(ticketId)
-      const assignment = ticket && latestAssignment(ticket)
-      if (!ticket || !liveTicket(ticket) || assignment?.id !== assignmentId || assignment.state !== 'pending') {
+      if (!this.stillPending(ticketId, assignmentId)) {
         this.host.effects.enqueue('dshd-stop', assignmentId, { ticketId, assignmentId, reason: 'The Assignment ended while its unit started' })
         return
       }

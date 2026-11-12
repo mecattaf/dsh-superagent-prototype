@@ -500,6 +500,23 @@ describe('stop', () => {
     expect(fake.stops).toEqual([fake.runs[0]!.name])
     expect(h!.runtime.store.tickets.get(ticketId)!.assignments[0]!.startedAt).toBeUndefined()
   })
+  it('stops the unit of a Ticket stopped while dshd did not answer its launch, without trying the launch again', async () => {
+    await start()
+    const gate = deferred()
+    fake.hold = gate.promise
+    fake.answerNothingNext('run')
+    const trigger = request('1', { cwd: directory() })
+    h!.runtime.receive(trigger); await h!.runtime.idle()
+    const result = await h!.route({ kind: 'accept', trigger_id: trigger.id, title: 'Fix', worktree_name: 'fix-regression', acknowledgement: '收到。' })
+    await waitUntil(() => fake.runs.length === 1)
+    const ticketId = (result.ticket as { ticket_id: string }).ticket_id
+    h!.runtime.engine.stopTicket(ticketId)
+    fake.hold = undefined; gate.resolve()
+    await h!.runtime.idle()
+    expect(fake.stops).toEqual([fake.runs[0]!.name])
+    expect(fake.runs).toHaveLength(1)
+    expect(h!.runtime.store.get(BINDING(h!.runtime.store.tickets.get(ticketId)!.assignments[0]!.id))).toMatchObject({ state: 'ended', ended: { verdict: 'stopped' } })
+  })
 })
 
 describe('inputs', () => {

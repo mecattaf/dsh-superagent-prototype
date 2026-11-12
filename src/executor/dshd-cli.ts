@@ -13,7 +13,10 @@ export type DshdRefusal = { refused: string; exit: number; message: string }
 export type DshdRunResult = ({ outcome: 'created' | 'started' | 'already-running' } & DshdStatus) | DshdRefusal
 export type DshdWaitResult = { outcome: 'ended'; exitCode?: number; signal?: number | null; reason?: string } | { outcome: 'still-running' }
 export interface DshdRead { invocationId: string; complete: boolean; lines: string[] }
-/** The thin dshd client. Production: DshdCli over ctx.subprocess. Tests: FakeDshd. Exit 7 throws DshdUnavailable. */
+/**
+ * The thin dshd client. Production: DshdCli over ctx.subprocess. Tests: FakeDshd. Exit 7 throws DshdUnavailable; a call that ended
+ * before dshd answered throws DshdUnanswered.
+ */
 export interface DshdPort {
   run(recipe: DshdRecipe, signal: AbortSignal): Promise<DshdRunResult>
   get(name: string, signal: AbortSignal): Promise<DshdStatus | 'not-found'>
@@ -24,6 +27,11 @@ export interface DshdPort {
 }
 /** dshd cannot reach systemd or its own parts (exit 7: systemd-unavailable, tool-missing, template-missing); a later try may succeed. */
 export class DshdUnavailable extends Error {}
+/**
+ * A call that its timeout, a signal or the caller's abort ended before dshd answered. dshd may have acted all the same, as a
+ * `run --bg` that created and started its unit; asking again tells.
+ */
+export class DshdUnanswered extends Error {}
 
 /** The invocation a status names: the current run's, or the last run's once the unit ended (dshd then reports `invocationId: null`). */
 export const invocationOf = (status: Pick<DshdStatus, 'invocationId' | 'lastRun'>): string | undefined =>
@@ -97,13 +105,12 @@ export class DshdCli implements DshdPort {
     const read = (reader: SubprocessOutputReader | undefined): string => reader?.readFrom(0).text ?? ''
     return { exitCode, stdout: read(handle.collected.stdout), stderr: read(handle.collected.stderr) }
   }
-  /** dshd's refusal of `run`, or DshdUnavailable for exit 7; anything that is not dshd's error object throws. */
+  /** dshd's refusal of `run`, DshdUnavailable for exit 7 or DshdUnanswered for no answer; anything that is not dshd's error object throws. */
   private refusal(verb: string, name: string, exit: Exit): DshdRefusal {
     const error = Refusal.safeParse(json(lastLine(exit.stderr)))
     if (exit.exitCode === 7) throw new DshdUnavailable(`dshd ${verb} ${name}: ${error.success ? `${error.data.error.kind}: ${error.data.error.message}` : exit.stderr.trim()}`)
-    if (exit.exitCode === null || !error.success) {
-      throw new Error(`dshd ${verb} ${name} ${exit.exitCode === null ? 'was stopped before it finished' : `exited with ${exit.exitCode}`}: ${exit.stderr.trim().slice(0, 500)}`)
-    }
+    if (exit.exitCode === null) throw new DshdUnanswered(`dshd ${verb} ${name} was stopped before it finished: ${exit.stderr.trim().slice(0, 500)}`)
+    if (!error.success) throw new Error(`dshd ${verb} ${name} exited with ${exit.exitCode}: ${exit.stderr.trim().slice(0, 500)}`)
     return { refused: error.data.error.kind, exit: exit.exitCode, message: error.data.error.message }
   }
   /** `not-found` (exit 3) for a verb that names an instance; any other refusal throws. */
