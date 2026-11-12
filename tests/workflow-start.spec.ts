@@ -208,6 +208,19 @@ describe('orchestrator_workflow_start', () => {
     expect(h2.floor.active).toBe(0)
     expect(h2.receive).not.toHaveBeenCalled()
   })
+  it('a run that ends as its floor stops records no end, and the next floor drives it to its end', async () => {
+    const { h: h1, directory } = start()
+    await h1.started
+    writeFileSync(join(directory, 'quick.workflow.js'), script('quick', 'return 7'))
+    const { run_id: run } = h1.floor.startRun({ script: 'quick.workflow.js', cwd: directory })
+    h1.floor.stop()
+    await until(() => h1.floor.active === 0)
+    expect(h1.run(run)).toMatchObject({ state: 'running' })
+    await h1.stop()
+    const { h: h2 } = start(directory)
+    await until(() => h2.run(run)?.state !== 'running')
+    expect(h2.run(run)).toMatchObject({ state: 'completed', result: 7 })
+  })
 })
 
 describe('the plugin entry', () => {
