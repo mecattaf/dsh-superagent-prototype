@@ -17,6 +17,11 @@ import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
 const RoutingNoteSchema = z.string().trim()
   .refine(text => wordCount(text) <= NOTE_WORDS, `Routing note must not exceed ${NOTE_WORDS} words (Chinese uses word segmentation). Shorten it; do not split it across deliveries.`)
   .describe(`Optional routing background or explicit human constraint, at most ${NOTE_WORDS} words. Never add implementation instructions or replace the original source.`)
+/** What an attach and a note answer when the Executor's units read only their brief (`ExecutorPort.takesInput` false). */
+const ATTACHED_BRIEF_ONLY = 'Attached: the ticket follows the trigger\'s thread. Its worker reads only its brief, so the trigger goes into '
+  + 'the brief of the ticket\'s next launch; a worker already running does not receive it, and its end hands the trigger back to Eval.'
+const NOTED_BRIEF_ONLY = 'Recorded. The ticket\'s worker reads only its brief, so the note goes into the brief of the ticket\'s next launch, '
+  + 'if it gets one, and does not reach a worker already running.'
 export interface MainToolsHost {
   readonly context: Context
   readonly engine: Pick<EngineForMainSession, 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'> & EngineForPeople
@@ -31,6 +36,8 @@ export interface MainToolsHost {
   sendReplies(): Promise<void>
   /** Runs an Engine command initiated by the main Session without emitting self-notifications. */
   quietly<T>(run: () => T): T
+  /** Whether a running Assignment receives Inputs (`ExecutorPort.takesInput`); a dshd unit reads only its brief. */
+  takesInput(): boolean
 }
 /** Schedules an Engine pass to execute the recorded routing decision and formats the tool response. */
 function routed(host: MainToolsHost, result: { decision?: DecisionKind; reason: string; ticketId?: string | undefined }) {
@@ -105,7 +112,8 @@ function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<string
     }
     case 'attach': {
       const ticket = host.quietly(() => host.engine.attach(item.ticket_id!, item.trigger_id, item.note ?? undefined))
-      return { reason: 'Attached: the ticket follows the trigger\'s thread and receives the trigger', ticketId: ticket.id }
+      return { reason: host.takesInput() ? 'Attached: the ticket follows the trigger\'s thread and receives the trigger' : ATTACHED_BRIEF_ONLY,
+        ticketId: ticket.id }
     }
     // Through `engine.decide`, so only a person's message the gate admits with explicit strength stops a ticket.
     case 'stop': {
@@ -182,7 +190,7 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
       }).strict(),
       execute: async args => {
         host.engine.note(args.ticket_id, args.text)
-        return routed(host, { reason: 'Noted for the worker', ticketId: args.ticket_id })
+        return routed(host, { reason: host.takesInput() ? 'Noted for the worker' : NOTED_BRIEF_ONLY, ticketId: args.ticket_id })
       },
     }),
     tool({

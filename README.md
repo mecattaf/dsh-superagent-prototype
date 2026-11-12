@@ -28,7 +28,18 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [005 Panel](docs/005-panel.md)
 - [006 Deployment](docs/006-deployment.md): manual setup, configuration, upgrades and troubleshooting
 - [007 Architecture](docs/007-architecture.md)
-- [008 Cookbook](docs/008-cookbook.md): adding a Source
+- [008 Cookbook](docs/008-cookbook.md): adding a Source and its main-Session tools, running Assignments as dshd units, feeding occurrences from a scheduler, and running a workflow script
+- [009 Workflows](docs/009-workflows.md)
+
+## Optional parts
+
+The first four are off until a profile turns them on; [006 Deployment](docs/006-deployment.md) lists their configuration.
+
+- **dshd executor.** With `executor: dshd`, each Assignment runs as one dshd headless unit on a named provider-harness pair, in the working directory its Trigger names. Units go on while dsh-superagent restarts, and its next start adopts them.
+- **Inert entry.** With `engine: false`, a profile loads the bundle, for example for its agent presets, without running dsh-superagent: no state, lock, Session or Source.
+- **Scheduled occurrences.** The `dsh-superagent-scheduled` Source reads one record per due occurrence from an inbox directory that an outside scheduler writes, and raises one Trigger per occurrence, each on its own Thread.
+- **Workflows.** The `dsh-superagent-workflow` Source runs workflow scripts with a vendored copy of Substrate's interpreter: each `agent()` call becomes a Trigger, then a Ticket once the main Session accepts it, and a restart resumes each run from its journal.
+- **Source tools.** A Source kind may add main-Session tools named `orchestrator_<kind>_…`; the workflow Source adds `orchestrator_workflow_start` and `orchestrator_workflow_status`.
 
 ## Development
 

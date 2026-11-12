@@ -18,6 +18,8 @@ Opening a blank managed Session in the Web UI can select the profile's default p
 
 Both presets run with `danger-full-access` as the operator's OS user and read messages from subscribed Threads. Account wrappers choose the agent's credentials by default; they do not isolate the process. A worker can execute programs by path and read the operator's home directory. For isolation, use a dedicated OS account containing only the agent's credentials.
 
+With `executor: dshd`, the values of `dshd.env` and of a pair's `env` pass in the `dshd run` command line, dshd records them in the unit recipe and dsh-superagent in the Assignment's binding, so none may be a secret: a key belongs in the worker profile's DSH credentials. A brief of up to `dshd.briefArgvMaxChars` is the unit's task argument, so it is in the recipe and, while the unit runs, in the process list; a low value (1000 at least) sends longer briefs through `<stateDir>/briefs/`, which only the operator can read.
+
 ## Prerequisites
 
 - Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+ and tmux
@@ -93,26 +95,92 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `stateDir` | yes | Absolute path: the database, the lock, the command shims in `worker-bin`, the agent's git configuration and, by default, the Ticket directories in `work`. Back it up before upgrades |
-| `engine` | no | `true` by default. `false` keeps the entry inert in this process: no lock, database, environment change, route, tool or Session, and the Source entries wait. Set it where another process loads the same bundles, for example only for the agent presets, while one process owns `stateDir`. Changing it restarts dsh-superagent |
+| `engine` | no | `true` by default. `false` keeps the entry inert in this process: no lock, database, environment change, route, tool or Session, and the Source entries wait. With `false` the bundle leaves the entry's row disabled, so a headless app, which lacks the web app's services the entry waits for, starts without reporting it; a profile that sets `disabled` on the row decides instead. Leave the Source rows disabled there too, or DeepSeek Harness reports them waiting for the `orchestrator` service. Set it where another process loads the same bundles, for example only for the agent presets, while one process owns `stateDir`. Changing it restarts dsh-superagent |
+| `lockWaitMs` | no | `35000` by default. How long a start waits for the state directory lock, and the scheduled Source for its inbox lock, while another process holds it, in milliseconds. A process killed before its shutdown leaves its lock, which goes stale within 30 s and is then taken over, so a start right after a hard kill succeeds; a live holder is refused once the time is up. `0` refuses at once |
 | `executor` | no | `dsh` (default) runs each Ticket in a DSH Session of this process; `dshd` runs each Assignment as one dshd headless unit |
-| `dshd.*` | with `executor: dshd` | `pairs` (name → headless `profile`, `env`, `maxWorkers`), `defaultPair`, `cwd`, `env`, `passEnv`, `args`, `prefix`, `command`, `watchSeconds`, `briefArgvMaxChars` |
+| `dshd.*` | with `executor: dshd` | `pairs` (name → headless `profile`, `env`, `maxWorkers`), `defaultPair`, `cwd`, `env`, `passEnv`, `args`, `prefix`, `command`, `watchSeconds`, `briefArgvMaxChars` (bytes of UTF-8; Linux takes at most 131072 in one argument), `removeEnded`, `resumeDelaySeconds`, `resumeMaxAgeHours`, `uncertainWatchLimit` |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
-
-With `executor: dshd`, a unit starts from an empty environment holding the `passEnv` names of this process, then `dshd.env`, then its pair's `env`; dshd records the values, so none may be a secret. Without a repository on the GitHub Source, setup then checks no account, writes no command shims and changes no process environment.
 
 After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
 
+### Workers on dshd
+
+With `executor: dshd`, each Assignment runs as one dshd headless unit instead of an Executor Session of this process. dshd runs as the operator's user, and each pair names a headless DeepSeek Harness profile under the same `DSH_HOME`. A profile that loads this bundle only for its agent presets sets `engine: false`.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `pairs` | none | Provider-harness pairs by name. Each has `profile`, the headless profile its units boot; `env`, added for its units; and `maxWorkers`, its own limit within the overall one |
+| `defaultPair` | empty | The pair of a Ticket whose Trigger names none in `meta.pair`; it must be one of `pairs` |
+| `cwd` | empty | The directory of a Ticket whose Trigger names none in `meta.cwd`. Absolute; empty uses the Ticket's directory under the Execution directory |
+| `env` | none | Environment added for every unit |
+| `passEnv` | `HOME`, `USER`, `LOGNAME`, `LANG`, `LOCALE_ARCHIVE`, `TZDIR`, `PATH`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`, `DSH_HOME` | Names copied from this process's environment into every unit; dshd needs the two bus variables to reach the user's service manager. `PATH` entries under `/nix/store` are left out |
+| `args` | `--approval-policy never` | `dsh headless` options placed before `--json` and the brief |
+| `prefix` | `sa` | The first part of every unit name |
+| `command` | `dshd` | The dshd CLI: a command name on `PATH` or an absolute path |
+| `watchSeconds` | 30 | How long one `dshd wait` follows a unit before it looks again |
+| `briefArgvMaxChars` | 64000 | The longest brief passed as the task argument; a longer one is written to `<stateDir>/briefs/<Assignment id>.json`, and the task names that file. The file stays after its unit ends, as the record of the task the unit's Session names; `briefs/` grows until an operator clears it |
+| `removeEnded` | false | Whether a unit is removed with `dshd rm` once its Ticket has ended and its binding records how it ended and its Session; DSH keeps the Session either way |
+| `resumeDelaySeconds` | 300 | How long after a start the work that waited from before it waits to launch, so a person can look at it first. 0 launches it at once |
+| `resumeMaxAgeHours` | 24 | Work that waited from before a start and is older than this is not launched: it is recorded failed. 0 sets no age limit |
+| `uncertainWatchLimit` | 10 | How many looks in a row may find a unit `masked`, `inconsistent` or in a state dshd cannot tell before its Assignment settles as lost; an `orphaned` unit settles at once. 0 waits until dshd can tell |
+
+- **Environment.** A unit starts from an empty environment holding the `passEnv` names of this process, then `dshd.env`, then its pair's `env`. dshd records the values with the unit, so none may be a secret. The `passEnv` values are this process's as they were before setup changed them, so no unit inherits the worker shim directory on `PATH` or the agent git variables, with or without a repository. The Execution settings' variables and prepare command do not reach a unit, and its model is its profile's.
+- **PATH.** dshd records a unit's environment once, at its first launch, and every later start of the unit replays it. So the `PATH` this process passes must hold profile links, such as the per-user profile `/etc/profiles/per-user/<user>/bin`, which each system switch updates, and no Nix store path, which a garbage collection may delete. dsh-superagent leaves `PATH` entries under `/nix/store` out of every unit's environment, and logs one warning that names them.
+- **Units.** The unit of a Ticket's `k`th Assignment is named `<prefix>-<execution name>-a<k>`, or `<prefix>-t<first 12 characters of the Ticket id>-a<k>` when the execution name does not fit dshd's name rule. It carries the labels `superagent.orchestrator`, `superagent.ticket`, `superagent.assignment` and `superagent.pair`, and each `superagent.*` label of its Trigger's `meta.labels`. Its only message is the brief: one JSON object with a short note on how a headless task ends, the Ticket, its assignment text, its waiting Inputs, and its source Trigger in full. Inputs that arrive while it runs wait for its end.
+- **Removal.** dsh-superagent removes no unit unless `dshd.removeEnded` is on: then it runs `dshd rm` on a unit it launched once the unit's Ticket has ended and the unit's binding records how it ended and its Session, and it keeps a unit that runs, holds another run, carries another orchestrator's labels or names no Session. Each start also queues the removal of up to 64 ended units of Tickets that ended before, such as while the key was off, oldest first. Where `dshd rm --help` shows `--invocation`, the removal runs as `dshd rm --invocation <bound run>`, so a run started after dsh-superagent's check stays, and dshd's refusal is recorded as the binding's `kept`; an older dshd gets `dshd rm NAME`. DSH keeps the Session either way.
+- **Ends.** Exit 0 makes the Assignment ready, and the unit's last final answer, verbatim, is the Report's summary; with no final answer the summary is `Unit <name> exited 0.` Any other end makes it failed, and its Ticket waits for a person; nothing retries it. Execution's `maxWorkers` caps the running units, and a pair's `maxWorkers` caps that pair's.
+- **Restarts.** Units keep running when dsh-superagent stops, and the next start adopts each one that still runs. A unit that a reboot cut restarts as [003 Execution](003-execution.md) describes.
+- **Work from before a start.** A start may come with nobody watching, such as a supervisor's restart of a stopped process, and then each open Ticket's waiting Assignment would launch at once. So an Assignment created before the start, or the new Assignment a restart gives one that was, waits until `resumeDelaySeconds` after the start; the worker health entry says how many wait and when they launch. A Ticket a person stops meanwhile never launches. Work older than `resumeMaxAgeHours` is not launched: its Assignment is recorded failed, and its Ticket waits for a person to retry it. A launch that was under way before the start still runs its frozen recipe again whatever its age, since dshd may already run its unit. Work created after the start, such as a Scheduled occurrence's Ticket, launches at once.
+- **Units dshd cannot tell about.** While `dshd get` finds a unit `masked`, `inconsistent` or in a state it cannot tell an end from, the Assignment keeps its slot and is looked at again with backoff, `uncertainWatchLimit` times in a row; then it settles as lost, a failed report, and its Ticket waits for a person. An `orphaned` unit, which dshd holds no record of, settles as lost at once. dsh-superagent does not stop either; `dshd get <unit>` shows what dshd knows.
+- **Setup.** Without a repository on the GitHub Source, setup checks no account, writes no command shims and changes no process environment.
+
 ### Scheduled occurrences
 
-The optional `dsh-superagent-scheduled` entry reads occurrence records that a scheduler outside dsh-superagent drops into one directory, and turns each into a Trigger. Enable it in the profile with `disabled: false`, as the example profile shows. dsh-superagent keeps no clock of its own: the scheduler decides when an occurrence is due and writes its record.
+The optional `dsh-superagent-scheduled` entry reads occurrence records that a scheduler outside dsh-superagent drops into one directory, and turns each into a Trigger. Enable it in the profile with `disabled: false`, as the example profile shows. dsh-superagent keeps no clock of its own: the scheduler decides when an occurrence is due and writes its record. With `executor: dshd`, the `DSH_SUPERAGENT_SCHEDULED_*` variables it declares, like every Source's execution variables, stay in this process: no prepare command runs, a unit's environment holds only the names the dshd configuration gives it, and the unit's brief carries the occurrence's Trigger in full instead, so the panel lists no variables on its Ticket.
 
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `inbox` | no | Absolute path of the directory records are dropped into. Empty, the default, reads `<stateDir>/inbox/scheduled`. Changing it restarts the entry |
+| `doneMaxAgeDays` | no | Days a read record stays in `.done/`, counted from the file's modification time. 0, the default, keeps it however old. Changing it restarts the entry |
+| `doneMaxCount` | no | Most read records kept in `.done/`; the newest stay. 0, the default, keeps every one. Changing it restarts the entry |
 
 - **Records.** One UTF-8 JSON object per file, named `*.json`; names starting with `.` and other extensions are ignored, so a scheduler writes elsewhere and links or renames a finished file in. The format is record version 1, `OccurrenceRecordSchema` in `src/sources/scheduled.ts`; [tests/fixtures/scheduled-occurrence-v1.json](../tests/fixtures/scheduled-occurrence-v1.json) holds one record of each kind. A record carries the work's text, frozen when it was written, and the working directory it names, which must exist.
-- **Reading.** The Source reads the directory every `pollSeconds` (Sources settings, 10 by default), oldest name first. After the Trigger is stored, it moves the record into `.done/` beside it; a record it cannot use moves into `.bad/` with a one-line `.error` file that says why. It deletes nothing. Each occurrence is a Trigger on a Thread of its own, labelled `namespace:item`, so a later occurrence never becomes part of an earlier one's Ticket. Of several schedule records of one item read together, only the latest runs; the older ones are stored as filtered with the reason `superseded` and counted in its missed occurrences. A run requested by hand is never superseded. One process reads one directory: the Source locks it, and a second one reports an error.
+- **Reading.** The Source reads the directory every `pollSeconds` (Sources settings, 10 by default), oldest name first. After the Trigger is stored, it moves the record into `.done/` beside it; a record it cannot use moves into `.bad/` with a one-line `.error` file that says why. It deletes nothing unless `doneMaxAgeDays` or `doneMaxCount` is set: then, after each read, it removes the read records in `.done/` past either bound. It removes only `*.json` files directly in `.done/`, never follows a link, and leaves `.bad/` for a person. Each occurrence is a Trigger on a Thread of its own, labelled `namespace:item`, so a later occurrence never becomes part of an earlier one's Ticket. An occurrence's Trigger id comes from its namespace, working directory, item and due instant (or run id), so a record read again answers duplicate; a Trigger stored before the namespace was part of the id keeps its id. Of several schedule records of one item, that is one namespace, working directory and item, read together, only the latest runs; the older ones are stored as filtered with the reason `superseded` and counted in its missed occurrences. An older record moves into `.done/` only after the latest one is stored, so a read cut short between the two, by an error, a stop or a crash, reads both again and the count stays whole. A run requested by hand is never superseded. One process reads one directory: the Source locks it, and a second one reports an error once the entry's `lockWaitMs` is up. A lock lost later, for example when the process stalled past the lock's 30 s stale time or another process removed it, is reported as an error and the Source stops reading at once; after 30 s it takes the lock back as it did at the start, so it reads again unless another process still holds the lock once `lockWaitMs` is up.
+- **Ownership.** A record's work runs with the permissions of the DSH process, so the Source reads only an inbox that the process's user owns and that group and others cannot write, and only records that user owns. An inbox that fails the check reports an error and nothing in it is read; a record another user owns moves into `.bad/`.
 - **Admission.** An occurrence has no sender and does not address the agent, so it goes through the cell of an unlisted sender who does not address the agent, in the Source's one admission row, `occurrence`. That cell is `ignore` by default. To let occurrences run, set it to `inferred` in **Settings → Eval → On each Source**, set the accept mode to `auto`, and add a rule that says which occurrences to accept; until then an occurrence is only recorded.
+- **Work.** The Trigger's text is two header lines, then a blank line and the record's text. For a schedule record they are `[Scheduled occurrence] <namespace>:<item> — <name>` and `Due <time>; <missed count>`; for a run requested by hand, `[Scheduled item, run now] …` and `Requested <time> by <who>`. The second line goes on with the working directory, item file, revision and pair. Its `meta` carries the record's `cwd` and `pair`, so with the dshd executor the Ticket's unit runs in that directory on that pair. The Source registers `DSH_SUPERAGENT_SCHEDULED_OCCURRENCE`, `_ITEM`, `_DUE` and `_CWD` with the execution environment.
+
+A rule for these Triggers, as one Policy rule:
+
+```json
+{"id": "scheduled", "name": "Scheduled items", "enabled": true,
+ "instruction": "A Trigger of the scheduled Source whose first line starts with [Scheduled occurrence] or [Scheduled item, run now] is an implementation request by the owner of the working directory it names. The text after the blank line is the complete task, its target is that working directory, and it needs no design decision: quote its first line and the task's first sentence as intent evidence. Accept it as one ticket titled with the namespace:item of the first line, and copy the task's first sentence into the scope. Post no acknowledgement: it has no channel. An open ticket from an earlier occurrence of the same item is no reason to ignore it; each occurrence is its own run. Ignore it only when the task text itself says it no longer applies at the time you read it, judged from the Due or Requested time, and give that reason. Never merge two occurrences into one ticket, and never shorten, change or add to the task."}
+```
+
+### Workflows
+
+The optional `dsh-superagent-workflow` entry runs workflow scripts: each `agent()` call of a script becomes a Trigger of the `workflow` Source on a Thread of its own, and the Ticket accepted from it answers the call. Enable it in the profile with `disabled: false`. Its keys:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `pollMs` | 2000 | How often a node that waits reads its Ticket for a failed or blocked report, which ends nothing, in milliseconds; a node whose Ticket ends settles at once. A change applies at the next poll, without a restart |
+| `offeredWarnSeconds` | 3600 | How long a node may stay `offered` in one Eval whose candidate has not reached the main Session before the entry logs a warning for it, once, and its health detail counts it, in seconds; such an Eval does not expire, and nothing here expires it. A change applies at the next poll, without a restart |
+| `concurrency` | 16 | `agent()` calls of one run in flight at once; Execution's `maxWorkers` still caps the Tickets that run |
+| `maxAttempts` | 1 | Attempts at each call, each one a new Trigger; with 1, a node whose Ticket fails or whose reply does not match its schema is `null` |
+| `pair` | empty | The compute pair of the nodes of a run that names none; empty leaves the choice to the Executor |
+
+Changing any key but `pollMs` and `offeredWarnSeconds` restarts the entry, which resumes every run from its journal in the database: a node with a result or a failure answers from it, and a node whose Trigger was raised is not raised again.
+
+- **Starting.** The kind gives the main Session two tools: `orchestrator_workflow_start`, with `script`, the absolute `cwd` every node works in, and optional `args`, `pair` and `trigger_id`; and `orchestrator_workflow_status`, which shows each node of a run. Ask the main Session for a run, naming the script and the directory.
+- **Admission.** A node has no sender and does not address the agent, so it goes through the unlisted unaddressed cell of the Source's one admission row, `workflow`, which is `ignore` by default. Set it to `inferred`, set the accept mode to `auto`, and add a rule that accepts nodes; without the cell every node is ignored with `admission_ignored`, and its run waits.
+- **Results.** A node's result is the summary of its Ticket's ready Report, verbatim; a node with a schema parses it as one JSON value. A Ticket that ends otherwise makes the node `null`.
+
+A rule that lets each next node proceed, while the main Session may still hold one:
+
+```json
+{"id": "workflow-node", "name": "Workflow node", "enabled": true,
+ "instruction": "A Trigger from the workflow Source is the next node of a workflow run that a person started, and it proceeds by default. Accept it unless other pending work should run first; then hold it by ignoring it with a reason that starts with 'hold:', and release it later with orchestrator_trigger_requeue. A held node keeps its workflow waiting; it is not skipped. Never stop a running ticket to reorder work."}
+```
 
 ## Start and stop
 
@@ -203,8 +271,10 @@ Health entries are grouped by responsibility:
 | `models` | Sessions waiting on a model-budget retry |
 | `evals` | Unavailable Evals from the last hour with no later judgement or dismissal |
 | `assessment`, `launch`, `delivery`, `relay`, `notice`, `reply` | Stored work described in [003 Execution](003-execution.md); delivery counts waiting work, while reply covers Channel messages |
+| `dshd-watch`, `dshd-stop` | With `executor: dshd`: following each unit until it ends, and stopping the unit of an Assignment that ended |
 | `worker` | Executor Session event handling; appears after its first failure |
 | `github`, `feishu`, `history` | Source polling, events and history recovery |
+| `scheduled`, `workflow` | The scheduled Source's inbox reads, and the workflow Source's runs |
 | `sync:<source id>` | Allowed-list synchronization |
 
 A refusal has a status and `error`, its English text:
@@ -216,8 +286,8 @@ A refusal has a status and `error`, its English text:
 
 The blocks:
 
-- `source:github`, `source:feishu`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`, and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
-- `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
+- `source:github`, `source:feishu`, `source:scheduled`, `source:workflow`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`, and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`. The scheduled Source's config has `pollSeconds`, 10 by default; the workflow Source's is empty.
+- `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, by `issues`, `pulls`, `comments` or `ci` for GitHub, `occurrence` for scheduled and `workflow` for workflow; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
 - `eval`: `mode`, `timeoutSeconds` and `model`.
 - `executor`: `model`, `maxWorkers`, `directory`, `prepare` and `blockedCommands`. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
 
@@ -254,7 +324,7 @@ From an allowed GitHub account, open an Issue or post a comment containing `@<ag
 3. Run `git pull && pnpm install && pnpm build`.
 4. Run `scripts/dsh-superagent restart` and inspect its status.
 
-A restart ends running Assignments and starts replacements with recovery notes. Team text and overridden prompt parts are retained; parts without overrides follow the new defaults. Review parts marked **Default updated** after upgrading.
+A restart ends running Assignments and starts replacements with recovery notes; with `executor: dshd`, running units go on and are adopted instead. Team text and overridden prompt parts are retained; parts without overrides follow the new defaults. Review parts marked **Default updated** after upgrading.
 
 A database migrated by a newer version cannot be opened by an older one. Rollback therefore requires the pre-upgrade backup. After upgrading DeepSeek Harness itself, restart the running instance so the panel loads matching artifacts.
 
@@ -286,6 +356,12 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 | `… timed out after 90 s`, `… was stopped by …`, `… exited with code …` or `… could not run: …` | A CLI failed without printing why; run the named program by hand as the operator's user to see its own message |
 | The panel says dsh-superagent is not answering | It is restarting, or did not start because of its configuration; the DeepSeek Harness log names the cause |
 | `dsh-superagent configuration has keys it does not use` (log) | Remove the named keys; the message says where each value lives now |
+| `dsh-superagent dshd configuration: …` (log) | A key of the `dshd` block is wrong: the default pair is not among the pairs, `cwd` is not absolute, or a pair or `env` has the wrong shape; the message names it |
+| A Ticket fails with `unknown pair …` or `cwd … does not exist` | Its Trigger names a pair that `dshd.pairs` lacks, or a working directory that is gone; fix the producer of the Trigger or the configuration, then retry the Ticket |
+| A Ticket fails with `dshd run <unit>: …` | dshd could not be reached three times; check that `passEnv` carries `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`, and that `dshd ls` works as the operator's user |
+| A Ticket fails with `dshd refused <unit>: …` | dshd refused the run; the rest of the message is dshd's refusal kind and its text |
+| A scheduled record lands in `.bad/` | The `.error` file beside it names the cause: a version other than 1, a field that fails the schema, text that is not JSON, or a `cwd` that is not a directory. Fix the scheduler |
+| Occurrences or workflow nodes are recorded but none becomes a Ticket | The Source's admission cell is `ignore`, the accept mode is not `auto`, or no enabled rule matches; see Scheduled occurrences and Workflows above |
 | The log says the plugin is incompatible with the running dsh | Install a DeepSeek Harness version within the `engines.dsh` range |
 | The panel shows "Failed to load plugins" after a DeepSeek Harness upgrade | Restart the running instance |
 | Nothing happens after a mention | Check that the author is on the Source's allowed list, the Source is on, and processing is not paused. On GitHub, a mention added by editing an Issue's body is not received; mention the agent in a comment |

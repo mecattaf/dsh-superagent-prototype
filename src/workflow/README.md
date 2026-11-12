@@ -1,12 +1,12 @@
 # `src/workflow`: the workflow interpreter, vendored
 
-This directory is Substrate's workflow interpreter, copied into this repository as a library. It runs a Claude Code workflow script (`export const meta = ...` and a body with top-level `await` and `return`) against a `Backend`, journals every `agent()` call, and replays or resumes a run from that journal. Nothing in `src` imports it yet: a later change wraps it in a Cordis plugin with a Backend of its own.
+This directory is Substrate's workflow interpreter, copied into this repository as a library. It runs a Claude Code workflow script (`export const meta = ...` and a body with top-level `await` and `return`) against a `Backend`, journals every `agent()` call, and replays or resumes a run from that journal. Only the workflow Source, `src/sources/workflow*.ts`, imports it: that Cordis plugin gives it a Backend of its own, and [docs/009-workflows.md](../../docs/009-workflows.md) describes it.
 
 ## Provenance
 
 | | |
 | --- | --- |
-| Origin | Substrate (`agency-agency/substrate`), `packages/interpreter` |
+| Origin | Substrate, `packages/interpreter`; the origin repository is not public |
 | Commit | `6e6a72269ef7fa478f53c9b379bcff1c2561802a` (`6e6a722`) |
 | Vendored | 2026-11-12 |
 | Source | `src/*.ts`, 10 files, 2,376 lines, here as `src/workflow/*.ts` |
@@ -19,17 +19,23 @@ The code is unchanged. These are all the differences from that commit:
 3. **`fidelity.spec.ts`** reads recorded runs only from the directory `NAIVE_PROJECTS` names. Substrate's file also fell back to two directories under one machine's home. Without that variable, the tests against recorded runs are skipped, as they were on any machine without those runs. The three synthetic tests always run.
 4. **Not vendored:**
    - `conformance.test.ts`: all 28 of its tests compare against private recorded runs on one machine, named by session id, and are skipped everywhere else. It stays in Substrate.
-   - `bin/naive-run.mjs`: a `tsx` loader for `cli.ts`. `main(argv)` in `cli.ts` is the same entry, and the tests call it.
+   - `bin/naive-run.mjs`: a `tsx` loader for `cli.ts`. `main(argv)` in `cli.ts` is the same entry. `cli.ts` is kept only because the vendored tests `successor-r2`, `successor-r3` and `successor-r5` call `main`: `index.ts` does not export it, the plugin never runs it, and `lib/` does not contain it.
    - `package.json`, `tsconfig.json` and `vitest.config.ts`: the repository's own configuration builds and tests this code, with TypeScript 6.0.3 and vitest 4.1.8.
    - The original README, whose contract is summarized below.
 5. **Dependencies.** `effect` `4.0.0-rc.112`, a peer dependency in Substrate, and `ajv` `8.20.0`, the version Substrate's lockfile resolves, are exact `dependencies` here. `tsdown.config.ts` keeps them out of the bundle, as it does `zod`.
 6. **Repository checks.** `tests/class-docs.spec.ts` skips this directory, so its classes keep Substrate's comment style. `docs/007-architecture.md` lists its modules and tests.
 
-To check the source against Substrate (only the two comment lines should differ):
+Known costs of carrying it, none of them a difference from that commit:
+
+- **An unbounded cache.** `jsonschema.ts` keeps a module-level `Map` with one compiled validator per distinct schema text. Nothing bounds it, and it outlives a remount of the workflow Source. A later change may hang it on the run instead.
+- **Dependencies of the whole package.** `effect` is a release candidate, and it and `ajv` are runtime dependencies even of a deployment that never enables the workflow Source. An upgrade of TypeScript, `zod` or `tsdown` is likeliest to break this directory first.
+- **A plain install.** The root `pnpm-workspace.yaml` leaves out `msgpackr-extract`, the optional native speed-up of `effect`'s `msgpackr`, and the lockfile records that. Install with a plain `pnpm install`: `--ignore-workspace` reads the lockfile without that setting and fails.
+
+To check the source against a checkout of the origin repository (only the two comment lines should differ):
 
 ```sh
 for f in backend cli index interpreter journal jsonschema key meta replay sandbox; do
-  git -C <substrate checkout> show 6e6a722:packages/interpreter/src/$f.ts | diff - src/workflow/$f.ts
+  git -C <checkout of the origin> show 6e6a722:packages/interpreter/src/$f.ts | diff - src/workflow/$f.ts
 done
 ```
 

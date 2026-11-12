@@ -1,8 +1,9 @@
 /** The plugin entry on a Cordis context with DeepSeek Harness's services: an entry whose engine is off stays inert. */
 import { Context } from '@deepseek-ai/cordis'
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { lockSync } from 'proper-lockfile'
 import { afterEach, expect, it, vi } from 'vitest'
 import * as plugin from '../src/index.ts'
 
@@ -64,4 +65,32 @@ it('by default runs as before: locks the state directory, opens its database, se
   await vi.waitFor(() => { expect(source).toHaveBeenCalledOnce() })
   await fiber.dispose()
   await vi.waitFor(() => { expect(existsSync(`${stateDir}.lock`)).toBe(false) })
+})
+
+it('takes over the state directory lock a hard-killed process left, once it goes stale, instead of failing ELOCKED', async () => {
+  const { ctx, stateDir } = host()
+  // A process killed with SIGKILL leaves its lock directory, last refreshed shortly before it died; it goes stale 30 s after that.
+  mkdirSync(stateDir, { recursive: true })
+  mkdirSync(`${stateDir}.lock`)
+  const refreshed = new Date(Date.now() - 29_000)
+  utimesSync(`${stateDir}.lock`, refreshed, refreshed)
+  const fiber = await ctx.plugin(plugin, { stateDir })
+  expect(ctx.get('orchestrator')).toBeDefined()
+  expect(statSync(`${stateDir}.lock`).mtimeMs).toBeGreaterThan(refreshed.getTime() + 25_000)
+  await fiber.dispose()
+  await vi.waitFor(() => { expect(existsSync(`${stateDir}.lock`)).toBe(false) })
+})
+
+it('waits at most lockWaitMs for a state directory lock that a live process holds, then refuses to start', async () => {
+  const { ctx, services, stateDir } = host()
+  mkdirSync(stateDir, { recursive: true })
+  const release = lockSync(stateDir, { stale: 30_000 })
+  try {
+    const started = Date.now()
+    await expect(ctx.plugin(plugin, { stateDir, lockWaitMs: 1_000 })).rejects.toThrow('Lock file is already being held')
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900)
+    expect(ctx.get('orchestrator')).toBeUndefined()
+    expect(services.webServer.register).not.toHaveBeenCalled()
+    expect(existsSync(join(stateDir, 'orchestrator.sqlite'))).toBe(false)
+  } finally { release() }
 })

@@ -1,7 +1,7 @@
 /** SourceKind plugin contract: configuration schema, UI form fields, policy integration, channel adapter, and thread context reader. */
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { z } from 'zod'
-import type { OutboundMessage, ScopeResult, Trigger } from '../core/index.ts'
+import type { OutboundMessage, ScopeResult, Ticket, Trigger } from '../core/index.ts'
 import type { Deployment } from '../deployment.ts'
 import type { Commands } from '../infra/commands.ts'
 import type { SourceContext, SourceHost } from './host.ts'
@@ -21,7 +21,8 @@ export type FieldSpec =
   | FieldBase & { type: 'fact'; settings?: 'deployment' }
   | FieldBase & { type: 'rows'; columns: ({ key: string; label: Localized; type: 'text'; pattern?: string; optional?: boolean; choose?: Localized; refresh?: Localized } | { key: string; label: Localized; type: 'select'; options: { value: string; label: Localized }[] })[] }
 
-export interface VariableSpec { key: string; description: Localized }
+/** A `ticket` variable describes the ticket a Session works on, so it is listed only where there is one, as the Executor's are. */
+export interface VariableSpec { key: string; description: Localized; ticket?: true }
 export interface EnvironmentInput<C> { deployment: Deployment; config: C; trigger?: Trigger }
 export interface AdmissionRowView { id: string; label: Localized | string; note: Localized; cells: { listedUnaddressed: boolean; unlistedAddressed: boolean; unlistedUnaddressed: boolean } }
 /** Policy extension for a source kind, defining allowed senders, admission table rows, and optional external roster sync. */
@@ -112,6 +113,8 @@ export interface SourceKind<C extends Record<string, unknown> = Record<string, u
   environment?: { variables: readonly VariableSpec[]; values(input: EnvironmentInput<C>): Record<string, string> }
   /** Main-Session tools the kind adds while it is registered; each name starts with `orchestrator_<kind>_`. */
   tools?: readonly SourceTool[]
+  /** Hears that a Ticket ended, once the transaction that ended it commits; an end that a rollback undid is never heard. */
+  ticketEnded?(ticket: Ticket): void
 }
 /** A main-Session tool of a Source kind: its arguments are parsed with `schema` before `execute` runs. */
 export interface SourceTool { name: string; description: string; schema: z.ZodType; execute(args: unknown, signal: AbortSignal): Promise<unknown> }

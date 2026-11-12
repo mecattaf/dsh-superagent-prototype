@@ -1,6 +1,6 @@
 /** The dshd client: the argv it gives DSH's subprocess service, and the JSON and error objects of dshd it reads. */
 import { describe, expect, it, vi } from 'vitest'
-import { DshdCli, DshdUnavailable, invocationOf, type DshdRecipe } from '../src/executor/dshd-cli.ts'
+import { DshdCli, DshdUnanswered, DshdUnavailable, invocationOf, type DshdRecipe } from '../src/executor/dshd-cli.ts'
 import { eventsOf } from '../src/executor/dshd.ts'
 
 /** A subprocess service whose every command exits with `exitCode`, printing `stdout` and `stderr`, as in tests/fixtures/host.ts. */
@@ -44,6 +44,13 @@ describe('DshdCli', () => {
   it('throws DshdUnavailable on exit 7', async () => {
     await expect(cli(answering('', refusal('systemd-unavailable'), 7)).run(recipe, signal)).rejects.toBeInstanceOf(DshdUnavailable)
     await expect(cli(answering('', refusal('tool-missing'), 7)).get('sa-fix-a1', signal)).rejects.toBeInstanceOf(DshdUnavailable)
+  })
+  it('throws DshdUnanswered when a signal or the call\'s timeout ends dshd before it answers, since dshd may have acted', async () => {
+    await expect(cli(answering('', '', null)).run(recipe, signal)).rejects.toBeInstanceOf(DshdUnanswered)
+    await expect(cli(answering('', '', null)).run(recipe, signal)).rejects.toThrow('dshd run sa-fix-a1 was stopped before it finished')
+    await expect(cli(answering('', '', null)).get('sa-fix-a1', signal)).rejects.toBeInstanceOf(DshdUnanswered)
+    // An answer that is not dshd's is no lost answer.
+    await expect(cli(answering('', 'Segmentation fault', 139)).run(recipe, signal)).rejects.not.toBeInstanceOf(DshdUnanswered)
   })
   it('reads get --json state, invocationId, labels and lastRun, and exit 3 as not-found', async () => {
     const ended = status({ state: 'stopped', invocationId: null,
@@ -91,5 +98,28 @@ describe('DshdCli', () => {
     expect(await cli(answering(JSON.stringify({ outcome: 'stopped', warnings: [], ...status({ state: 'stopped' }) }))).stop('sa-fix-a1', signal))
       .toMatchObject({ state: 'stopped' })
     await expect(cli(answering('ok')).get('sa-fix-a1', signal)).rejects.toThrow('printed what dsh-superagent does not read: ok')
+  })
+  it('reads the last line dshd printed, after a notice on stdout or a diagnostic on stderr, and an aborted call as no answer at all', async () => {
+    expect(await cli(answering(`notice: a line before the outcome\n${JSON.stringify(status())}`)).get('sa-fix-a1', signal)).toMatchObject({ state: 'running' })
+    expect(await cli(answering('', `warning: a diagnostic\n${refusal('not-found')}`, 3)).get('sa-fix-a1', signal)).toBe('not-found')
+    // A call that our abort or a signal ended may have printed anything; even an error object is not dshd's answer.
+    await expect(cli(answering('', refusal('not-found'), null)).get('sa-fix-a1', signal)).rejects.toThrow('dshd get sa-fix-a1 was stopped before it finished')
+  })
+  it('lets read --json print a 16 MiB journal, and gives wait --json its own timeout on top of the call timeout', async () => {
+    const subprocess = answering(JSON.stringify({ name: 'sa-fix-a1', invocationId: 'invocation-1', complete: true, streams: ['stdout', 'stderr'], lines: [] }))
+    await cli(subprocess).read('sa-fix-a1', signal)
+    expect(subprocess.spawn.mock.calls[0]![0]).toMatchObject({ stdio: { stdout: { maxBytes: 1 << 24 } } })
+    const timeout = vi.spyOn(AbortSignal, 'timeout')
+    try {
+      await cli(answering(JSON.stringify({ outcome: 'still-running', warnings: [], ...status() }))).wait('sa-fix-a1', 30, signal)
+      expect(timeout).toHaveBeenCalledWith(90_000)
+    } finally { timeout.mockRestore() }
+  })
+  it('runs dshd rm --json NAME, reads the status before removal, not-found as such, and throws on a running instance', async () => {
+    const subprocess = answering(JSON.stringify({ outcome: 'removed', warnings: [], ...status({ state: 'stopped' }) }))
+    expect(await cli(subprocess).rm('sa-fix-a1', signal)).toMatchObject({ state: 'stopped' })
+    expect(subprocess.spawn.mock.calls[0]![0].argv).toEqual(['dshd', 'rm', '--json', 'sa-fix-a1'])
+    expect(await cli(answering('', refusal('not-found'), 3)).rm('sa-fix-a1', signal)).toBe('not-found')
+    await expect(cli(answering('', refusal('instance-running'), 4)).rm('sa-fix-a1', signal)).rejects.toThrow('dshd rm sa-fix-a1 refused: instance-running')
   })
 })

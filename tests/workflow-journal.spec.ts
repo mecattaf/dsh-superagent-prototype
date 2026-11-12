@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
 import { Store } from '../src/app/store.ts'
 import { HealthBoard } from '../src/infra/health.ts'
-import { KV } from '../src/kv.ts'
+import { family, KV } from '../src/kv.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { sourceContextOf, type SourceContextDeps } from '../src/app/source-context.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
@@ -38,6 +38,47 @@ it('KvJournal lines read back after reopening the Store parse equal to a MemoryJ
   expect(context(store).state.get(KV.workflow.run(run.id))?.seq).toBe(memory.events.length)
   // Another run's lines are its own.
   expect(KvJournal.text(context(store), 'wf-10')).toBe('')
+  store.close()
+})
+it('KvJournal reads a journal of more than ten lines back in the order it was written', async () => {
+  const directory = newDirectory(); directories.push(directory)
+  const store = new Store(join(directory, 'orchestrator.sqlite'))
+  const source = `export const meta = { name: 'steps', description: 'Six calls in a row' }\nfor (const n of [1, 2, 3, 4, 5, 6]) await agent('step ' + n)\n`
+  const run: WorkflowRun = { id: 'wf-3', name: 'steps', scriptPath: '/steps.js', scriptSha256: '', cwd: directory, state: 'running', startedAt: '', seq: 0 }
+  context(store).state.set(KV.workflow.run(run.id), run)
+  await runWorkflow(source, { backend: backend(), runId: run.id, journal: new KvJournal(context(store), run.id), newAgentId: counter() })
+  const memory = new MemoryJournal()
+  await runWorkflow(source, { backend: backend(), runId: run.id, journal: memory, newAgentId: counter() })
+  expect(memory.events.length).toBeGreaterThan(10)
+  const order = (text: string) => text.trim().split('\n').map(line => { const event = JSON.parse(line) as { type: string; key?: string }; return `${event.type} ${event.key ?? ''}` })
+  expect(order(KvJournal.text(context(store), run.id))).toEqual(order(memory.text()))
+  expect(KvJournal.load(context(store), run.id)).toEqual(parseJournal(memory.text()))
+  store.close()
+})
+it('KvJournal reads no line of another run whose id begins with the same characters', () => {
+  const directory = newDirectory(); directories.push(directory)
+  const store = new Store(join(directory, 'orchestrator.sqlite'))
+  for (const id of ['wf-1', 'wf-10']) {
+    context(store).state.set(KV.workflow.run(id), { id, name: 'n', scriptPath: '/s.js', scriptSha256: '', cwd: directory, state: 'running', startedAt: '', seq: 0 })
+    new KvJournal(context(store), id).append({ type: 'launched' })
+  }
+  expect(KvJournal.text(context(store), 'wf-1')).toBe('{"type":"launched"}\n')
+  store.close()
+})
+it('KvJournal reads a run\'s lines by their line numbers, whatever order the Store lists them in', () => {
+  const directory = newDirectory(); directories.push(directory)
+  const store = new Store(join(directory, 'orchestrator.sqlite'))
+  const state = context(store).state
+  const run: WorkflowRun = { id: 'wf-5', name: 'n', scriptPath: '/s.js', scriptSha256: '', cwd: directory, state: 'running', startedAt: '', seq: 0 }
+  state.set(KV.workflow.run(run.id), run)
+  const journal = new KvJournal(context(store), run.id)
+  journal.append({ type: 'launched' })
+  journal.append({ type: 'failed', key: 'k', agentId: 'a1' })
+  // The Store's key listing has no ORDER BY, so it promises no order; here it lists the lines last first.
+  const real = context(store)
+  const reversed = { ...real, state: { ...real.state, keys: (family => real.state.keys(family).reverse()) as typeof real.state.keys } }
+  expect(reversed.state.keys(family<unknown>(KV.workflow.journal(run.id, '')))).toHaveLength(2)
+  expect(KvJournal.text(reversed, run.id)).toBe('{"type":"launched"}\n{"type":"failed","key":"k","agentId":"a1"}\n')
   store.close()
 })
 it('KvJournal writes nothing once its signal aborted', () => {

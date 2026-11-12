@@ -44,6 +44,11 @@ export const USER_ERRORS = {
   sourceNotInstalled: ['refused', 'The {source} Source kind is not installed'],
   noLabels: ['refused', 'This Source has no names to refresh'],
   nothingToSync: ['refused', 'The {source} Source\'s part of the Policy has nothing to sync from, or the Source is off or waiting for setup'],
+  sourceNotRunning: ['refused', 'The {source} Source is not running: it is off, stopping or waiting for setup; retry once it runs'],
+  unknownWorkflowRun: ['missing', 'Unknown workflow run {run}; orchestrator_workflow_status without run_id lists the newest runs'],
+  workflowCwd: ['refused', 'cwd must be an absolute path to an existing directory, which {cwd} is not'],
+  workflowScript: ['refused', 'Cannot read the workflow script {script} ({error}); name an existing script, absolute or relative to cwd'],
+  workflowMeta: ['refused', 'The workflow script {script} must export a valid meta ({error})'],
 } as const satisfies Record<string, readonly ['missing' | 'refused', string]>
 export type UserErrorCode = keyof typeof USER_ERRORS
 
