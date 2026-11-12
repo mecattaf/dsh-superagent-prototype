@@ -14,7 +14,7 @@ import { HealthBoard } from '../src/infra/health.ts'
 import { SettingsSchema, assessmentOutcome, settingsPolicy, type Assessment } from '../src/policy.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import * as scheduled from '../src/sources/scheduled.ts'
-import { Config, OccurrenceRecordSchema, inboxOf, itemThread, readInbox, scheduledKind, scheduledTrigger, type OccurrenceRecord, type ScheduledConfig }
+import { Config, OccurrenceRecordSchema, inboxOf, occurrenceThread, readInbox, scheduledKind, scheduledTrigger, type OccurrenceRecord, type ScheduledConfig }
   from '../src/sources/scheduled.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 
@@ -80,26 +80,27 @@ const manual = (cwd: string, run: string, fields: Partial<OccurrenceRecord> = {}
   record(cwd, { kind: 'manual', run, due: '2026-11-12T09:15:30.000Z', at: '2026-11-12T09:15:30.000Z', by: 'scheduled-run', ...fields })
 const drop = (inbox: string, name: string, value: unknown): void => { writeFileSync(join(inbox, name), typeof value === 'string' ? value : JSON.stringify(value)) }
 const idOf = (value: OccurrenceRecord) => key('scheduled', value.cwd, value.item, value.kind === 'manual' ? `run:${value.run!}` : new Date(value.due).toISOString())
-const THREAD = 'scheduled:team/widgets:nightly-digest'
+const NAME = 'team+widgets~nightly-digest@20261112T0200Z'
+const LABEL = 'team/widgets:nightly-digest — Nightly digest'
 
 describe('scheduled Source', () => {
-  it('turns a schedule record into one Trigger without a sender, on the Thread of its item, and moves the file to .done', async () => {
+  it('turns a schedule record into one Trigger without a sender, on its own Thread, labelled with its item, and moves the file to .done', async () => {
     const h = host()
     const value = record(h.work)
-    drop(h.inbox, 'team+widgets~nightly-digest@20261112T0200Z.json', value)
+    drop(h.inbox, `${NAME}.json`, value)
     expect(await readInbox(h.ctx, h.inbox)).toEqual({ read: 1, superseded: 0, invalid: 0, unreadable: 0 })
     expect(await h.receive.mock.results[0]!.value).toBe('stored')
     const trigger = h.store.triggers.get(idOf(value))!
-    expect(trigger).toMatchObject({ id: idOf(value), source: 'scheduled', threads: [{ source: 'scheduled', id: 'team/widgets:nightly-digest' }],
+    expect(trigger).toMatchObject({ id: idOf(value), source: 'scheduled', threads: [{ source: 'scheduled', id: NAME }],
       actor: { source: 'scheduled', id: '' }, human: false, at: '2026-11-12T02:00:00.000Z' })
     // No reply target: an occurrence has no conversation to answer in.
     for (const field of ['addressed', 'channel', 'url']) expect(trigger).not.toHaveProperty(field)
     expect(h.waiting()).toEqual([])
-    expect(h.done()).toEqual(['team+widgets~nightly-digest@20261112T0200Z.json'])
-    // The panel names the item's Thread and shows when it was last due.
-    expect(h.store.threads.get(THREAD)?.meta).toMatchObject({ label: 'team/widgets:nightly-digest — Nightly digest',
-      facts: { due: { value: '2026-11-12T02:00:00.000Z' }, revision: { value: '3f9d2b7c1a0e' } } })
-    expect(itemThread(value)).toEqual({ source: 'scheduled', id: 'team/widgets:nightly-digest' })
+    expect(h.done()).toEqual([`${NAME}.json`])
+    // The panel labels the occurrence's Thread with its item and shows when it was due.
+    expect(h.store.threads.get(`scheduled:${NAME}`)?.meta).toMatchObject({ label: LABEL,
+      facts: { due: { label: { en: 'Due' }, value: '2026-11-12T02:00:00.000Z' }, revision: { value: '3f9d2b7c1a0e' } } })
+    expect(occurrenceThread(NAME)).toEqual({ source: 'scheduled', id: NAME })
   })
 
   it('gives equal records equal Trigger ids, and a re-read after a crash before the move answers duplicate and still moves the file', async () => {
@@ -131,8 +132,10 @@ describe('scheduled Source', () => {
     expect(await readInbox(h.ctx, h.inbox)).toMatchObject({ read: 3, superseded: 0 })
     const ids = [idOf(first), idOf(second), idOf(record(h.work, { due: first.due }))]
     expect(new Set(ids).size).toBe(3)
-    for (const id of ids) expect(h.store.triggers.get(id)?.threads).toEqual([{ source: 'scheduled', id: 'team/widgets:nightly-digest' }])
+    expect(ids.map(id => h.store.triggers.get(id)?.threads)).toEqual([[occurrenceThread('run-a')], [occurrenceThread('run-b')], [occurrenceThread('schedule')]])
     expect(h.store.triggers.get(idOf(first))?.meta).toMatchObject({ kind: 'manual', occurrence: 'run-a' })
+    // Each run's Thread carries the item's label, and when it was requested.
+    expect(h.store.threads.get('scheduled:run-a')?.meta).toMatchObject({ label: LABEL, facts: { due: { label: { en: 'Requested' }, value: first.due } } })
   })
 
   it('writes the header lines before the frozen text, with the missed count, the working directory, the revision and the pair', () => {
@@ -184,28 +187,31 @@ describe('scheduled Source', () => {
     expect(h.store.triggers.get(idOf(manual(h.work, RUN_A)))?.meta).not.toHaveProperty('superseded')
     expect(h.store.triggers.get(idOf(record(h.work, { item: 'weekly-report', due: '2026-11-11T00:00:00.000Z' })))?.meta).toMatchObject({ missed: 0 })
     expect(h.done()).toEqual(['a.json', 'b.json', 'c-copy.json', 'c.json', 'd.json', 'e.json'])
-    // Neither a filtered Trigger nor a manual run due earlier moves the item's last due.
-    expect(h.store.threads.get(THREAD)?.meta).toMatchObject({ facts: { due: { value: '2026-11-12T02:00:00.000Z' } } })
+    // A filtered Trigger opens no Thread; each stored occurrence has its own, all labelled with their item.
+    expect(h.store.threads.get('scheduled:a')).toBeUndefined()
+    expect(h.store.threads.get('scheduled:b')).toBeUndefined()
+    expect(h.store.threads.get('scheduled:c-copy')?.meta).toMatchObject({ label: LABEL, facts: { due: { value: '2026-11-12T02:00:00.000Z' } } })
+    expect(h.store.threads.get('scheduled:d')?.meta).toMatchObject({ label: LABEL })
   })
 
-  it('sends a later occurrence of an item to Eval while a ticket of an earlier one is open, and gives that ticket only an Input', async () => {
+  it('assesses a later occurrence of an item on its own Thread while a ticket of an earlier one is open, and gives that ticket nothing', async () => {
     const h = host()
     const first = record(h.work), second = record(h.work, { due: '2026-11-12T03:00:00.000Z' })
     drop(h.inbox, 'a.json', first)
     await readInbox(h.ctx, h.inbox)
-    // Occurrence one was accepted: its Eval finished, and its open ticket follows the item's Thread.
+    // Occurrence one was accepted: its Eval finished, and its open ticket follows the occurrence's Thread.
     const ticket = { id: 'ticket-1', title: 'team/widgets:nightly-digest', decisionId: 'd-1', mandate: { strength: 'inferred', policyVersion: '',
       basis: { via: 'admission', cell: 'unlistedUnaddressed', source: 'scheduled', scope: {} }, actor: { source: 'scheduled', id: '' }, scope: '' },
       channels: [], assignments: [], inputs: [], undelivered: [], createdAt: '', updatedAt: '', origin: { triggerId: idOf(first), triggerIds: [idOf(first)] } } as Ticket
     h.store.tickets.save(ticket)
-    const { evaluating: _finished, ...thread } = h.store.threads.get(THREAD)!
+    const { evaluating: _finished, ...thread } = h.store.threads.get('scheduled:a')!
     h.store.threads.save({ ...thread, subscriptions: ['ticket-1'] })
     drop(h.inbox, 'b.json', second)
     await readInbox(h.ctx, h.inbox)
-    // A machine Trigger has no follow-up owner, so the next occurrence is assessed on its own; the open ticket only records it.
+    // On a Thread the ticket follows, the next occurrence would also have become one of its Inputs; on its own it is only assessed.
     expect(h.engine.candidate(idOf(second))).toMatchObject({ strength: 'inferred', triggers: [expect.objectContaining({ id: idOf(second) })] })
-    expect(h.store.tickets.get('ticket-1')?.inputs).toEqual([expect.objectContaining({ kind: 'trigger', triggerId: idOf(second) })])
-    expect(h.store.tickets.get('ticket-1')?.inputs[0]).not.toHaveProperty('human')
+    expect(h.store.tickets.get('ticket-1')?.inputs).toEqual([])
+    expect(h.store.triggers.disposition(idOf(second))?.fanout).toEqual([])
   })
 
   it('quarantines a v 2 record, a record failing the schema, text that is not JSON and a record whose cwd is not a directory into .bad with an .error line, and reads the rest', async () => {
@@ -325,11 +331,12 @@ describe('scheduled Source', () => {
 })
 
 describe('scheduled Source kind', () => {
-  it('filters a superseded record by its reason, observes every other occurrence in one row, and finds the Thread of namespace:item', () => {
+  it('filters a superseded record by its reason, observes every other occurrence in one row, and finds the Thread of an occurrence by its name', () => {
     const kind = scheduledKind(Config({}))
     expect(kind.scope!({ meta: { superseded: true } }, { pollSeconds: 10 })).toEqual({ listened: false, reason: 'superseded' })
     expect(kind.scope!({ meta: {} }, { pollSeconds: 10 })).toEqual({ listened: true, observed: true, row: 'occurrence' })
-    expect(kind.find!(' team/widgets:nightly-digest ')).toEqual({ threads: [THREAD], terms: ['team/widgets:nightly-digest'] })
+    expect(kind.find!(` ${NAME} `)).toEqual({ threads: [`scheduled:${NAME}`], terms: [NAME] })
+    expect(kind.find!('team+widgets~nightly-digest@run~01KA0Z8Q6V3M4N5P7R8S9T0W1X')).toMatchObject({ threads: ['scheduled:team+widgets~nightly-digest@run~01KA0Z8Q6V3M4N5P7R8S9T0W1X'] })
     expect(kind.find!('digest')).toEqual({ threads: [], terms: ['digest'] })
     expect(kind.schema.parse({})).toEqual({ pollSeconds: 10 })
     expect(() => kind.schema.parse({ pollSeconds: 1 })).toThrow()

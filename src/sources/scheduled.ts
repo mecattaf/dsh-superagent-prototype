@@ -74,9 +74,11 @@ export interface ScheduledMeta {
   /** Set on an older record of the same item read in the same round; the Source's scope filters it. */
   superseded?: true
 }
-/** The Thread of one item: every occurrence of it, for the assessment's duplicate judgement and the panel's history. */
-export const itemThread = (record: Pick<OccurrenceRecord, 'namespace' | 'item'>): ThreadRef =>
-  ({ source: SOURCE, id: `${record.namespace}:${record.item}` })
+/**
+ * The Thread of one occurrence, named by its record file without `.json`. Every occurrence has its own: on a Thread a live
+ * Ticket follows, a later occurrence would also become an Input of that Ticket. The label groups an item's occurrences.
+ */
+export const occurrenceThread = (occurrence: string): ThreadRef => ({ source: SOURCE, id: occurrence })
 
 /** The two header lines a worker and the assessment read before the frozen text. */
 function header(record: OccurrenceRecord, due: string, missed: number): string {
@@ -94,7 +96,7 @@ export function scheduledTrigger(record: OccurrenceRecord, occurrence: string, e
   return {
     id: key(SOURCE, record.cwd, record.item, record.kind === 'manual' ? `run:${record.run!}` : due),
     source: SOURCE,
-    threads: [itemThread(record)],
+    threads: [occurrenceThread(occurrence)],
     // An occurrence has no sender: an empty actor id uses the admission cell of an unlisted sender who does not address the agent.
     actor: { source: SOURCE, id: '' },
     human: false,
@@ -191,10 +193,11 @@ export async function readInbox(ctx: Pick<SourceContext, 'receive' | 'threads'>,
     if (trigger.meta.superseded) { tally.superseded += 1; continue }
     tally.read += 1
     if (result !== 'stored') continue
-    // A manual run names the item but is no due occurrence, so only a schedule record moves the item's last due and revision.
-    const { record } = entry, label = `${record.namespace}:${record.item} — ${record.name ?? record.item}`
-    ctx.threads.describe(threadKey(trigger.threads[0]!), record.kind === 'manual' ? { label } : { label, facts: {
-      due: { label: { zh: '上次到期', en: 'Last due' }, value: String(trigger.meta.due) }, revision: { label: { zh: '版本', en: 'Revision' }, value: record.revision } } })
+    // The occurrence's own Thread is labelled with its item, which is how people find an item's occurrences together.
+    const { record } = entry
+    const due = record.kind === 'manual' ? { zh: '请求时间', en: 'Requested' } : { zh: '到期', en: 'Due' }
+    ctx.threads.describe(threadKey(trigger.threads[0]!), { label: `${record.namespace}:${record.item} — ${record.name ?? record.item}`,
+      facts: { due: { label: due, value: String(trigger.meta.due) }, revision: { label: { zh: '版本', en: 'Revision' }, value: record.revision } } })
   }
   return tally
 }
@@ -264,8 +267,8 @@ export function scheduledKind(config: ScheduledConfig): SourceKind<ScheduledSett
     health: [SOURCE],
     // An older record of an item read in the same round is kept as filtered; every other occurrence is observed in one row.
     scope: ({ meta }) => meta.superseded === true ? { listened: false, reason: 'superseded' } : { listened: true, observed: true, row: 'occurrence' },
-    // `namespace:item` names the Thread of that item.
-    find: query => ({ threads: /^\S+:[a-z0-9-]+$/.test(query.trim()) ? [`${SOURCE}:${query.trim()}`] : [], terms: query.trim() ? [query.trim()] : [] }),
+    // An occurrence's name, as a scheduler that names records `<namespace>~<item>@<instant>` writes it, names its Thread.
+    find: query => ({ threads: /^\S+~[a-z0-9-]+@\S+$/.test(query.trim()) ? [`${SOURCE}:${query.trim()}`] : [], terms: query.trim() ? [query.trim()] : [] }),
     policy: {
       schema: z.object({ allowed: z.array(z.object({ id: z.string() }).strict()).max(0).default([]) }).strict(),
       fields: [],
