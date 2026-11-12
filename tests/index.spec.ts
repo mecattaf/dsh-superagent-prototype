@@ -2,9 +2,9 @@ import { expect, it, vi } from 'vitest'
 import { Config, type Machine } from '../src/deployment.ts'
 import { apply } from '../src/index.ts'
 
-// Stub Runtime to capture the resolved Machine settings and restart callback.
+// Stub Runtime to capture the resolved Machine settings and restart callback; no lock is held, so the wait for it returns at once.
 const runtimes = vi.hoisted(() => [] as { machine: Machine; restart: () => void }[])
-vi.mock('../src/app/runtime.ts', () => ({ Runtime: class {
+vi.mock('../src/app/runtime.ts', () => ({ lockReleased: async () => {}, Runtime: class {
   ready = Promise.resolve()
   constructor(_ctx: unknown, readonly machine: Machine, readonly restart: () => void) { runtimes.push(this) }
   configured() { return true }
