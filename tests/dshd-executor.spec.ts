@@ -1,5 +1,5 @@
 /** The dshd executor on the simulated DSH host, with its real Store, Engine and Effects and an in-memory dshd. */
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -258,6 +258,31 @@ describe('idempotency', () => {
     expect(fake.runs).toHaveLength(1)
     expect(latestAssignment(stored(ticket))!.report!.summary).toMatch(/^dshd refused sa-.*-a1: exists-different-recipe: /)
   })
+  it('launches again afresh, with the person\'s message, a Ticket whose directory was missing once the person makes it', async () => {
+    await start()
+    const cwd = join(directory(), 'later')
+    const { ticket } = await accepted(request('1', { cwd }))
+    await later()
+    expect(waitsForPerson(stored(ticket))).toBe(true)
+    expect(binding(ticket)).toBeUndefined()
+    mkdirSync(cwd)
+    h!.runtime.receive(feishu('3', '@bot 目录建好了', { root_id: 'om_1' })); await h!.runtime.idle(); await later()
+    expect(fake.runs).toHaveLength(1)
+    expect(fake.runs[0]!.task).toContain('目录建好了')
+    expect(stored(ticket).undelivered).toEqual([])
+  })
+  it('builds the recipe again when a person\'s message launches a refused launch again and dshd made no unit', async () => {
+    await start()
+    fake.failNext('run', 4, 'profile-unreadable')
+    const { ticket } = await accepted(request('1', { cwd: directory() }))
+    await later()
+    expect(binding(ticket)).toMatchObject({ state: 'launching' })
+    h!.runtime.receive(feishu('3', '@bot 配置修好了', { root_id: 'om_1' })); await h!.runtime.idle(); await later()
+    expect(fake.runs).toHaveLength(2)
+    expect(fake.runs[1]!.task).toContain('配置修好了')
+    expect(binding(ticket)).toMatchObject({ state: 'running', recipe: fake.runs[1] })
+    expect(stored(ticket).undelivered).toEqual([])
+  })
   it('tries an unavailable dshd three times, then records failed', async () => {
     await start()
     for (let i = 0; i < 4; i++) fake.failNext('run', 7, 'systemd-unavailable')
@@ -336,6 +361,26 @@ describe('slots', () => {
     fake.hold = undefined; gate.resolve()
     await h!.runtime.idle()
     expect(fake.runs).toHaveLength(1)
+  })
+  it('holds the slot of a stopped Ticket\'s unit until its stop records the unit\'s end', async () => {
+    await start()
+    const one = await accepted(request('1', { cwd: directory(), pair: 'local' }))
+    await accepted(request('5', { cwd: directory(), pair: 'local' }))
+    expect(fake.runs).toHaveLength(1)
+    // dshd stop waits for dsh to exit (systemctl stop), and fails while dshd is unavailable.
+    const stop = fake.stop.bind(fake)
+    fake.stop = async name => { await new Promise(resolve => setTimeout(resolve, 50)); return stop(name) }
+    fake.failNext('stop', 7, 'systemd-unavailable')
+    const seen: number[] = []
+    const run = fake.run.bind(fake)
+    fake.run = async recipe => { seen.push([...fake.instances.values()].filter(unit => unit.state === 'running').length); return run(recipe) }
+    h!.runtime.engine.stopTicket(one.ticket.id)
+    await h!.runtime.idle()
+    expect(fake.runs).toHaveLength(1)
+    await later(); await later()
+    expect(fake.stops).toEqual([nameOf(one.ticket)])
+    expect(fake.runs).toHaveLength(2)
+    expect(seen).toEqual([0])
   })
   it('holds launches while processing is paused', async () => {
     await start()
@@ -755,6 +800,40 @@ describe('inputs', () => {
     const brief = JSON.parse(fake.runs[1]!.task) as { inputs: string[] }
     expect(brief.inputs).toEqual([expect.stringContaining('The host restarted during this ticket.')])
     expect(stored(ticket).undelivered).toEqual([])
+  })
+  /** A second Ticket of the one-slot pair takes a person's follow-up into its first brief while it waits for the slot. */
+  async function followedUp() {
+    const first = await accepted(request('1', { cwd: directory(), pair: 'local' }))
+    const second = await accepted(request('5', { cwd: directory(), pair: 'local' }))
+    h!.runtime.receive(feishu('7', '@bot 记得用分支 hotfix', { root_id: 'om_5' })); await h!.runtime.idle()
+    fake.end(nameOf(first.ticket)); await later(); await later()
+    expect(fake.runs).toHaveLength(2)
+    expect(fake.runs[1]!.task).toContain('hotfix')
+    return second.ticket
+  }
+  it('gives a recovery unit the Inputs the cut unit\'s brief carried, without repeating them as delivered', async () => {
+    await start()
+    const ticket = await followedUp()
+    fake.cut(nameOf(ticket)); await later(); await later()
+    expect(fake.runs).toHaveLength(3)
+    const brief = JSON.parse(fake.runs[2]!.task) as { earlier_inputs: string[]; inputs: string[] }
+    expect(brief.earlier_inputs).toEqual([expect.stringContaining('hotfix')])
+    expect(brief.inputs).toEqual([expect.stringContaining('The host restarted during this ticket.')])
+    expect(binding(ticket, 2)!.inputIds).toHaveLength(1)
+    // A second cut carries the person's line again, and not the first recovery note.
+    fake.cut(nameOf(ticket, 2)); await later(); await later()
+    const third = JSON.parse(fake.runs[3]!.task) as { earlier_inputs: string[] }
+    expect(third.earlier_inputs).toEqual([expect.stringContaining('hotfix')])
+  })
+  it('gives a retried unit the Inputs earlier units\' briefs carried', async () => {
+    await start()
+    const ticket = await followedUp()
+    fake.end(nameOf(ticket), { exitCode: 2, lines: [] }); await later()
+    h!.runtime.engine.retryTicket(ticket.id); await h!.runtime.idle(); await later()
+    expect(fake.runs).toHaveLength(3)
+    const brief = JSON.parse(fake.runs[2]!.task) as { earlier_inputs: string[]; retried: string }
+    expect(brief.earlier_inputs).toEqual([expect.stringContaining('hotfix')])
+    expect(brief.retried).toContain('A person retried this ticket.')
   })
   it('leaves Inputs that arrive mid-run undelivered, and an end hands them back to Eval', async () => {
     await start()
