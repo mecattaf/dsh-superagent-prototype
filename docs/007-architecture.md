@@ -255,7 +255,7 @@ Each model request binds the Session to the current prompt revision. The revisio
 ## Dependency rules
 
 - **Explicit, narrow dependencies.** Each class receives an interface that names what it uses, mostly as `Pick` types of other classes: `ExecutorHost`, `AssessorHost`, `SessionsHost`, `SettingsHost`, `SetupHost`, `PassesHost` and `OutboxHost` for the core classes, and `HttpHost`, `MainToolsHost`, `ExecutorToolsHost`, `ResourceHost`, `LinkHost` and `SourceContextDeps` for the glue, with the Engine as the `Pick` of the role that calls it. The Runtime passes itself only behind such an interface. A Source plugin injects the `orchestrator` service, which its type names as a `SourceHost`: the registry and `context(kind)`; its kind's code sees only its `SourceContext`.
-- **What may import what.** `src/core` imports nothing outside itself apart from Node's hashing, and does no I/O. `src/sources` imports nothing from `src/app`. `src/workflow` imports nothing outside itself apart from Node, `effect` and `ajv`, and nothing imports it yet. The panel imports only types from the host side, and the plain values of `src/admission.ts`, `src/limits.ts`, `src/setup.ts`, `src/navigation.ts`, `src/sources/host.ts`, `src/core/errors.ts`, `src/core/reasons.ts` and the filter lists of `src/app/api.ts`.
+- **What may import what.** `src/core` imports nothing outside itself apart from Node's hashing, and does no I/O. `src/sources` imports nothing from `src/app`. `src/workflow` imports nothing outside itself apart from Node, `effect` and `ajv`, and only the workflow Source, `src/sources/workflow*.ts`, imports it. The panel imports only types from the host side, and the plain values of `src/admission.ts`, `src/limits.ts`, `src/setup.ts`, `src/navigation.ts`, `src/sources/host.ts`, `src/core/errors.ts`, `src/core/reasons.ts` and the filter lists of `src/app/api.ts`.
 - **One writer per state.** Each kind of state has one writer, and the others read it or ask that writer.
 
   | State | Writer |
@@ -374,6 +374,12 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/feishu-read.ts` | The `feishu/` reads of a Trigger's message, its root, parent and topic, and `feishuThreadContext`, which gives them to assessments with their images |
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
+| `src/sources/workflow.ts` | The workflow kind and plugin entry, exported as `./workflow`: its Config, and the effect that registers the kind and starts and stops the runs |
+| `src/sources/workflow-trigger.ts` | A workflow node as a Trigger: one per attempt of each `agent()` call, on the node's own Thread, its text the prompt and the schema instruction |
+| `src/sources/workflow-store.ts` | A run's records in the kv area, and `KvJournal`, its journal one line per record |
+| `src/sources/workflow-backend.ts` | `TicketBackend`, the interpreter's Backend that raises a node's Trigger and answers with its Ticket's result; `TicketWaiter`, `settle` and `parseJsonReply` |
+| `src/sources/workflow-floor.ts` | `WorkflowFloor`: starting a run, driving and resuming it from its journal, its status node by node, and `pinnedResolver` for `workflow()` |
+| `src/sources/workflow-tools.ts` | The main Session's `orchestrator_workflow_start` and `orchestrator_workflow_status` |
 | `src/workflow/README.md` | Where `src/workflow` comes from: Substrate's interpreter at a fixed commit, vendored unchanged, every deviation with its reason, and the contract it keeps |
 | `src/workflow/index.ts` | The interpreter's exports |
 | `src/workflow/interpreter.ts` | `runWorkflow`: runs one workflow script against one `Backend`, with the caps, the retries, budgets, `workflow()` nesting and resume from a journal by chained key or by content identity |
@@ -408,7 +414,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](001-domain.md) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
 
-`src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
+`src/sources/github.ts`, `src/sources/feishu.ts` and `src/sources/workflow.ts` are also the entries of the three Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch`, `./feishu-watch` and `./workflow`. The bundle's `cordis.patch.yml` inserts the four plugins, with Feishu and the workflow Source disabled. A kind's `tools` reach the main Session when the kind registers, which is after the main Session was decorated, and leave it when the kind unregisters.
 
 ## Tests
 
@@ -456,10 +462,14 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/workflow/semantics.spec.ts`, `edges.spec.ts`, `meta.spec.ts`, `sessions.spec.ts` | The interpreter's builtins, caps, budgets, retries, nesting and realm, the `meta` literal, and `agent({session})` calls |
 | `tests/workflow/successor-r1.spec.ts`, `successor-r2.spec.ts`, `successor-r3.spec.ts`, `successor-r5.spec.ts`, `reverify-2026-09-24.spec.ts` | Resume and replay: content identity, killed and divergent journals, budgets across a resume, and the D17 time guards |
 | `tests/workflow/fidelity.spec.ts` | The run record's fields as the harness writes them; against recorded runs only when `NAIVE_PROJECTS` names a directory of them |
+| `tests/workflow-journal.spec.ts` | `KvJournal`: lines read back after the Store reopens parse as the same run's journal in memory does |
+| `tests/workflow-run.spec.ts` | Workflow runs on a real Store and Engine with a stand-in Executor: the three-node fixture, and the restarts and failures K1–K6 |
+| `tests/workflow-window.spec.ts` | A run's window: a held node waits and the same Trigger proceeds when requeued, other work goes first, and an Eval nobody answers |
+| `tests/workflow-start.spec.ts` | `orchestrator_workflow_start` and `_status`: idempotence, the pinned script and `workflow()` children, the refusals, the tools on the main Session, and the replay of a run's journal with no dispatch |
 | `tests/class-docs.spec.ts` | Every class in `src`, apart from the vendored `src/workflow`, has a JSDoc block before it |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
 
-`tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`. `tests/workflow/helpers.ts` is the interpreter tests' own helper.
+`tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; `workflow.ts`, the workflow Source on a real Store and Engine with a stand-in Executor, and `fixture-3.workflow.js`, the three-node workflow its tests and the live check run; and `async.ts`. `tests/workflow/helpers.ts` is the interpreter tests' own helper.
 
 ## Persistence
 

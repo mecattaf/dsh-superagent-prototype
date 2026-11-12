@@ -6,6 +6,7 @@ import type { PromptVersion } from './app/prompts.ts'
 import type { SettingsVersion } from './app/store.ts'
 import type { SettingsSave } from './policy.ts'
 import type { Retry } from './sources/github.ts'
+import type { JournalLine, NestedPin, WorkflowRun } from './sources/workflow-store.ts'
 
 /** Key of a KV record whose value has type `V`; a plain string represents an untyped key. */
 export type Key<V> = string & { readonly __value?: V }
@@ -55,4 +56,12 @@ export const KV = {
   feishu: { chats: record<Record<string, boolean>>('feishu-chats'), history: family<string, [chat: string]>('feishu-history:'),
     topics: family<Record<string, string>, [chat: string]>('feishu-history-threads:'),
     seen: family<string[], [thread: string]>('thread-seen:'), initialized: family<boolean, [thread: string]>('thread-initialized:') },
+  /**
+   * Workflow Source: each run, its journal lines by run and zero-padded line number, the scripts runs were started with by
+   * their SHA-256, and the `workflow()` children a run resolved, by run and a key of the reference and the calling script.
+   */
+  workflow: { run: family<WorkflowRun, [run: string]>('workflow-run:'),
+    journal: family<JournalLine, [run: string, seq: string]>('workflow-journal:'),
+    script: family<string, [sha256: string]>('workflow-script:'),
+    nested: family<NestedPin, [run: string, reference: string]>('workflow-nested:') },
 }
