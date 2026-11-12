@@ -11,7 +11,8 @@ export const reference = <T>(value: T): Volatile<T> & { set(next: T): void } => 
 export const testDshd = (overrides: Partial<DshdConfig> = {}): DshdConfig => ({
   command: 'dshd', prefix: 'sa', pairs: {}, defaultPair: '', cwd: '', env: {},
   passEnv: ['HOME', 'USER', 'LOGNAME', 'LANG', 'LOCALE_ARCHIVE', 'TZDIR', 'PATH', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', 'DSH_HOME'],
-  args: ['--approval-policy', 'never'], watchSeconds: 30, briefArgvMaxChars: 64000, removeEnded: false, ...overrides,
+  args: ['--approval-policy', 'never'], watchSeconds: 30, briefArgvMaxChars: 64000, removeEnded: false, resumeDelaySeconds: 300, resumeMaxAgeHours: 24,
+  uncertainWatchLimit: 10, ...overrides,
 })
 export const testMachine = (overrides: Partial<Machine> = {}): Machine => ({
   stateDir: '/tmp/dsh-superagent-test', lockWaitMs: 35000, promptMaxChars: reference(100000), admissionContextMaxPages: reference(10),

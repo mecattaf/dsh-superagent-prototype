@@ -182,7 +182,7 @@ Failures retry with exponential backoff. Throwing `Later` defers work without co
 
 Each kind has a health entry under its name. It reports an error once one of its effects failed three times in a row, except `delivery`, whose failures show on their Ticket instead. Relays keep their order, and so do notices; a failed one holds back the later ones of its kind.
 
-With the dshd executor, a `launch` held by a pair at its own `maxWorkers` tries again after 5 s, dshd's refusal fails its Ticket at once, and a dshd that cannot be reached fails it after three tries. `dshd-watch` and `dshd-stop` come from module augmentation of `EffectPayloads` in `src/executor/dshd.ts`, so `src/app/effects.ts` is unchanged.
+With the dshd executor, a `launch` held by a pair at its own `maxWorkers` tries again after 5 s, as does one of work from before the start until `dshd.resumeDelaySeconds` after it; dshd's refusal fails its Ticket at once, and a dshd that cannot be reached fails it after three tries. `dshd-watch` and `dshd-stop` come from module augmentation of `EffectPayloads` in `src/executor/dshd.ts`, so `src/app/effects.ts` is unchanged.
 
 ### Sources
 
@@ -380,7 +380,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/views/overview.ts` | The overview: Tickets that need a person, problems, the last day's flow and the Executor's load |
 | `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
 | `src/executor/port.ts` | `ExecutorPort`, what Runtime uses of its Executor, picked from `DshExecutor` |
-| `src/executor/dshd.ts` | The DshdExecutor, one dshd headless unit per Assignment: `DshdBinding`, `unitName`, `composeBrief`, `verdictOf` and `eventsOf` |
+| `src/executor/dshd.ts` | The DshdExecutor, one dshd headless unit per Assignment: `DshdBinding`, `unitName`, `composeBrief`, `verdictOf`, `eventsOf`, and `usageOf` with `addUsage`, which the workflow Source also uses to sum a node's usage |
 | `src/executor/dshd-cli.ts` | `DshdCli`, the dshd client over DSH's subprocess service, and the `DshdPort` it implements |
 | `src/executor/dshd-summary.ts` | `noAnswerSummary` and `isNoAnswer`: the summary of a unit that exited 0 without a final answer, which the DshdExecutor writes and the workflow Source reads as no result |
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |

@@ -12,7 +12,7 @@ import { BINDING } from '../src/executor/dshd.ts'
 import { KV } from '../src/kv.ts'
 import * as workflow from '../src/sources/workflow.ts'
 import { nodeTriggerId, SCHEMA_INSTRUCTION } from '../src/sources/workflow-trigger.ts'
-import type { RunStatus } from '../src/sources/workflow-floor.ts'
+import { nodeUsage, type RunStatus } from '../src/sources/workflow-floor.ts'
 import { KvJournal } from '../src/sources/workflow-store.ts'
 import { reference } from './fixtures/deployment.ts'
 import { acceptCandidate, later, runArgv, startFloor } from './fixtures/dshd-floor.ts'
@@ -20,6 +20,10 @@ import { FakeDshd, runLines } from './fixtures/fake-dshd.ts'
 import type { Host } from './fixtures/host.ts'
 import { FIXTURE } from './fixtures/workflow.ts'
 
+/** The usage two workers' DSH Sessions recorded per step: an OpenAI-compatible provider (totals, no cache writes) and Claude (cache writes, no total). */
+const OPENAI = [{ inputTokens: 3076, outputTokens: 116, totalTokens: 8662, cacheReadTokens: 5470 },
+  { inputTokens: 38, outputTokens: 1, totalTokens: 8701, cacheReadTokens: 8662 }]
+const CLAUDE = { inputTokens: 2, outputTokens: 239, cacheReadTokens: 32343, cacheWriteTokens: 372 }
 /** The rule a deployment seeds for workflow nodes. */
 const RULE = { id: 'workflow-node', name: 'Workflow node', enabled: true, instruction: 'A workflow node proceeds by default.' }
 const PROMPT = 'Write notes/digest.md from the pull requests merged yesterday, then reply with its first line.'
@@ -52,10 +56,10 @@ async function start(): Promise<void> {
   await mount()
 }
 /** Mounts the plugin entry on the Runtime as DSH loads it, polling every `pollMs` (5 ms), and waits until its runs are under way. */
-async function mount(pollMs = 5): Promise<void> {
+async function mount(pollMs = 5, maxAttempts = 1): Promise<void> {
   const disposers: (() => unknown)[] = []
   workflow.apply({ orchestrator: h!.runtime, logger: { info: () => {}, warn: () => {} }, effect: (effect: () => () => unknown) => { disposers.push(effect()) } } as never,
-    { pollMs: reference(pollMs), offeredWarnSeconds: reference(3600), concurrency: 16, maxAttempts: 1, pair: '' } as never)
+    { pollMs: reference(pollMs), offeredWarnSeconds: reference(3600), concurrency: 16, maxAttempts, pair: '' } as never)
   unmount = async () => { for (const dispose of disposers.reverse()) await dispose() }
   await vi.waitFor(() => { if (h!.runtime.health.workflow?.state !== 'ready') throw new Error('not yet') })
 }
@@ -151,6 +155,50 @@ describe('workflow nodes on the dshd executor', () => {
     expect(new Set(fake.runs.map(recipe => recipe.labels['superagent.node'])).size).toBe(3)
   })
 
+  it('gives each node the token usage its worker printed and the run the total of the nodes it measured, counting the nodes it could not', async () => {
+    await start()
+    const cwd = agency()
+    writeFileSync(join(cwd, 'fixture-3.workflow.js'), readFileSync(FIXTURE, 'utf8'))
+    const run = await startRun(cwd, 'fixture-3.workflow.js', { tag: 't1' })
+    const a1 = await acceptNode(run, 'a1'), a2 = await acceptNode(run, 'a2')
+    // A unit that still runs has printed no usage that counts yet.
+    expect((await status(run)).usage).toEqual({ measured_nodes: 0, unmeasured_nodes: 0 })
+    fake.end(unitOf(a1.ticket), { lines: runLines('session-a1', 'DONE', OPENAI) })
+    fake.end(unitOf(a2.ticket), { lines: runLines('session-a2', 'DONE', [CLAUDE]) })
+    await later(h!)
+    const b1 = await acceptNode(run, 'b1')
+    // One of b1's steps printed no usage, so its total is not known: it is counted, not guessed.
+    fake.end(unitOf(b1.ticket), { lines: runLines('session-b1', '{"a1": "alpha t1", "a2": "beta t1"}', [CLAUDE, undefined]) })
+    await later(h!)
+    await ended(run)
+    const { nodes, usage } = await status(run)
+    expect(nodes.map(node => [node.label, node.usage])).toEqual([
+      ['a1', { inputTokens: 3114, outputTokens: 117, totalTokens: 17363, cacheReadTokens: 14132 }], ['a2', CLAUDE], ['b1', undefined]])
+    // A bucket one measured node does not report is left out of the total, as DSH leaves it out of a step's.
+    expect(usage).toEqual({ total: { inputTokens: 3116, outputTokens: 356, cacheReadTokens: 46475 }, measured_nodes: 2, unmeasured_nodes: 1 })
+  })
+
+  it('sums a node\'s usage over the units of all its attempts, and shows none while a later attempt\'s unit runs', async () => {
+    ({ h, fake } = await startFloor({ rule: RULE, source: 'workflow', row: 'workflow' }))
+    await mount(5, 2)
+    const cwd = agency()
+    const run = await startRun(cwd, script(cwd, 'text'))
+    const first = await acceptNode(run, 'digest')
+    // The first attempt's unit exits 0 with no final answer, so the interpreter tries the node again.
+    fake.end(unitOf(first.ticket), { lines: runLines('session-1', undefined, OPENAI) })
+    await later(h!)
+    const second = await acceptNode(run, 'digest')
+    expect(second.ticket.id).not.toBe(first.ticket.id)
+    expect((await status(run)).nodes[0]!.usage).toBeUndefined()
+    expect((await status(run)).usage).toEqual({ measured_nodes: 0, unmeasured_nodes: 0 })
+    fake.end(unitOf(second.ticket), { lines: runLines('session-2', 'Digest written.', [CLAUDE]) })
+    await later(h!)
+    expect(await ended(run)).toMatchObject({ state: 'completed', result: { answer: 'Digest written.' } })
+    const both = { inputTokens: 3116, outputTokens: 356, cacheReadTokens: 46475 }
+    expect((await status(run)).nodes[0]!.usage).toEqual(both)
+    expect((await status(run)).usage).toEqual({ total: both, measured_nodes: 1, unmeasured_nodes: 0 })
+  })
+
   it('a floor restart while a node\'s unit runs adopts the unit, and the resumed run completes with no second Trigger, Ticket or unit', async () => {
     await start()
     const cwd = agency()
@@ -219,3 +267,15 @@ describe('workflow nodes on the dshd executor', () => {
   })
 })
 
+describe('a node\'s usage', () => {
+  it('counts a Ticket two attempts of a node share once', () => {
+    const usage = { inputTokens: 5, outputTokens: 1 }
+    const pins = new Map<string, unknown>([[KV.workflow.ticket(nodeTriggerId('r1', 'n1', 1)), 't1'], [KV.workflow.ticket(nodeTriggerId('r1', 'n1', 2)), 't1'],
+      [KV.dshd.binding('t1-a1'), { state: 'ended', usage }]])
+    const ticket = { id: 't1', assignments: [{ id: 't1-a1', state: 'ended', createdAt: '', endedAt: '' }] }
+    const source = { state: { get: (key: string) => pins.get(key), set: () => {} }, threads: { get: () => undefined },
+      tickets: { get: (id: string) => id === 't1' ? ticket : undefined, open: () => [] },
+      triggers: { get: (id: string) => id === nodeTriggerId('r1', 'n1', 3) ? undefined : { id } } }
+    expect(nodeUsage(source as never, 'r1', 'n1')).toEqual(usage)
+  })
+})
