@@ -79,7 +79,7 @@ const RUN_A = '01KA0Z8Q6V3M4N5P7R8S9T0W1X', RUN_B = '01KA0Z8Q6V3M4N5P7R8S9T0W1Y'
 const manual = (cwd: string, run: string, fields: Partial<OccurrenceRecord> = {}): OccurrenceRecord =>
   record(cwd, { kind: 'manual', run, due: '2026-11-12T09:15:30.000Z', at: '2026-11-12T09:15:30.000Z', by: 'scheduled-run', ...fields })
 const drop = (inbox: string, name: string, value: unknown): void => { writeFileSync(join(inbox, name), typeof value === 'string' ? value : JSON.stringify(value)) }
-const idOf = (value: OccurrenceRecord) => key('scheduled', value.cwd, value.item, value.kind === 'manual' ? `run:${value.run!}` : new Date(value.due).toISOString())
+const idOf = (value: OccurrenceRecord) => key('scheduled', value.namespace, value.cwd, value.item, value.kind === 'manual' ? `run:${value.run!}` : new Date(value.due).toISOString())
 const NAME = 'team+widgets~nightly-digest@20261112T0200Z'
 const LABEL = 'team/widgets:nightly-digest — Nightly digest'
 
@@ -136,6 +136,22 @@ describe('scheduled Source', () => {
     expect(h.store.triggers.get(idOf(first))?.meta).toMatchObject({ kind: 'manual', occurrence: 'run-a' })
     // Each run's Thread carries the item's label, and when it was requested.
     expect(h.store.threads.get('scheduled:run-a')?.meta).toMatchObject({ label: LABEL, facts: { due: { label: { en: 'Requested' }, value: first.due } } })
+  })
+
+  it('keeps the items of two namespaces apart in one working directory: one Trigger per record, and neither supersedes the other', async () => {
+    const h = host()
+    const a = record(h.work, { namespace: 'agency-a' }), b = record(h.work, { namespace: 'agency-b' })
+    const later = record(h.work, { namespace: 'agency-b', due: '2026-11-12T03:00:00.000Z' })
+    // The same item, working directory and due in two namespaces are two occurrences.
+    drop(h.inbox, 'a.json', a); drop(h.inbox, 'b.json', b)
+    expect(await readInbox(h.ctx, h.inbox)).toEqual({ read: 2, superseded: 0, invalid: 0, unreadable: 0 })
+    expect(idOf(a)).not.toBe(idOf(b))
+    expect(await Promise.all(h.receive.mock.results.map(result => result.value))).toEqual(['stored', 'stored'])
+    expect([idOf(a), idOf(b)].map(id => h.store.triggers.get(id)?.threads)).toEqual([[occurrenceThread('a')], [occurrenceThread('b')]])
+    // A later due in one namespace leaves the other namespace's record live.
+    drop(h.inbox, 'c.json', record(h.work, { namespace: 'agency-a', due: '2026-11-12T01:00:00.000Z' })); drop(h.inbox, 'd.json', later)
+    expect(await readInbox(h.ctx, h.inbox)).toEqual({ read: 2, superseded: 0, invalid: 0, unreadable: 0 })
+    expect(h.store.triggers.get(idOf(later))?.meta).toMatchObject({ namespace: 'agency-b', missed: 0 })
   })
 
   it('writes the header lines before the frozen text, with the missed count, the working directory, the revision and the pair', () => {
@@ -326,7 +342,7 @@ describe('scheduled Source', () => {
     expect(parsed.map(value => value.kind)).toEqual(['schedule', 'manual'])
     // Strict: every field the fixture holds is one the schema knows, and parsing drops none.
     expect(parsed).toEqual(records)
-    expect(scheduledTrigger(parsed[1]!, 'run', { missed: 0 }).id).toBe(key('scheduled', '/srv/work/widgets', 'nightly-digest', `run:${parsed[1]!.run!}`))
+    expect(scheduledTrigger(parsed[1]!, 'run', { missed: 0 }).id).toBe(key('scheduled', 'team/widgets', '/srv/work/widgets', 'nightly-digest', `run:${parsed[1]!.run!}`))
     // `name` is optional: the manual record leaves it out, and its header names the item instead.
     expect(parsed[1]).not.toHaveProperty('name')
     expect(scheduledTrigger(parsed[1]!, 'run', { missed: 0 }).text.split('\n')[0]).toBe('[Scheduled item, run now] team/widgets:nightly-digest — nightly-digest')
