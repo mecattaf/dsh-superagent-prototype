@@ -331,6 +331,24 @@ describe('scheduled Source', () => {
     expect(h.store.triggers.get(idOf(record(h.work)))).toBeDefined()
   })
 
+  it('yields to the event loop while it reads a round, so the Sessions the same process serves are not held up', async () => {
+    const h = host()
+    for (let index = 0; index < 20; index++) drop(h.inbox, `r${String(index).padStart(2, '0')}.json`, record(h.work, { item: `item-${index}` }))
+    drop(h.inbox, 'x-bad.json', 'not JSON')
+    // Counts the turns of the event loop that pass while the round runs: a round of synchronous file calls lets none pass.
+    let turns = 0, running = true
+    const turn = () => { if (running) { turns += 1; setImmediate(turn) } }
+    setImmediate(turn)
+    const round = readInbox(h.ctx, h.inbox)
+    // Nothing is read, quarantined or moved before the round first yields.
+    expect(h.waiting()).toHaveLength(21)
+    expect(await round).toEqual({ read: 20, superseded: 0, invalid: 1, unreadable: 0, lastInvalid: 'x-bad.json' })
+    running = false
+    expect(turns).toBeGreaterThan(0)
+    expect(h.done()).toHaveLength(20)
+    expect(readdirSync(join(h.inbox, '.bad')).sort()).toEqual(['x-bad.json', 'x-bad.json.error'])
+  })
+
   it('admits an occurrence as an inferred candidate only with the occurrence cell set to inferred, and accepts it only in auto mode with an enabled matched rule', async () => {
     // The default admission table ignores a sender off the list who does not address the agent.
     const ignored = host({ settings: { policy: {} } })
