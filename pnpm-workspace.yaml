@@ -1,0 +1,3 @@
+# effect depends on msgpackr, whose optional native speed-up msgpackr-extract has a build script; msgpackr works without it.
+ignoredOptionalDependencies:
+  - msgpackr-extract
