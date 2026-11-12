@@ -7,9 +7,13 @@ import { DshdUnavailable, type DshdLastRun, type DshdPort, type DshdRead, type D
 
 interface Instance { recipe: DshdRecipe; id: string; state: string; invocationId: string | null; lastRun: DshdLastRun; lines: string[] }
 type Verb = 'run' | 'get' | 'wait' | 'read' | 'stop' | 'rm'
-/** The lines a headless `--json` run prints: its Session, then its answer, around dshd-run's own lines (as `READ_JSON_RUN` in dshd-0.1.0.ts). */
-export const runLines = (sessionId: string, final?: string): string[] => ['dshd-run: run started', JSON.stringify({ type: 'session', sessionId, cwd: '/' }),
-  JSON.stringify({ type: 'text', text: 'Working.' }),
+/**
+ * The lines a headless `--json` run prints: its Session, then one `step_end` status per step with the usage it carries, if any,
+ * then its answer, around dshd-run's own lines (as `READ_JSON_RUN` in dshd-0.1.0.ts).
+ */
+export const runLines = (sessionId: string, final?: string, steps: (Record<string, number> | undefined)[] = []): string[] => ['dshd-run: run started',
+  JSON.stringify({ type: 'session', sessionId, cwd: '/' }), JSON.stringify({ type: 'text', text: 'Working.' }),
+  ...steps.map((usage, step) => JSON.stringify({ type: 'status', phase: 'step_end', turn: 1, step: step + 1, ...usage && { usage } })),
   ...final === undefined ? [] : [JSON.stringify({ type: 'final', sessionId, reason: { kind: 'completed' }, text: final })], 'dshd-run: run ended']
 
 /** In-memory `DshdPort` with helpers that end, cut, rerun or remove an instance, and fail or lose the answer of the next call of a verb. */

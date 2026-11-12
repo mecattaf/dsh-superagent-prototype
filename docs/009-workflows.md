@@ -55,13 +55,14 @@ So every node costs one Eval of the main Session, and a run moves only as fast a
 - A node's Ticket whose worker reported `failed` or `blocked`, which the dshd Executor reports for a unit that could not launch or did not exit 0, stays open and waits for a person, as any such Ticket does ([003 Execution](003-execution.md)): the failure is recorded and left in view, not cleared. The run has its `null` and reads that Ticket no more, so a **Retry** runs the work again but its answer reaches no run. A person who has read the failure ends the Ticket with **Stop**, or `POST tickets/<id>/stop`; work the node should still do needs a new run.
 - At start, the plugin resumes every run that has not ended. A node with a result or a failure in the journal answers from it. A node whose Trigger the Engine already has waits for that Trigger's Ticket, and one whose Trigger never reached the Engine raises it once.
 - When the plugin stops, every node that waits parks: its run writes nothing more until the next start.
+- `orchestrator_workflow_status` also gives each node's `usage` and the run's `usage`: the tokens the node's workers used, in DSH's usage names (`inputTokens`, `outputTokens`, and `totalTokens`, `cacheReadTokens`, `cacheWriteTokens` or `reasoningTokens` when the provider reports them). Once a unit ended, the dshd Executor sums the usage on each `step_end` status its headless run printed, which dsh takes from the step's `assistant/message` in the worker's Session, and keeps it on the Assignment's binding. It is known only when a read the Executor makes anyway, for the run's answer and Session, reaches back to the run's start, and every step printed its usage. A node's usage sums the units of all its attempts, each Ticket once, and shows only once none of them runs. The run's `usage.total` sums the nodes measured, keeping a bucket only when each of them reports it, and `unmeasured_nodes` counts the nodes with an ended unit whose usage is not known, which is every node on an Executor that records none.
 - A run's journal reads back as one JSON line per record: `SELECT value FROM kv WHERE key LIKE 'workflow-journal:<run>:%' ORDER BY key`. The script it ran is the record `workflow-script:<sha256>`.
 
 ## Not supported
 
 | Not supported | Why |
 | --- | --- |
-| Token budgets and usage | The Executor reports no token counts |
+| Token budgets | Usage is measured, not limited: the interpreter's budget is not set, and a node's tokens are not journaled |
 | A call's `model` and `effort` | Recorded in the Trigger's `meta`; nodes run on their pair |
 | Nesting deeper than one `workflow()` | The interpreter's limit |
 | A run started by a Scheduled item's own key | A Scheduled nudge asks the main Session, which starts the run with the tool |
