@@ -100,6 +100,8 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 
 With `executor: dshd`, a unit starts from an empty environment holding the `passEnv` names of this process, then `dshd.env`, then its pair's `env`; dshd records the values, so none may be a secret. Without a repository on the GitHub Source, setup then checks no account, writes no command shims and changes no process environment.
 
+The execution variables a Source declares, such as `DSH_SUPERAGENT_SCHEDULED_*`, stay in this process with `executor: dshd`: no prepare command runs, a unit's environment holds only the names above, and the brief, its one message, carries the Ticket and its source Trigger in full instead. The panel then lists no variables on a Ticket. The brief is the task argument of `dshd run` while it takes at most `briefArgvMaxChars` bytes of UTF-8, 64000 by default; Linux takes at most 131072 bytes in one argument, and a character outside ASCII takes two to four. A longer brief is written to `stateDir/briefs/<assignment>.json`, and the argument tells the worker to read it.
+
 After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
 
 ### Scheduled occurrences
