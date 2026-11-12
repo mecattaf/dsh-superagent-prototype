@@ -245,7 +245,7 @@ describe('slots', () => {
 })
 
 describe('settlement', () => {
-  it('ends the Ticket completed when its unit exits 0, with the final answer and the session as its summary', async () => {
+  it('ends the Ticket completed when its unit exits 0, with the final answer verbatim as its summary', async () => {
     await start()
     const { ticket } = await accepted(request('1', { cwd: directory() }))
     const name = nameOf(ticket)
