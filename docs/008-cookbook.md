@@ -1,6 +1,6 @@
 # 008 Cookbook
 
-This cookbook shows how to extend dsh-superagent. It uses the terms in [001 Domain model](001-domain.md) and [002 Authorization](002-authorization.md), and the components in [007 Architecture](007-architecture.md).
+This cookbook shows how to extend dsh-superagent, and how to run its work on dshd, from a scheduler and from workflow scripts. It uses the terms in [001 Domain model](001-domain.md) and [002 Authorization](002-authorization.md), and the components in [007 Architecture](007-architecture.md).
 
 ## Add a Source
 
@@ -423,3 +423,215 @@ it('takes in what the queue holds after the cursor, once, and moves the cursor a
 9. Write the plugin entry and a loop that waits for setup, follows the switch, moves cursors after `receive`, keeps errors per item, reports health and stops on abort; name the cursors in `KV`.
 10. Add the build entry, the export and the `cordis.patch.yml` insert, and list the module and its spec in the tables of 007.
 11. Test it as `tests/sources.spec.ts` tests the other Sources.
+
+## Add main-Session tools to a Source
+
+A Source kind can give the main Session tools of its own, for work a person asks the main Session for rather than sending it through the Source; the workflow Source's `orchestrator_workflow_start` is one. A kind's tools reach the main Session when the kind registers, although Source plugins register after the main Session was decorated, and leave it when the kind unregisters.
+
+Continue the `webhook` example with a tool that reads the queue position:
+
+```ts
+import { sourceTool, type SourceTool } from './kind.ts'
+
+/** The main Session's webhook tools. */
+export const webhookTools = (ctx: SourceContext): SourceTool[] => [
+  sourceTool({
+    name: 'orchestrator_webhook_position',
+    description: 'Read how far the webhook Source has read its queue: the position after the last message it took in.',
+    schema: z.object({}).strict(),
+    execute: async () => ({ position: ctx.state.get(KV.webhook.cursor) ?? 0 }),
+  }),
+]
+```
+
+Build the kind with its tools in the effect that registers it, so they use that effect's `SourceContext`:
+
+```ts
+  ctx.effect(() => ctx.orchestrator.sources.register({ ...webhookKind, tools: webhookTools(sourceContext(ctx.orchestrator, webhookKind)) }),
+    'webhook: source kind')
+```
+
+- **Names.** Each name starts with `orchestrator_<kind>_`, or `SourceRegistry.register` refuses the kind. The prefix keeps a kind's tools apart from the host's and from each other's, and inside the `orchestrator_` names that bridges to other agent runtimes pass.
+- **Schema.** `sourceTool` types `execute` by a strict zod object; describe its fields as the host's own tools do. `execute` returns a JSON value, which the main Session reads as the tool's output; a thrown error is the tool's refusal.
+- **State.** A tool changes state only through the `SourceContext`, as the kind's loop does: it raises a Trigger with `receive`, never a Ticket.
+- **Tests.** Register the kind on `startRuntime()` from `tests/fixtures/host.ts` and call the tool on the main Session with `runTool`, as the tests of a kind's main-Session tools in `tests/sources.spec.ts` do: an unprefixed name is refused, and the tool leaves the main Session when the kind unregisters.
+
+### Checklist
+
+1. Name each tool `orchestrator_<kind>_<verb>`.
+2. Type it with `sourceTool` and a strict schema whose fields are described.
+3. Build the kind with `tools` in the effect that registers it.
+4. Change state only through the `SourceContext`.
+5. Test the refused name, a call on the main Session, and the removal when the kind unregisters.
+6. Name the tools under Main Session tools in [007 Architecture](007-architecture.md).
+
+## Run Assignments as dshd units
+
+With `executor: dshd`, each Assignment runs as one dshd headless unit: a DeepSeek Harness process of its own, with its own profile, that goes on while dsh-superagent restarts. Use it when workers need another provider or harness than the main Session, or must outlive the process that started them. [006 Deployment](006-deployment.md) lists the keys.
+
+### 1. Make a headless profile per pair
+
+A pair is a name for one way to run a worker: a headless profile whose bundles and model decide the provider and the harness. Create each one under the `DSH_HOME` that dsh-superagent runs with. A pair's profile that loads this bundle, for example for its agent presets, sets `engine: false` on its `dsh-superagent` row, so the worker opens no state of its own.
+
+### 2. Configure the executor
+
+In the profile that runs dsh-superagent:
+
+```yaml
+- id: dsh-superagent
+  config:
+    stateDir: <absolute path>
+    executor: dshd
+    dshd:
+      pairs:
+        <pair>: { profile: <headless profile> }
+        <second pair>: { profile: <another headless profile>, maxWorkers: 1 }
+      defaultPair: <pair>
+```
+
+`defaultPair` must be one of `pairs`, or startup stops and the log names the key. Give a pair whose model serves one request at a time `maxWorkers: 1`; Execution's `maxWorkers` caps all units together.
+
+### 3. Give units their environment
+
+A unit starts from an empty environment: the `passEnv` names of dsh-superagent's process, then `dshd.env`, then its pair's `env`. dshd records every value with the unit, so a credential reaches a worker through a file or a wrapper its profile reads, never as a value here. Keep `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` in `passEnv`, or dshd cannot reach the user's service manager.
+
+### 4. Choose the directory and the pair per Trigger
+
+A Source chooses where and on what a Ticket's units run through its Trigger's `meta`:
+
+| Key | Value | Effect |
+| --- | --- | --- |
+| `cwd` | An absolute path | The units' working directory; it must exist at launch |
+| `pair` | A key of `dshd.pairs` | The units' pair; an unknown one fails the Ticket |
+| `labels` | Strings by `superagent.*` key | Added to the units' labels |
+
+The scheduled Source sets `cwd`, and `pair` when a record names one; the workflow Source sets `cwd` and `labels`, and `pair` when a run names one. Without them a Ticket runs in `dshd.cwd`, else in its directory under the Execution directory, on `defaultPair`.
+
+### 5. Follow the units
+
+Restart dsh-superagent and accept a Ticket. `dshd get <unit>` shows a unit's state and labels, and `dshd read <unit>` its output; the unit's last final answer is the summary of its Ticket's Report. Units go on while dsh-superagent restarts, and its next start adopts them. dshd keeps ended units until someone removes them.
+
+### Checklist
+
+1. Create one headless profile per pair, with `engine: false` where it loads this bundle.
+2. Set `executor: dshd`, the pairs and `defaultPair`.
+3. Keep secrets out of `dshd.env`, the pairs' `env` and the values `passEnv` copies.
+4. Set `meta.cwd`, `meta.pair` and `meta.labels` in the Sources that choose them.
+5. Restart, accept a Ticket, and read its unit with `dshd get` and `dshd read`.
+
+## Feed occurrences from an external scheduler
+
+dsh-superagent keeps no clock. A scheduler outside it, such as a timer of the service manager, decides when an item is due and drops one record per due occurrence into the scheduled Source's inbox; the Source turns each into a Trigger. This recipe writes such a producer.
+
+### 1. Enable the Source
+
+Enable `dsh-superagent-scheduled` in the profile, and set what [006 Deployment](006-deployment.md) names under Scheduled occurrences: the `occurrence` admission cell `inferred`, the accept mode `auto`, and a rule that accepts occurrences. The inbox is `<stateDir>/inbox/scheduled` unless `inbox` names another directory; the Source creates it.
+
+### 2. Write one record per occurrence
+
+```json
+{"v": 1, "kind": "schedule", "namespace": "team/widgets", "item": "nightly-digest", "name": "Nightly digest",
+ "cwd": "/srv/work/widgets", "due": "2026-11-12T02:00:00.000Z", "missed": 0, "revision": "3f9d2b7c1a0e",
+ "text": "Summarize the pull requests merged yesterday into notes/digest.md, then commit it.",
+ "by": "my-scheduler", "at": "2026-11-12T02:00:04.512Z"}
+```
+
+| Field | Rule |
+| --- | --- |
+| `v` | `1` |
+| `kind` | `schedule` for a due occurrence; `manual` for a run someone asked for now, which also carries `run`, a ULID |
+| `namespace` | Groups the producer's items, and may contain `/` |
+| `item` | A lowercase slug; with `cwd`, it names the item |
+| `cwd` | The absolute directory the work runs in; it must exist when the Source reads the record |
+| `due` | The occurrence's due instant, with its offset; for a manual run, when it was asked for |
+| `missed` | Due instants of the item before `due` that got no record of their own |
+| `revision` | 12 hexadecimal digits that change when the item's definition does |
+| `text` | The whole task, at most 32 768 characters, frozen when the record is written |
+| `pair` | Optional: the compute pair, a key of `dshd.pairs` |
+| `name`, `file` | Optional: a display name, and the absolute path of the file the item came from, for people |
+| `by`, `at` | Who wrote the record, and when |
+
+The Trigger's id comes from `cwd`, `item` and `due`, or from `run` for a manual record, so a record written twice is stored once. A scheduler that was down needs no backlog: it writes the latest due occurrence and counts the skipped ones in `missed`.
+
+### 3. Drop it in whole
+
+The Source reads only names that end in `.json` and do not start with `.`. Write the record under a dot-name in the inbox, then rename it:
+
+```sh
+inbox=<stateDir>/inbox/scheduled
+name='team+widgets~nightly-digest@20261112T0200Z'
+printf '%s\n' "$record" > "$inbox/.$name.json.tmp" && mv "$inbox/.$name.json.tmp" "$inbox/$name.json"
+```
+
+The name without `.json` names the occurrence's Thread. The panel's search finds an occurrence by a name of the form `<namespace>~<item>@<due>`, with each `/` of the namespace written as `+`.
+
+### 4. Read what happened
+
+Within `pollSeconds`, the record moves into `.done/`, or into `.bad/` with an `.error` line that names its fault. The occurrence's Thread is labelled `<namespace>:<item> — <name>`. Of several schedule records of one item read in one round, only the latest runs; the others are stored filtered as `superseded`. Until the Policy admits occurrences, each is only recorded.
+
+### 5. Test the producer against the fixture
+
+Keep a byte-identical copy of `tests/fixtures/scheduled-occurrence-v1.json` in the producer's tests, and check that what it writes for those two cases has the same fields. A change of format is a new `v` with a new fixture on both sides; the Source quarantines any `v` but 1.
+
+### Checklist
+
+1. Enable the entry, the `occurrence` cell, `auto` mode and a rule.
+2. Write records of version 1 with a stable `cwd`, `item` and `due`.
+3. Count skipped occurrences in `missed` instead of writing each.
+4. Write under a dot-name and rename into the inbox.
+5. Watch `.done/` and `.bad/`.
+6. Test the producer against the shared fixture.
+
+## Run a workflow script
+
+A workflow script turns a job of several steps into Tickets: each `agent()` call is a node, which runs as a Ticket once the main Session accepts it. The script decides the order; the main Session may hold a node, but never stops a running Ticket to reorder work.
+
+### 1. Enable the Source
+
+Enable `dsh-superagent-workflow` in the profile, and set what [006 Deployment](006-deployment.md) names under Workflows: the `workflow` admission cell `inferred`, the accept mode `auto`, and a rule, such as `workflow-node`, that accepts each next node. With the dshd executor each node is one unit in the run's directory.
+
+### 2. Write the script
+
+```js
+export const meta = {
+  name: 'release-notes',
+  description: 'Collect the merged changes, then write the release notes from them',
+  phases: [{ title: 'collect' }, { title: 'write' }],
+}
+phase('collect')
+const [fixes, features] = await parallel([
+  () => agent('List the bug fixes merged since the last tag, one line each. Reply with the list only.', { label: 'fixes' }),
+  () => agent('List the features merged since the last tag, one line each. Reply with the list only.', { label: 'features' }),
+])
+phase('write')
+const notes = await agent(`Write RELEASE-NOTES.md from these lists, then reply with its title and line count.\n\nFixes:\n${fixes}\n\nFeatures:\n${features}`,
+  { label: 'notes', schema: { type: 'object', required: ['title', 'lines'], properties: { title: { type: 'string' }, lines: { type: 'number' } } } })
+log(`release notes: ${JSON.stringify(notes)}`)
+return notes
+```
+
+- **Builtins.** `agent(prompt, { label, schema })` returns the node's text, or, with `schema`, the JSON value of its reply; the node's prompt is then followed by an instruction to reply with that JSON only. `parallel` runs thunks together, `pipeline` runs items through stages, `phase` and `log` mark progress, `args` is the value the run started with, and `workflow(name, args)` runs one child script, one level deep.
+- **Results.** A node's result is its Ticket's final answer. A node whose Ticket fails, or whose reply is not JSON valid against its schema, is `null`; check for it before using the value.
+- **Determinism.** Every resume runs the script again from the top and answers finished nodes from the journal, so the script reads no clock or random value: the interpreter refuses `Date.now()`, `new Date()` and `Math.random()`, and the script's realm holds only the workflow builtins.
+- **Prompts.** Each node is a fresh worker that knows only its prompt: say where it works, what it writes and what it replies.
+
+### 3. Try it offline
+
+`src/workflow/cli.ts` runs a script under a mock backend that calls no model, so `meta`, the builtins and the shape of the run are checked before any Ticket exists:
+
+```sh
+node --experimental-transform-types src/workflow/cli.ts release-notes.workflow.js --print-result
+```
+
+### 4. Start and follow the run
+
+Ask the main Session to run the script, naming it and the directory, for example "Run release-notes.workflow.js in /srv/work/widgets". It calls `orchestrator_workflow_start`, and each node then arrives as an inferred candidate. `orchestrator_workflow_status` shows each node `waiting`, `offered`, `held`, `ticket`, `done` or `null`. The panel labels each node's Thread `<name> · <label>`, and shows its Ticket as any other. A restart resumes every unfinished run from its journal; no finished node runs again.
+
+### Checklist
+
+1. Enable the entry, the `workflow` cell, `auto` mode and a rule.
+2. Write `meta`, then the nodes, each with a `label`, and a `schema` where the reply is data.
+3. Handle `null` results.
+4. Keep the script free of clocks and random values.
+5. Run it once under the mock backend.
+6. Start it through the main Session, naming the script and the directory, and follow it with `orchestrator_workflow_status`.

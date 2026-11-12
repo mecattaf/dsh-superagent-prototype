@@ -1,6 +1,6 @@
 # 009 Workflows
 
-This document describes the workflow Source: how a workflow script's `agent()` calls become Tickets, what a deployment configures for it, and how a run resumes. It builds on [001 Domain model](001-domain.md), [002 Authorization](002-authorization.md), [003 Execution](003-execution.md) and [008 Cookbook](008-cookbook.md).
+This document describes the workflow Source: how a workflow script's `agent()` calls become Tickets, what a deployment configures for it, and how a run resumes. It builds on [001 Domain model](001-domain.md), [002 Authorization](002-authorization.md), [003 Execution](003-execution.md), [006 Deployment](006-deployment.md) and [008 Cookbook](008-cookbook.md).
 
 ## What it is
 
@@ -15,14 +15,7 @@ The workflow Source is the plugin `dsh-superagent-workflow`, inserted disabled b
 
 ## Settings a deployment gives it
 
-The plugin's Config holds machine settings, set on the row `dsh-superagent-workflow` of a profile's `cordis.patch.yml`. Changing any key but `pollMs` restarts the plugin, which resumes every run from its journal:
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `pollMs` | 2000 | How often a node that waits reads its Ticket; a change applies at the next poll, without a restart |
-| `concurrency` | 16 | `agent()` calls of one run in flight; the Executor's `maxWorkers` still caps the Tickets that run |
-| `maxAttempts` | 1 | Attempts at each call, each a new Trigger; with 1, a failed node or a reply that does not match its schema is `null` |
-| `pair` | empty | The compute pair of a run that names none; empty leaves it to the Executor |
+[006 Deployment](006-deployment.md) lists the plugin's Config keys, set on the row `dsh-superagent-workflow` of a profile's `cordis.patch.yml`, and an example rule for its nodes. Changing any key but `pollMs` restarts the plugin, which resumes every run from its journal.
 
 A node is a senderless Trigger, so the gate admits it only through the Source's admission table, and only as an inferred candidate. Three settings make the next node proceed by default; the Source sets none of them:
 
