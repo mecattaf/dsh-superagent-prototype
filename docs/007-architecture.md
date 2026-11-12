@@ -200,6 +200,10 @@ That context supplies deployment and commands, setup readiness (`ready`, `config
 
 `prepare(ticket, outcome)` supplies the Engine's `prepareTicket` hook: short name, directory and `ticketExecution` assignment text. `workerSessionId(ticket.id)` derives the Session id.
 
+### DshdExecutor
+
+`DshdExecutor` (`src/executor/dshd.ts`), chosen with `executor: dshd`, runs each Assignment as one dshd headless unit. Runtime holds either Executor as an `ExecutorPort` (`src/executor/port.ts`). A launch stores the unit's recipe as the Assignment's `DshdBinding` before `dshd run`, so every later attempt repeats it and dshd's same-name rule keeps one unit per Assignment. A `dshd-watch` effect follows the unit with `dshd wait` until it ends, and the end settles the Assignment through `report` or `assignmentInterrupted`. `stop` enqueues a `dshd-stop` effect, which stops the unit only while its current run is the bound one. `deliver` queues nothing: a headless unit reads only its brief.
+
 `WorkerSlots` reserves capacity before a launch or a delivery that wakes an idle worker. A human message can use one slot beyond `maxWorkers`, and wakes have priority over launches. `activeCount` supplies panel load.
 
 Transient provider and network failures get three retries. Launches use effect backoff; failed turns receive continuation messages after 15, 30 and 60 seconds. `inputMessage` renders each Input from current Ticket state, and `mandateInstructions` adds the matched-rule limits for inferred work.
@@ -352,6 +356,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/views/settings.ts` | The settings page's view: each block with its revision, each Source's settings with its kind's form, and the execution environment |
 | `src/app/views/overview.ts` | The overview: Tickets that need a person, problems, the last day's flow and the Executor's load |
 | `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
+| `src/executor/port.ts` | `ExecutorPort`, what Runtime uses of its Executor, picked from `DshExecutor` |
+| `src/executor/dshd.ts` | The DshdExecutor, one dshd headless unit per Assignment: `DshdBinding`, `unitName`, `composeBrief`, `verdictOf` and `eventsOf` |
+| `src/executor/dshd-cli.ts` | `DshdCli`, the dshd client over DSH's subprocess service, and the `DshdPort` it implements |
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
 | `src/infra/commands.ts` | `Commands`, the CLI transport: `run`; `api` and `pages`, limited to the configured repository and validated; `lark` as the bot; `git`. `CliError` carries the code a command's output reports, such as a GitHub HTTP status, and a command that prints nothing fails with how it ended, never with its arguments; `validItems` skips and counts the malformed items of a list |
 | `src/infra/environment.ts` | The agent's process environment: command shims, the git configuration and credential helper, `runAsWorker`, and the checks of the environment and of a Ticket's directory |
@@ -447,6 +454,10 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/cards.spec.ts` | The rules the built-in text must state, file by file |
 | `tests/model-surface.spec.ts` | Everything models read: tools, prompts, skills and inputs, checked against the tool schemas, the execution environment and the glossary, within a size budget per role |
 | `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts`, `tests/engine.spec.ts` | The plugin configuration and setup, the agent's process environment, the plugin entry, and the entry on a Cordis context with its engine off and on |
+| `tests/dshd-cli.spec.ts` | The dshd client's argv and the JSON and error objects of dshd it reads |
+| `tests/dshd-executor.spec.ts` | The dshd executor on the simulated host with an in-memory dshd: recipe, idempotent launches, slots, settlement, restart and stop |
+| `tests/dshd-names.spec.ts` | Unit names stay inside dshd's name rule and apart for distinct Assignments |
+| `tests/dshd-outcome.spec.ts` | What dshd 0.1.0 printed, read as the dshd executor reads it; every state, ending and refusal dshd documents, and the executor's answer to each |
 | `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux` and `dsh` |
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
 | `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |
@@ -459,7 +470,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/class-docs.spec.ts` | Every class in `src`, apart from the vendored `src/workflow`, has a JSDoc block before it |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
 
-`tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`. `tests/workflow/helpers.ts` is the interpreter tests' own helper.
+`tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `fake-dshd.ts`, an in-memory dshd; `dshd-0.1.0.ts`, lines dshd 0.1.0 printed; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`. `tests/workflow/helpers.ts` is the interpreter tests' own helper.
 
 ## Persistence
 
@@ -617,7 +628,7 @@ Most built-in instructions live in `prompts/*.md`, with one sentence per line jo
 
 ## Configuration reload
 
-Every plugin configuration key except `stateDir` and `engine` is volatile; changing either remounts dsh-superagent. The panel's Deployment settings and DeepSeek Harness's Plugin Manager edit them through DeepSeek Harness's configuration form; the host writes `cordis.patch.yml` and updates the values in place, and dsh-superagent reads each limit when it uses it, so a change applies without a restart.
+Every plugin configuration key except `stateDir`, `engine`, `executor` and the `dshd` block is volatile; changing one of those remounts dsh-superagent. The panel's Deployment settings and DeepSeek Harness's Plugin Manager edit them through DeepSeek Harness's configuration form; the host writes `cordis.patch.yml` and updates the values in place, and dsh-superagent reads each limit when it uses it, so a change applies without a restart.
 
 A settings save that changes a Source field setup reads, such as an account's CLI, and any save while setup waits, restarts dsh-superagent. DeepSeek Harness's settings service does not serve the entry during that restart, so after its own restart dsh-superagent asks it to read the entry again, and an open form becomes editable again.
 
