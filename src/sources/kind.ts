@@ -21,7 +21,8 @@ export type FieldSpec =
   | FieldBase & { type: 'fact'; settings?: 'deployment' }
   | FieldBase & { type: 'rows'; columns: ({ key: string; label: Localized; type: 'text'; pattern?: string; optional?: boolean; choose?: Localized; refresh?: Localized } | { key: string; label: Localized; type: 'select'; options: { value: string; label: Localized }[] })[] }
 
-export interface VariableSpec { key: string; description: Localized }
+/** A `ticket` variable describes the ticket a Session works on, so it is listed only where there is one, as the Executor's are. */
+export interface VariableSpec { key: string; description: Localized; ticket?: true }
 export interface EnvironmentInput<C> { deployment: Deployment; config: C; trigger?: Trigger }
 export interface AdmissionRowView { id: string; label: Localized | string; note: Localized; cells: { listedUnaddressed: boolean; unlistedAddressed: boolean; unlistedUnaddressed: boolean } }
 /** Policy extension for a source kind, defining allowed senders, admission table rows, and optional external roster sync. */

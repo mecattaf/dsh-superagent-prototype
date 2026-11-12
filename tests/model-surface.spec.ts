@@ -39,7 +39,7 @@ interface Skill { name: string; description: string; content: string }
  * Maximum combined character count of system prompt and tool definitions per role (~5% above baseline).
  * Lower this limit when shrinking model-facing text; raise it only intentionally and explain why in the commit message.
  */
-const BUDGET: Record<Role, number> = { orchestrator: 60_500, worker: 40_500 }
+const BUDGET: Record<Role, number> = { orchestrator: 59_000, worker: 40_500 }
 const PROMPTS = 'prompts/, skills/', TOOLS = 'src/app/tools/', SESSIONS = 'src/app/sessions.ts'
 const NOTICES = 'src/app/notices.ts', LINKS = 'src/app/links.ts', ASSESSMENT = 'src/app/assessment.ts'
 const EXECUTOR = 'src/executor/dsh.ts', ERRORS = 'src/core/errors.ts'
@@ -399,6 +399,12 @@ it.each(['orchestrator', 'worker'] as const)('keeps the %s within its character 
   const definitions = [...toolsOf(role).values()].map(({ name, description, parameters }) => ({ name, description, parameters }))
   const tools = JSON.stringify(definitions).length
   expect(prompt + tools, `${prompt} characters of prompt and ${tools} of tools`).toBeLessThanOrEqual(BUDGET[role])
+})
+
+it('shows a Source\'s ticket variables to workers only, as the Executor\'s', () => {
+  const prompt = (id: string) => host.sections.get(id)!({})
+  expect(prompt(host.runtime.masterId)).not.toContain('DSH_SUPERAGENT_SCHEDULED_ITEM')
+  expect(prompt(sessions.workerA)).toContain('DSH_SUPERAGENT_SCHEDULED_ITEM')
 })
 
 it('keeps the routing rules in dispatch, which says the main Session may accept the rest of a stop message as new work', () => {
