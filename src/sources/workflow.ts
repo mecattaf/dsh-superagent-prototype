@@ -44,6 +44,7 @@ export function apply(ctx: Context, config: WorkflowConfig): void {
     const unregister = ctx.orchestrator.sources.register(workflowKind(floor))
     // DSH ends its process on an unhandled rejection, so a failure that escapes the start becomes the Source's health.
     const running = floor.start().catch((error: unknown) => { ctx.orchestrator.context({ kind: SOURCE, health: [SOURCE] }).report(SOURCE, { state: 'error', detail: String(error) }) })
-    return async () => { unregister(); floor.stop(); await running }
+    // Stop the runs first, so nothing reports to the kind's entries after they are released.
+    return async () => { floor.stop(); await running; unregister() }
   }, 'workflow: source kind and runs')
 }

@@ -60,6 +60,12 @@ describe('configuration schema', () => {
     expect(() => Config(minimal({ executor: 'tmux' }))).toThrow()
     expect(() => Config(minimal({ dshd: { prefix: 'Not-A-Prefix' } }))).toThrow()
     expect(() => machineOf(Config(minimal({ dshd: { pairs: { opus: { profile: 'work opus' } } } })))).toThrow('dsh-superagent dshd configuration: dshd.pairs.opus.profile')
+    // The Schema knows the two maps' shapes, so a value of the wrong type fails as the configuration is read.
+    expect(() => Config(minimal({ dshd: { env: { A: 1 } } }))).toThrow()
+    expect(() => Config(minimal({ dshd: { pairs: { opus: 'work-opus' } } }))).toThrow()
+    expect(() => Config(minimal({ dshd: { pairs: { opus: { env: {} } } } }))).toThrow()
+    // An unknown pair key still reaches machineOf, which refuses it.
+    expect(() => machineOf(Config(minimal({ dshd: { pairs: { opus: { profile: 'work-opus', model: 'x' } } } })))).toThrow('dshd.pairs.opus')
   })
   it('rejects executor dshd whose default pair is not among its pairs, or whose directory is not absolute', () => {
     const pairs = { opus: { profile: 'work-opus' } }

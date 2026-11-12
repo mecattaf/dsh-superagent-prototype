@@ -16,7 +16,7 @@ import { KV } from '../kv.ts'
 import { LIMITS } from '../limits.ts'
 import { WorkerSlots, batchOf, inputMessage, sourceTrigger, ticketExecution } from './dsh.ts'
 import { DshdCli, DshdUnavailable, invocationOf, type DshdPort, type DshdRead, type DshdRecipe, type DshdStatus } from './dshd-cli.ts'
-import type { ExecutorPort } from './port.ts'
+import type { ExecutorPort, WorkerEnvironment } from './port.ts'
 
 declare module '../app/effects.ts' {
   interface EffectPayloads {
@@ -170,6 +170,11 @@ export interface DshdExecutorHost {
   /** The dshd client; `DshdCli` over the context's subprocess service by default. */
   readonly dshd?: DshdPort
   readonly hostname?: () => string
+  /**
+   * The environment `passEnv` names are read from: this process's as it was before Setup changed it (`Setup.hostEnvironment`),
+   * so no unit inherits the in-process executor's command shims; `process.env` by default.
+   */
+  readonly environment?: () => NodeJS.ProcessEnv
 }
 
 /**
@@ -179,6 +184,9 @@ export interface DshdExecutorHost {
  * upstream restarts interrupted work. A unit outlives this process, so a restart adopts the units that still run.
  */
 export class DshdExecutor implements ExecutorPort {
+  /** A unit starts from its own environment, so it needs no account unless the deployment names a repository. */
+  readonly needsAccount: boolean = false
+  readonly workerEnvironment: WorkerEnvironment = 'own'
   private readonly slots: WorkerSlots
   private readonly dshd: DshdPort
   private readonly hostname: () => string
@@ -302,7 +310,8 @@ export class DshdExecutor implements ExecutorPort {
   /**
    * Builds the recipe of an Assignment's first launch attempt and stores it as its binding before dshd runs anything, so every
    * later attempt reuses it byte for byte. A brief longer than `briefArgvMaxChars` goes to a file under `stateDir/briefs`,
-   * which no unit can have read yet, as none runs without the binding.
+   * which no unit can have read yet, as none runs without the binding. The file stays after the binding ends: the unit's Session
+   * names only its path, so it is the record of that task (docs/006 says `briefs/` grows until an operator clears it).
    */
   private async bindingOf(ticket: Ticket, assignment: Assignment): Promise<DshdBinding> {
     const { machine: { dshd, stateDir }, store } = this.host
@@ -331,7 +340,7 @@ export class DshdExecutor implements ExecutorPort {
       if (EXTRA_LABEL.test(label) && typeof value === 'string' && value.length <= 256 && !value.includes('\n')) labels[label] = value
     }
     Object.assign(labels, { [LABEL.orchestrator]: this.host.masterId, [LABEL.ticket]: ticket.id, [LABEL.assignment]: assignment.id, [LABEL.pair]: pair })
-    const env = { ...inherited(dshd.passEnv), ...dshd.env, ...config.env }
+    const env = { ...inherited(dshd.passEnv, this.host.environment?.()), ...dshd.env, ...config.env }
     const binding: DshdBinding = { executor: 'dshd', host: this.hostname(), name, pair, state: 'launching', launchedAt: now(),
       recipe: { name, cwd, labels, profile: config.profile, args: [...dshd.args], task, env }, inputIds }
     store.atomic(() => { store.set(BINDING(assignment.id), binding) })
