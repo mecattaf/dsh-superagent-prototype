@@ -10,7 +10,7 @@ The workflow Source is the plugin `dsh-superagent-workflow`, inserted disabled b
 | --- | --- | --- |
 | Run | One start of one script in one directory, with its arguments | The script's text is kept when the run starts, and every resume reads that text; each `workflow()` child is kept the first time it is read |
 | Node | One `agent()` call of a run | Named by its content identity and its occurrence among identical calls, so a resumed run names it as the run before did |
-| Node Trigger | One attempt of a node, on the node's Thread | Senderless, unaddressed and not from a person; its text is the prompt, followed by the schema instruction when the call has a schema; `meta` carries `cwd`, `pair`, `labels`, the run and the node |
+| Node Trigger | One attempt of a node, on the node's Thread | Senderless, unaddressed and not from a person; its text is the prompt; then, on a later attempt, why the interpreter did not accept the attempt before it, as each attempt runs in a new worker; and last the schema instruction when the call has a schema; `meta` carries `cwd`, `pair`, `labels`, the run and the node |
 | Journal | The run's lines in the interpreter's journal format | One `kv` record per line, written as the line is; nothing else records a node |
 
 ## Settings a deployment gives it
@@ -36,7 +36,7 @@ The kind adds two main-Session tools. They reach the main Session when the plugi
 
 | Tool | Does |
 | --- | --- |
-| `orchestrator_workflow_start` | Starts `script` in the absolute directory `cwd` with `args` and `pair`. A repeated `trigger_id` with the same script, directory and arguments returns the run it started. It refuses a relative or missing directory, a script it cannot read, and a script whose `meta` is invalid |
+| `orchestrator_workflow_start` | Starts `script` in the absolute directory `cwd` with `args` and `pair`. A repeated `trigger_id` with the same script, directory and arguments returns the run it started, so its description tells the main Session always to pass the `trigger_id` of the request it answers. It refuses a relative or missing directory, a script it cannot read, and a script whose `meta` is invalid |
 | `orchestrator_workflow_status` | One run, or the newest runs, with each node `waiting`, `offered`, `held`, `ticket`, `done` or `null`, and its latest Trigger and its Ticket once it has them. A node a resumed run answered from its journal is `done` or `null` as its journal line says |
 
 ## The window
@@ -55,6 +55,7 @@ The main Session assesses node candidates as it assesses any inferred candidate.
 
 - A node's result is the summary of its Ticket's `ready` report, verbatim, once the Ticket ended completed; a node with a schema parses it as one JSON value, inside one code fence at most.
 - A node has no answer when that summary is no JSON value and the node has a schema, or when the summary only says the unit exited 0, which the dshd Executor reports for a worker that gave no final answer. The interpreter treats no answer as it treats any: it tries the node again while attempts remain, else the node is `null`, with `no structured output` or `no text output` in its journal line.
+- The Source finds a node's Ticket among its Thread's subscriptions, or among the open Tickets once that Thread was unsubscribed, and keeps its ID as `workflow-ticket:<trigger>`, so a node whose Thread a person or the main Session unsubscribed still settles when its Ticket ends.
 - A Ticket that ends otherwise, or whose worker reports `failed` or `blocked`, makes the node `null` with the reason in its journal line. A resumed run answers that line with the same `null`, and never raises the node again.
 - At start, the plugin resumes every run that has not ended. A node with a result or a failure in the journal answers from it. A node whose Trigger the Engine already has waits for that Trigger's Ticket, and one whose Trigger never reached the Engine raises it once.
 - When the plugin stops, every node that waits parks: its run writes nothing more until the next start.

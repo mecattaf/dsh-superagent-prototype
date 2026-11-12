@@ -61,10 +61,12 @@ export const KV = {
   dshd: { binding: family<DshdBinding, [assignment: string]>('dshd-binding:') },
   /**
    * Workflow Source: each run, its journal lines by run and zero-padded line number, the scripts runs were started with by
-   * their SHA-256, and the `workflow()` children a run resolved, by run and a key of the reference and the calling script.
+   * their SHA-256, the `workflow()` children a run resolved, by run and a key of the reference and the calling script, and
+   * the Ticket accepted from each node Trigger, by Trigger ID, once the Source found it.
    */
   workflow: { run: family<WorkflowRun, [run: string]>('workflow-run:'),
     journal: family<JournalLine, [run: string, seq: string]>('workflow-journal:'),
     script: family<string, [sha256: string]>('workflow-script:'),
-    nested: family<NestedPin, [run: string, reference: string]>('workflow-nested:') },
+    nested: family<NestedPin, [run: string, reference: string]>('workflow-nested:'),
+    ticket: family<string, [trigger: string]>('workflow-ticket:') },
 }

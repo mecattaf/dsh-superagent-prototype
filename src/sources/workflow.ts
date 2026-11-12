@@ -5,7 +5,7 @@ import { z } from 'zod'
 import type { SourceKind } from './kind.ts'
 import { WorkflowFloor } from './workflow-floor.ts'
 import { workflowTools } from './workflow-tools.ts'
-import { SOURCE } from './workflow-trigger.ts'
+import { MAX_ATTEMPTS, SOURCE } from './workflow-trigger.ts'
 
 export { SOURCE } from './workflow-trigger.ts'
 /**
@@ -17,7 +17,7 @@ export const Config = s.object({
     .description('How often a node that waits reads its ticket, in milliseconds.').volatile(),
   concurrency: s.number().min(1).max(64).step(1).default(16)
     .description('agent() calls of one run in flight at once; the Executor\'s worker limit still caps the tickets that run.'),
-  maxAttempts: s.number().min(1).max(3).step(1).default(1)
+  maxAttempts: s.number().min(1).max(MAX_ATTEMPTS).step(1).default(1)
     .description('Attempts at each agent() call, each one a new Trigger; with 1, a node whose ticket fails or whose reply does not match its schema returns null.'),
   pair: s.string().default('')
     .description('The compute pair of the nodes of a run that names none; empty leaves the choice to the Executor.'),

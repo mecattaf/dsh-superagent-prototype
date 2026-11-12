@@ -4,10 +4,15 @@ import type { AgentCall } from '../workflow/index.ts'
 import type { WorkflowRun } from './workflow-store.ts'
 
 export const SOURCE = 'workflow'
+/** The most attempts the Source's Config allows at one `agent()` call. */
+export const MAX_ATTEMPTS = 3
 /** What a node with a schema is asked to reply with, worded as Substrate's runners word it. */
 export const SCHEMA_INSTRUCTION = 'Reply with one JSON value only, no prose and no code fence, valid against this JSON Schema:'
 
-type Call = Pick<AgentCall, 'cid' | 'occurrence' | 'attempt' | 'prompt' | 'opts' | 'phase'>
+/** How a later attempt's text introduces why the interpreter did not accept the attempt before it. */
+export const RETRY_NOTE = 'A previous attempt at this task was not accepted:'
+
+type Call = Pick<AgentCall, 'cid' | 'occurrence' | 'attempt' | 'previousErrors' | 'prompt' | 'opts' | 'phase'>
 /**
  * A call's node name within its run: the start of its content identity and its occurrence among identical calls, which the
  * interpreter fixes when the script makes the call, so a resumed run names each call as the run before it did.
@@ -27,13 +32,15 @@ export const nodeTriggerId = (run: string, node: string, attempt: number): strin
 
 /**
  * The Trigger of one attempt of a call: senderless and unaddressed, so the gate admits it only through the workflow row of the
- * Source's admission table. Its text is the prompt, followed by the schema instruction when the call has a schema; `meta` tells
- * the Executor the directory, compute pair and labels of the node.
+ * Source's admission table. Its text is the prompt; then, on a later attempt, why the attempt before it was not accepted, as
+ * each attempt runs in a new worker that knows nothing of the last; and last the schema instruction when the call has a schema.
+ * `meta` tells the Executor the directory, compute pair and labels of the node.
  */
 export function nodeTrigger(run: WorkflowRun, call: Call, at = new Date().toISOString()): Trigger {
   const node = nodeOf(call)
   const { label, schema, model, effort } = call.opts
-  const text = schema === undefined ? call.prompt : `${call.prompt}\n\n${SCHEMA_INSTRUCTION}\n${JSON.stringify(schema)}`
+  const retry = call.attempt > 1 && call.previousErrors?.length ? [`${RETRY_NOTE} ${call.previousErrors.join('; ')}`] : []
+  const text = [call.prompt, ...retry, ...schema === undefined ? [] : [`${SCHEMA_INSTRUCTION}\n${JSON.stringify(schema)}`]].join('\n\n')
   return {
     id: nodeTriggerId(run.id, node, call.attempt),
     source: SOURCE,
