@@ -104,6 +104,28 @@ it('keeps the main Session\'s resources from an Executor Session, which lists on
   expect(offered).not.toMatch(/preview/i)
 })
 
+/** DSH's lossless JSON rule for a tool's `parameters`: finite numbers, plain arrays, plain objects with only enumerable string keys. */
+function lossless(value: unknown): boolean {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true
+  if (typeof value === 'number') return Number.isFinite(value) && !Object.is(value, -0)
+  if (typeof value !== 'object') return false
+  if (Array.isArray(value)) {
+    return Object.getPrototypeOf(value) === Array.prototype && Reflect.ownKeys(value).length === value.length + 1 && value.every(lossless)
+  }
+  if (![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false
+  return Reflect.ownKeys(value).every(key => typeof key === 'string' && Object.getOwnPropertyDescriptor(value, key)!.enumerable)
+    && Object.values(value).every(lossless)
+}
+
+it('registers every tool\'s parameters as lossless JSON, which the tool registry\'s schema projection requires', async () => {
+  const { sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  for (const session of [h.runtime.masterId, sessionId]) {
+    const tools = [...h.tools.get(session)!.values()] as unknown as { name: string; parameters: unknown }[]
+    expect(tools.length, session).toBeGreaterThan(0)
+    for (const { name, parameters } of tools) expect(lossless(parameters), name).toBe(true)
+  }
+})
+
 it('answers every routing tool in one shape: the decision it recorded, why, and the ticket card', async () => {
   const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   const card = expect.objectContaining({ ticket_id: ticket.id })
