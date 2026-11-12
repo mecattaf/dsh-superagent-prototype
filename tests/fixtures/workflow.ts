@@ -36,7 +36,8 @@ export const newDirectory = (): string => mkdtempSync(join(tmpdir(), 'workflow-'
 export function workflowHost(directory: string, options: { slots?: number; config?: Partial<FloorConfig>; now?: () => string; settings?: unknown } = {}) {
   const store = new Store(join(directory, 'orchestrator.sqlite'))
   if (store.get(KV.settings.revision) === undefined) store.saveSettings(SettingsSchema.parse(options.settings ?? WORKFLOW_SETTINGS))
-  const sources = new SourceRegistry(() => store.settings(), new HealthBoard())
+  const board = new HealthBoard()
+  const sources = new SourceRegistry(() => store.settings(), board)
   const candidates: Candidate[] = []
   const launches: string[] = [], pending: { ticket: string; assignment: string }[] = [], running = new Set<string>()
   type Call = (ticket: Ticket, assignment: Assignment) => void
@@ -63,7 +64,8 @@ export function workflowHost(directory: string, options: { slots?: number; confi
   const deps: SourceContextDeps = { store, engine, outbox: { send: () => {} }, commands: new Commands(() => testDeployment(), {}, new AbortController().signal),
     sources, deployment: testDeployment(), ready: Promise.resolve(), configured: () => true, receive }
   const host = { sources, context: (kind: { kind: string; health: readonly string[] }) => sourceContextOf(deps, kind) }
-  const floor = new WorkflowFloor(host, { pollMs: { get: () => 5 }, concurrency: 16, maxAttempts: 1, pair: '', ...options.config })
+  const logger = { info: vi.fn<(format: string, ...args: unknown[]) => void>(), warn: vi.fn<(format: string, ...args: unknown[]) => void>() }
+  const floor = new WorkflowFloor(host, { pollMs: { get: () => 5 }, concurrency: 16, maxAttempts: 1, pair: '', ...options.config }, logger)
   const unregister = sources.register(workflowKind(floor))
   const started = floor.start()
 
@@ -102,8 +104,8 @@ export function workflowHost(directory: string, options: { slots?: number; confi
   const context = host.context({ kind: 'workflow', health: ['workflow'] })
   const run = (id: string) => store.get(KV.workflow.run(id))
   const journal = (id: string) => KvJournal.text(context, id)
-  return { store, engine, sources, floor, executor, receive, candidates, offered, accept, hold, report, launch, launches, stop, run, journal,
-    context, label, started }
+  return { store, engine, sources, board, logger, floor, executor, receive, candidates, offered, accept, hold, report, launch, launches, stop, run,
+    journal, context, label, started }
 }
 export type WorkflowHost = ReturnType<typeof workflowHost>
 /** Requeues a held node's Trigger, as `orchestrator_trigger_requeue` does, and runs the pass that offers it again. */

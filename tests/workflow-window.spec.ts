@@ -86,7 +86,7 @@ describe('the window of a workflow run', () => {
       h.engine.evaluateDue()
     }
     const a1 = h.floor.status(run)[0]!.nodes.find(node => node.label === 'a1')!
-    expect(a1.state).toBe('held')
+    expect(a1).toMatchObject({ state: 'unavailable', reason: 'Assessment timed out', decided_at: new Date(clock).toISOString() })
     expect(h.store.decisions.byThread(h.store.triggers.get(a1.trigger_id!)!.threads.map(ref => `${ref.source}:${ref.id}`)[0]!).at(-1)?.kind).toBe('unavailable')
     await new Promise(resolve => setTimeout(resolve, 30))
     expect(h.journal(run)).not.toContain('"type":"failed"')
@@ -94,5 +94,38 @@ describe('the window of a workflow run', () => {
     h.accept('a1'); h.report('a1', 'DONE'); h.report('a2', 'DONE')
     await finishRun(h, run)
     expect(h.run(run)).toMatchObject({ state: 'completed', result: { a1: 'DONE', a2: 'DONE' } })
+  })
+  it('W2c a held node and one whose Eval went unassessed read apart in status, health and log, and both still wait', async () => {
+    let clock = Date.parse('2026-11-12T01:00:00Z')
+    const { h, directory } = start({ now: () => new Date(clock).toISOString() })
+    await h.started
+    const { run_id: run } = h.floor.startRun({ script: FIXTURE, cwd: directory, args: { tag: 't' } })
+    await until(() => h.offered().length === 2)
+    const a2 = h.hold('a2')
+    for (let round = 0; round < 3; round++) {
+      const candidate = h.offered().find(item => h.label(item.triggers[0]!.id) === 'a1')!
+      h.engine.candidateDelivered(candidate.evalId)
+      clock += 121_000
+      h.engine.evaluateDue()
+    }
+    const node = (label: string) => h.floor.status(run)[0]!.nodes.find(item => item.label === label)!
+    const a1 = node('a1').trigger_id!
+    expect(node('a2')).toMatchObject({ state: 'held', trigger_id: a2, reason: 'hold: a2 waits' })
+    expect(node('a1')).toMatchObject({ state: 'unavailable', trigger_id: a1, reason: 'Assessment timed out' })
+    // The waiting nodes' poll tells the Source's health and the log which wait on a decision and which on the main Session.
+    await until(() => String(h.board.all.workflow?.detail).includes('not assessed'))
+    expect(h.board.all.workflow).toMatchObject({ state: 'ready',
+      detail: '1 runs under way, 2 nodes waiting for their tickets: 1 held, 1 not assessed (the main Session was unavailable)' })
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(h.logger.warn.mock.calls).toEqual([[expect.stringContaining('not assessed'), run, 'a1', 'Assessment timed out', a1]])
+    expect(h.logger.info.mock.calls).toEqual([[expect.stringContaining('held'), run, 'a2', 'hold: a2 waits', a2]])
+    // Neither is a failure, and nothing is offered again until a requeue.
+    expect(h.journal(run)).not.toContain('"type":"failed"')
+    expect(h.offered()).toHaveLength(0)
+    requeue(h, a1)
+    expect(node('a1').state).toBe('offered')
+    await until(() => !String(h.board.all.workflow?.detail).includes('not assessed'))
+    expect(h.board.all.workflow?.detail).toBe('1 runs under way, 2 nodes waiting for their tickets: 1 held')
+    expect(h.logger.warn).toHaveBeenCalledTimes(1)
   })
 })
