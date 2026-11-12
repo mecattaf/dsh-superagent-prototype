@@ -102,6 +102,18 @@ With `executor: dshd`, a unit starts from an empty environment holding the `pass
 
 After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
 
+### Scheduled occurrences
+
+The optional `dsh-superagent-scheduled` entry reads occurrence records that a scheduler outside dsh-superagent drops into one directory, and turns each into a Trigger. Enable it in the profile with `disabled: false`, as the example profile shows. dsh-superagent keeps no clock of its own: the scheduler decides when an occurrence is due and writes its record.
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `inbox` | no | Absolute path of the directory records are dropped into. Empty, the default, reads `<stateDir>/inbox/scheduled`. Changing it restarts the entry |
+
+- **Records.** One UTF-8 JSON object per file, named `*.json`; names starting with `.` and other extensions are ignored, so a scheduler writes elsewhere and links or renames a finished file in. The format is record version 1, `OccurrenceRecordSchema` in `src/sources/scheduled.ts`; [tests/fixtures/scheduled-occurrence-v1.json](../tests/fixtures/scheduled-occurrence-v1.json) holds one record of each kind. A record carries the work's text, frozen when it was written, and the working directory it names, which must exist.
+- **Reading.** The Source reads the directory every `pollSeconds` (Sources settings, 10 by default), oldest name first. After the Trigger is stored, it moves the record into `.done/` beside it; a record it cannot use moves into `.bad/` with a one-line `.error` file that says why. It deletes nothing. Each occurrence is a Trigger on a Thread of its own, labelled `namespace:item`, so a later occurrence never becomes part of an earlier one's Ticket. Of several schedule records of one item read together, only the latest runs; the older ones are stored as filtered with the reason `superseded` and counted in its missed occurrences. A run requested by hand is never superseded. One process reads one directory: the Source locks it, and a second one reports an error.
+- **Admission.** An occurrence has no sender and does not address the agent, so it goes through the cell of an unlisted sender who does not address the agent, in the Source's one admission row, `occurrence`. That cell is `ignore` by default. To let occurrences run, set it to `inferred` in **Settings → Eval → On each Source**, set the accept mode to `auto`, and add a rule that says which occurrences to accept; until then an occurrence is only recorded.
+
 ## Start and stop
 
 ```sh
