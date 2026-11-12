@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { mkdir, stat, writeFile } from 'node:fs/promises'
 import { hostname as osHostname } from 'node:os'
 import { isAbsolute, join } from 'node:path'
-import { latestAssignment, liveTicket, runningAssignment, waitsForPerson } from '../core/index.ts'
+import { key, latestAssignment, liveTicket, runningAssignment, waitsForPerson } from '../core/index.ts'
 import type { AssessmentOutcome, Assignment, EngineForExecutor, Ticket, TicketInput, Trigger } from '../core/index.ts'
 import type { DshdPair, Machine } from '../deployment.ts'
 import type { Store } from '../app/store.ts'
@@ -72,7 +72,8 @@ const READ_RUN_LINES = 1 << 16
 const RETRIED = 'A person retried this ticket. Continue the assignment from the current directory and what it holds now.'
 const DSHD_WORKER_NOTE = 'You are one headless task that dsh-superagent started. Work in the current directory. Nothing reaches you after this '
   + 'message and there is no report tool: when the work is done, end with a short final answer. Your session log is the record. '
-  + 'If the task asks for a JSON-only reply, your final answer is that JSON value and nothing else.'
+  + 'A request in the inputs to report means: say it in your final answer. Earlier attempts of this ticket were given '
+  + 'earlier_inputs. If the task asks for a JSON-only reply, your final answer is that JSON value and nothing else.'
 
 /** The unit name of the `k`th Assignment (1-based) of a Ticket: `<prefix>-<execution name>-a<k>`, or `<prefix>-t<ticket id>-a<k>` when that name is unusable. */
 export function unitName(prefix: string, executionName: string | undefined, ticketId: string, k: number): string {
@@ -96,15 +97,16 @@ export function verdictOf(status: Pick<DshdStatus, 'state' | 'lastRun'>): Verdic
 /** A Trigger as a dshd worker reads it: who wrote what, and when, in full. */
 const triggerCard = (trigger: Trigger) => ({ trigger_id: trigger.id, from: trigger.actor.id, at: trigger.at, text: trigger.text })
 /**
- * The whole first and only message of a unit: the Ticket, its assignment and source Trigger in full, the waiting Inputs, and
- * how the worker ends. Every Assignment gets it whole, since each unit is a fresh process with a fresh Session.
+ * The whole first and only message of a unit: the Ticket, its assignment and source Trigger in full, the Inputs earlier units'
+ * briefs carried, the waiting Inputs, and how the worker ends. Every Assignment gets it whole, since each unit is a fresh
+ * process with a fresh Session.
  */
-export function composeBrief(ticket: Ticket, k: number, origin: Trigger | undefined, batch: Trigger[], inputs: string[]): string {
+export function composeBrief(ticket: Ticket, k: number, origin: Trigger | undefined, batch: Trigger[], inputs: string[], earlier: string[] = []): string {
   const assignment = ticket.execution?.assignment
   const previous = ticket.assignments.at(k - 2)
   // The framing comes first and the request last, so a schema the request ends with is the last thing the worker reads.
   return JSON.stringify({ note: DSHD_WORKER_NOTE, ticket_id: ticket.id, title: ticket.title, attempt: k, ...(assignment ? { assignment } : {}),
-    ...(inputs.length ? { inputs } : {}), ...(batch.length ? { batch: batch.map(triggerCard) } : {}),
+    ...(earlier.length ? { earlier_inputs: earlier } : {}), ...(inputs.length ? { inputs } : {}), ...(batch.length ? { batch: batch.map(triggerCard) } : {}),
     ...(k > 1 && previous?.endedReason === 'retried' ? { retried: RETRIED } : {}), ...(origin ? { trigger: triggerCard(origin) } : {}) })
 }
 /**
@@ -153,9 +155,9 @@ export interface DshdExecutorHost {
   /** DSH Cordis context, whose subprocess service runs the dshd CLI. */
   readonly context: Context
   readonly engine: Pick<EngineForExecutor, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'report' | 'assignmentInterrupted'>
-  readonly store: Pick<Store, 'tickets' | 'triggers' | 'get' | 'set' | 'settings' | 'atomic' | 'afterCommit'>
+  readonly store: Pick<Store, 'tickets' | 'triggers' | 'get' | 'set' | 'keys' | 'settings' | 'atomic' | 'afterCommit'>
   /** Durable effect queue through which launches, watches and stops run. */
-  readonly effects: Pick<Effects, 'enqueue' | 'handle'>
+  readonly effects: Pick<Effects, 'enqueue' | 'handle' | 'pending'>
   /** The `worker` health entry. */
   readonly health: HealthEntry
   readonly machine: Pick<Machine, 'stateDir' | 'dshd'>
@@ -186,10 +188,13 @@ export class DshdExecutor implements ExecutorPort {
   private readonly unavailable = new Map<string, number>()
   /** Launches under way, by Assignment ID, with their pair, which per-pair limits and stops consult. */
   private readonly launching = new Map<string, string>()
+  /** Units whose Assignment the domain ended and whose stop has not recorded their end, by Assignment ID, with their pair: each holds its slot. */
+  private readonly stopping = new Map<string, string>()
   constructor(private readonly host: DshdExecutorHost) {
     this.dshd = host.dshd ?? new DshdCli(host.context.subprocess, host.machine.dshd.command)
     this.hostname = host.hostname ?? osHostname
-    this.slots = new WorkerSlots(() => this.runningTickets().map(({ ticket }) => ticket.id), () => host.store.settings().executor.maxWorkers)
+    this.slots = new WorkerSlots(() => [...this.runningTickets().map(({ ticket }) => ticket.id), ...this.stopping.keys()],
+      () => host.store.settings().executor.maxWorkers)
     host.effects.handle('launch', payload => this.launchQueued(payload), { limit: () => host.paused() ? 0 : this.slots.launches(),
       retry: [5000, 300_000] })
     // A headless unit takes no Input after its brief; rows an in-process Executor queued before a switch are drained.
@@ -210,7 +215,13 @@ export class DshdExecutor implements ExecutorPort {
   /** Queues the stop of the Assignment's unit, which the domain already ended. */
   stop(ticket: Ticket, assignment: Assignment, reason: string): void {
     this.unavailable.delete(assignment.id)
-    this.host.effects.enqueue('dshd-stop', assignment.id, { ticketId: ticket.id, assignmentId: assignment.id, reason })
+    this.stopLater(ticket.id, assignment.id, reason)
+  }
+  /** Queues the stop of a unit; one that may still run holds its slot until the stop records its end. */
+  private stopLater(ticketId: string, assignmentId: string, reason: string): void {
+    const binding = this.host.store.get(BINDING(assignmentId))
+    if (binding && binding.state !== 'ended') this.host.store.afterCommit(() => { this.stopping.set(assignmentId, binding.pair) })
+    this.host.effects.enqueue('dshd-stop', assignmentId, { ticketId, assignmentId, reason })
   }
   /** Nothing to listen to: the workers run outside this process. */
   install(): void {}
@@ -226,6 +237,13 @@ export class DshdExecutor implements ExecutorPort {
         if (!binding) this.host.engine.assignmentInterrupted(ticket.id, running.id)
         else if (binding.state !== 'ended') this.watchLater(ticket.id, running.id)
       } else if (latest?.state === 'pending' && !waitsForPerson(ticket)) this.start(ticket, latest)
+    }
+    // A stop still queued from before the restart holds its unit's slot until it records the unit's end.
+    for (const name of this.host.store.keys(BINDING)) {
+      const assignmentId = name.slice(BINDING.prefix.length)
+      if (!this.host.effects.pending('dshd-stop', assignmentId)) continue
+      const binding = this.host.store.get(name)
+      if (binding && binding.state !== 'ended') this.stopping.set(assignmentId, binding.pair)
     }
   }
   /** Units keep running when this process stops; the dshd calls under way end with the host's lifetime. */
@@ -271,7 +289,7 @@ export class DshdExecutor implements ExecutorPort {
     catch (error) { this.launchFailed(ticketId, assignmentId, error); return }
     const max = pair.pair?.maxWorkers
     const ofPair = this.runningTickets().filter(({ binding }) => binding.pair === pair.name).length
-      + [...this.launching.values()].filter(name => name === pair.name).length
+      + [...this.launching.values(), ...this.stopping.values()].filter(name => name === pair.name).length
     if (max !== undefined && ofPair >= max) throw new Later(`No slot for pair ${pair.name}`)
     this.slots.reserve(ticketId, 'launch')
     this.launching.set(assignmentId, pair.name)
@@ -288,9 +306,18 @@ export class DshdExecutor implements ExecutorPort {
     } finally { this.launching.delete(assignmentId); this.slots.free(ticketId) }
   }
   private async launch(ticket: Ticket, assignment: Assignment, stored: DshdBinding | undefined): Promise<void> {
-    const binding = stored ?? await this.bindingOf(ticket, assignment)
+    let binding = stored
+    // A launch recorded failed with no unit made launches again on what waits now, such as the person's message that launched it.
+    if (binding?.state === 'launching' && assignment.report?.state === 'failed' && assignment.report.at >= binding.launchedAt
+      && await this.dshd.get(binding.name, this.host.lifetime) === 'not-found') binding = undefined
+    if (!binding) {
+      const cwd = ticket.execution?.directory ?? ''
+      if (!this.cwdOf(ticket) && cwd) await mkdir(cwd, { recursive: true })
+      // The directory is checked before the recipe is frozen, so a person who makes it launches the Ticket again afresh.
+      await this.directory(cwd)
+      binding = await this.bindingOf(ticket, assignment)
+    } else await this.directory(binding.recipe.cwd)
     const { recipe } = binding
-    if (!await stat(recipe.cwd).then(info => info.isDirectory(), () => false)) throw new LaunchRefused(`cwd ${recipe.cwd} does not exist`)
     const result = await this.dshd.run(recipe, this.host.lifetime)
     let status: DshdStatus | 'not-found'
     if (!('refused' in result)) status = result
@@ -298,6 +325,9 @@ export class DshdExecutor implements ExecutorPort {
     else throw new LaunchRefused(`dshd refused ${recipe.name}: ${result.refused}: ${result.message}`)
     if (status === 'not-found') throw new LaunchRefused(`dshd refused ${recipe.name}: task-already-ran, then no longer knew it`)
     this.bind(ticket.id, assignment.id, binding, status)
+  }
+  private async directory(cwd: string): Promise<void> {
+    if (!await stat(cwd).then(info => info.isDirectory(), () => false)) throw new LaunchRefused(`cwd ${cwd} does not exist`)
   }
   /**
    * Builds the recipe of an Assignment's first launch attempt and stores it as its binding before dshd runs anything, so every
@@ -310,14 +340,17 @@ export class DshdExecutor implements ExecutorPort {
     const k = ticket.assignments.findIndex(item => item.id === assignment.id) + 1
     const name = unitName(dshd.prefix, ticket.execution?.name, ticket.id, k)
     const cwd = ticket.execution?.directory ?? ''
-    if (!this.cwdOf(ticket) && cwd) await mkdir(cwd, { recursive: true })
     const inputIds = [...ticket.undelivered]
-    const inputs = inputIds.flatMap(id => {
+    const messages = (ids: string[]) => ids.flatMap(id => {
       const input = ticket.inputs.find(item => item.id === id)
       const message = input && inputMessage(input, this.inputCard(input))
       return message === undefined ? [] : [message]
     })
-    const brief = composeBrief(ticket, k, sourceTrigger(this.host, ticket), batchOf(this.host, ticket), inputs)
+    // Each unit is a fresh Session, so a recovery or retry gets again what earlier units' briefs carried, without their restart notes.
+    const earlier = ticket.assignments.slice(0, k - 1).flatMap(previous => previous.deliveredAt ? store.get(BINDING(previous.id))?.inputIds ?? [] : [])
+    const restarts = new Set(ticket.assignments.map(item => key('input', ticket.id, 'restart', item.id)))
+    const carried = [...new Set(earlier)].filter(id => !inputIds.includes(id) && !restarts.has(id))
+    const brief = composeBrief(ticket, k, sourceTrigger(this.host, ticket), batchOf(this.host, ticket), messages(inputIds), messages(carried))
     let task = brief
     if (brief.length > dshd.briefArgvMaxChars) {
       const file = join(stateDir, 'briefs', `${assignment.id}.json`)
@@ -355,7 +388,7 @@ export class DshdExecutor implements ExecutorPort {
       const ticket = store.tickets.get(ticketId)
       const assignment = ticket && latestAssignment(ticket)
       if (!ticket || !liveTicket(ticket) || assignment?.id !== assignmentId || assignment.state !== 'pending') {
-        this.host.effects.enqueue('dshd-stop', assignmentId, { ticketId, assignmentId, reason: 'The Assignment ended while its unit started' })
+        this.stopLater(ticketId, assignmentId, 'The Assignment ended while its unit started')
         return
       }
       engine.assignmentStarted(ticketId, assignmentId)
@@ -381,8 +414,17 @@ export class DshdExecutor implements ExecutorPort {
     if (status === 'not-found') return this.settle(ticketId, assignmentId, 'lost')
     if (status.labels[LABEL.orchestrator] !== this.host.masterId) return this.settle(ticketId, assignmentId, 'superseded')
     if (!binding.invocationId && invocationOf(status)) {
-      binding = { ...binding, invocationId: invocationOf(status)! }
-      this.host.store.set(BINDING(assignmentId), binding)
+      const invocationId = invocationOf(status)!
+      // A stop may have recorded the end during the get: the fresh row is the one to keep.
+      const fresh = this.host.store.atomic(() => {
+        const latest = this.host.store.get(BINDING(assignmentId))
+        if (!latest || latest.state === 'ended') return undefined
+        const next = { ...latest, invocationId }
+        this.host.store.set(BINDING(assignmentId), next)
+        return next
+      })
+      if (!fresh) return
+      binding = fresh
     }
     if (invocationOf(status) !== binding.invocationId) return this.settle(ticketId, assignmentId, 'superseded')
     if (RUNNING.has(status.state)) {
@@ -449,7 +491,10 @@ export class DshdExecutor implements ExecutorPort {
   private async stopQueued({ assignmentId }: { ticketId: string; assignmentId: string; reason: string }): Promise<void> {
     const binding = this.host.store.get(BINDING(assignmentId))
     // A launch under way checks the Assignment again when it binds, and queues the stop again then.
-    if (!binding || binding.state === 'ended' || (binding.state === 'launching' && this.launching.has(assignmentId))) return
+    if (!binding || binding.state === 'ended' || (binding.state === 'launching' && this.launching.has(assignmentId))) {
+      this.stopping.delete(assignmentId)
+      return
+    }
     this.sameHost(binding)
     const signal = this.host.lifetime
     const status = await this.dshd.get(binding.name, signal)
@@ -468,6 +513,7 @@ export class DshdExecutor implements ExecutorPort {
       // A watch that settled the unit meanwhile has recorded how it ended.
       if (latest.state !== 'ended') this.host.store.set(BINDING(assignmentId), { ...latest, state: 'ended', ended: { at: now(), verdict } })
     })
+    this.stopping.delete(assignmentId)
   }
   /** A binding is observed only on the host that launched its unit: dshd units are local to one user manager. */
   private sameHost(binding: DshdBinding): void {
