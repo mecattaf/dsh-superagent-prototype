@@ -88,7 +88,9 @@ describe('the window of a workflow run', () => {
     const a1 = h.floor.status(run)[0]!.nodes.find(node => node.label === 'a1')!
     expect(a1.state).toBe('held')
     expect(h.store.decisions.byThread(h.store.triggers.get(a1.trigger_id!)!.threads.map(ref => `${ref.source}:${ref.id}`)[0]!).at(-1)?.kind).toBe('unavailable')
-    await new Promise(resolve => setTimeout(resolve, 30))
+    // Five polls of the waiting nodes later, the held node has still not failed.
+    const from = h.polls()
+    await until(() => h.polls() > from + 5)
     expect(h.journal(run)).not.toContain('"type":"failed"')
     requeue(h, a1.trigger_id!)
     h.accept('a1'); h.report('a1', 'DONE'); h.report('a2', 'DONE')

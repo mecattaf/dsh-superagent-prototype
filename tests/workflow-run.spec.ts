@@ -108,7 +108,8 @@ describe('workflow runs', () => {
     const run = await firstWave(h, directory)
     const b1 = h.hold('b1')
     // Five polls later the node still waits: holding it is no failure and raises nothing new.
-    await new Promise(resolve => setTimeout(resolve, 50))
+    const from = h.polls()
+    await until(() => h.polls() > from + 5)
     expect(h.run(run)?.state).toBe('running')
     expect(h.journal(run)).not.toContain('"type":"failed"')
     expect(h.floor.status(run)[0]!.nodes.find(node => node.label === 'b1')).toMatchObject({ state: 'held', trigger_id: b1 })

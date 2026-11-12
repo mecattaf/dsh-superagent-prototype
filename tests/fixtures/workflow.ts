@@ -63,7 +63,9 @@ export function workflowHost(directory: string, options: { slots?: number; confi
   const deps: SourceContextDeps = { store, engine, outbox: { send: () => {} }, commands: new Commands(() => testDeployment(), {}, new AbortController().signal),
     sources, deployment: testDeployment(), ready: Promise.resolve(), configured: () => true, receive }
   const host = { sources, context: (kind: { kind: string; health: readonly string[] }) => sourceContextOf(deps, kind) }
-  const floor = new WorkflowFloor(host, { pollMs: { get: () => 5 }, concurrency: 16, maxAttempts: 1, pair: '', ...options.config })
+  // The Ticket waiter reads pollMs each time it schedules a poll, so counting the reads counts the polls it scheduled.
+  let polls = 0
+  const floor = new WorkflowFloor(host, { pollMs: { get: () => { polls += 1; return 5 } }, concurrency: 16, maxAttempts: 1, pair: '', ...options.config })
   const unregister = sources.register(workflowKind(floor))
   const started = floor.start()
 
@@ -103,7 +105,7 @@ export function workflowHost(directory: string, options: { slots?: number; confi
   const run = (id: string) => store.get(KV.workflow.run(id))
   const journal = (id: string) => KvJournal.text(context, id)
   return { store, engine, sources, floor, executor, receive, candidates, offered, accept, hold, report, launch, launches, stop, run, journal,
-    context, label, started }
+    context, label, started, polls: () => polls }
 }
 export type WorkflowHost = ReturnType<typeof workflowHost>
 /** Requeues a held node's Trigger, as `orchestrator_trigger_requeue` does, and runs the pass that offers it again. */
