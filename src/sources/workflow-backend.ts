@@ -1,5 +1,5 @@
 /** The interpreter's Backend over the Engine: a call becomes a Trigger, and its answer is the result of the Ticket accepted from it. */
-import { latestAssignment, threadKey, type Ticket } from '../core/index.ts'
+import { latestAssignment, threadKey, type Decision, type Ticket } from '../core/index.ts'
 import { retryableFailure, type AgentCall, type AgentOutcome, type Backend } from '../workflow/index.ts'
 import type { SourceContext } from './host.ts'
 import type { WorkflowRun } from './workflow-store.ts'
@@ -38,23 +38,39 @@ export function settle(ticket: Ticket | undefined, structured: boolean): AgentOu
   if (state === undefined) return undefined
   return { error: `${NODE_FAILURE}${state}: ${(report?.summary ?? ticket.ended?.reason ?? '').slice(0, 500)}`, agentId: ticket.id }
 }
-type Tickets = Pick<SourceContext, 'threads' | 'tickets'>
+type Tickets = Pick<SourceContext, 'threads' | 'tickets' | 'triggers'>
 /** The Ticket accepted from `trigger`, which subscribes to the Trigger's Thread. */
-export function ticketOf(source: Tickets, trigger: string, thread: string): Ticket | undefined {
+export function ticketOf(source: Pick<Tickets, 'threads' | 'tickets'>, trigger: string, thread: string): Ticket | undefined {
   const subscribed = source.threads.get(thread)?.subscriptions ?? []
   return subscribed.map(id => source.tickets.get(id)).find(ticket => ticket?.origin.triggerIds.includes(trigger))
 }
+/** Where a node's Trigger is while no Ticket was accepted from it. */
+export type Untaken = 'offered' | 'held' | 'unavailable'
+/**
+ * Where a node's Trigger is while no Ticket was accepted from it: `offered` while it is queued for or in an Eval; `unavailable`
+ * once its Eval ended without an assessment, as when the main Session did not answer in time; else `held`, which the main
+ * Session or a person decided. The last two come with their Decision when the Store has it. Neither is offered again until
+ * the Trigger is requeued.
+ */
+export function untaken(source: Pick<Tickets, 'threads' | 'triggers'>, trigger: string, thread: string): { state: Untaken; decision?: Decision } {
+  const queue = source.threads.get(thread)
+  if (queue && (queue.pending.includes(trigger) || queue.evaluating?.triggerIds.includes(trigger))) return { state: 'offered' }
+  const decision = source.triggers.decision(trigger)
+  return { state: decision?.kind === 'unavailable' ? 'unavailable' : 'held', ...decision && { decision } }
+}
+/** A waiting node whose Trigger came to be held or unavailable, or left that state (`state` undefined) at the latest poll. */
+export interface Waited { trigger: string; state?: 'held' | 'unavailable'; decision?: Decision }
 
 /**
  * Waits for the Tickets of nodes: one timer, every `pollMs` as it reads at each poll, reads each waiting node's Thread and its
- * Ticket until it settles. Once stopped, what still waits never settles, so a run parked at stop writes nothing more and resumes
- * from its journal.
+ * Ticket until it settles, and tells `observed` when a waiting node comes to be held or unavailable, or leaves that state.
+ * Once stopped, what still waits never settles, so a run parked at stop writes nothing more and resumes from its journal.
  */
 export class TicketWaiter {
-  private readonly waiting = new Map<string, { thread: string; structured: boolean; settled: (outcome: AgentOutcome) => void }>()
+  private readonly waiting = new Map<string, { thread: string; structured: boolean; settled: (outcome: AgentOutcome) => void; state?: Waited['state']; decided?: string }>()
   private timer: ReturnType<typeof setTimeout> | undefined
   private stopped = false
-  constructor(private readonly source: Tickets, private readonly pollMs: () => number) {}
+  constructor(private readonly source: Tickets, private readonly pollMs: () => number, private readonly observed: (node: Waited) => void = () => {}) {}
   settled(trigger: string, thread: string, structured: boolean): Promise<AgentOutcome> {
     const now = settle(ticketOf(this.source, trigger, thread), structured)
     if (now) return Promise.resolve(now)
@@ -66,16 +82,28 @@ export class TicketWaiter {
   }
   /** How many nodes wait. */
   get size(): number { return this.waiting.size }
+  /** How many waiting nodes were held, or unavailable, at the latest poll. */
+  count(state: 'held' | 'unavailable'): number { return [...this.waiting.values()].filter(item => item.state === state).length }
   stop(): void { this.stopped = true; clearTimeout(this.timer); this.timer = undefined; this.waiting.clear() }
   private arm(): void {
     if (this.timer || this.stopped || !this.waiting.size) return
     this.timer = setTimeout(() => { this.timer = undefined; this.poll() }, this.pollMs())
   }
   private poll(): void {
-    for (const [trigger, { thread, structured, settled }] of [...this.waiting]) {
-      const outcome = settle(ticketOf(this.source, trigger, thread), structured)
-      if (outcome) { this.waiting.delete(trigger); settled(outcome) }
+    const changed: Waited[] = []
+    for (const [trigger, item] of [...this.waiting]) {
+      const ticket = ticketOf(this.source, trigger, item.thread)
+      const outcome = settle(ticket, item.structured)
+      if (outcome) { this.waiting.delete(trigger); item.settled(outcome) }
+      const now = outcome || ticket ? undefined : untaken(this.source, trigger, item.thread)
+      const state = now?.state === 'offered' ? undefined : now?.state
+      // A node held again, or unavailable again, after a requeue the polls did not see is a new Decision, so it is told again.
+      const decided = state && now?.decision?.id
+      if (state === item.state && decided === item.decided) continue
+      item.state = state; item.decided = decided
+      changed.push({ trigger, ...state && { state, ...now?.decision && { decision: now.decision } } })
     }
+    for (const node of changed) this.observed(node)
     this.arm()
   }
 }

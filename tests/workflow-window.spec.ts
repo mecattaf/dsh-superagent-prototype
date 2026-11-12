@@ -110,7 +110,8 @@ describe('the window of a workflow run', () => {
     }
     const node = (label: string) => h.floor.status(run)[0]!.nodes.find(item => item.label === label)!
     const a1 = node('a1').trigger_id!
-    expect(node('a2')).toMatchObject({ state: 'held', trigger_id: a2, reason: 'hold: a2 waits' })
+    // The fixture holds as a card does, so the core records that beside the reason given.
+    expect(node('a2')).toMatchObject({ state: 'held', trigger_id: a2, reason: expect.stringContaining('hold: a2 waits') })
     expect(node('a1')).toMatchObject({ state: 'unavailable', trigger_id: a1, reason: 'Assessment timed out' })
     // The waiting nodes' poll tells the Source's health and the log which wait on a decision and which on the main Session.
     await until(() => String(h.board.all.workflow?.detail).includes('not assessed'))
@@ -118,7 +119,7 @@ describe('the window of a workflow run', () => {
       detail: '1 runs under way, 2 nodes waiting for their tickets: 1 held, 1 not assessed (the main Session was unavailable)' })
     await new Promise(resolve => setTimeout(resolve, 30))
     expect(h.logger.warn.mock.calls).toEqual([[expect.stringContaining('not assessed'), run, 'a1', 'Assessment timed out', a1]])
-    expect(h.logger.info.mock.calls).toEqual([[expect.stringContaining('held'), run, 'a2', 'hold: a2 waits', a2]])
+    expect(h.logger.info.mock.calls).toEqual([[expect.stringContaining('held'), run, 'a2', expect.stringContaining('hold: a2 waits'), a2]])
     // Neither is a failure, and nothing is offered again until a requeue.
     expect(h.journal(run)).not.toContain('"type":"failed"')
     expect(h.offered()).toHaveLength(0)

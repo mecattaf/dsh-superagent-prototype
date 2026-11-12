@@ -19,7 +19,7 @@ export function workflowTools(floor: Pick<WorkflowFloor, 'startRun' | 'status'>)
     }),
     sourceTool({
       name: 'orchestrator_workflow_status',
-      description: 'Read a workflow run and where each of its nodes is: waiting, offered, held, ticket, done or null; without run_id, the newest runs. A held node waits until its trigger is requeued.',
+      description: 'Read a workflow run and where each of its nodes is: waiting, offered, held, unavailable, ticket, done or null; without run_id, the newest runs. A held node was decided without a ticket; an unavailable one was never assessed, as when its evaluation timed out. Each gives when and why, and waits until its trigger is requeued.',
       schema: z.object({ run_id: z.string().min(1).optional() }).strict(),
       execute: async args => ({ runs: floor.status(args.run_id) }),
     }),
