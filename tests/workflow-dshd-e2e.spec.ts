@@ -51,11 +51,11 @@ async function start(): Promise<void> {
   ({ h, fake } = await startFloor({ rule: RULE, source: 'workflow', row: 'workflow' }))
   await mount()
 }
-/** Mounts the plugin entry on the Runtime as DSH loads it, polling every 5 ms, and waits until its runs are under way. */
-async function mount(): Promise<void> {
+/** Mounts the plugin entry on the Runtime as DSH loads it, polling every `pollMs` (5 ms), and waits until its runs are under way. */
+async function mount(pollMs = 5): Promise<void> {
   const disposers: (() => unknown)[] = []
   workflow.apply({ orchestrator: h!.runtime, effect: (effect: () => () => unknown) => { disposers.push(effect()) } } as never,
-    { pollMs: reference(5), concurrency: 16, maxAttempts: 1, pair: '' } as never)
+    { pollMs: reference(pollMs), concurrency: 16, maxAttempts: 1, pair: '' } as never)
   unmount = async () => { for (const dispose of disposers.reverse()) await dispose() }
   await vi.waitFor(() => { if (h!.runtime.health.workflow?.state !== 'ready') throw new Error('not yet') })
 }
@@ -114,6 +114,19 @@ describe('workflow nodes on the dshd executor', () => {
     expect(await ended(run)).toMatchObject({ state: 'completed', result: { answer: final } })
     expect(journal(run).filter(line => line.type === 'result')).toEqual([expect.objectContaining({ result: final })])
     expect(fake.runs).toHaveLength(1)
+  })
+
+  it('a node settles as its Ticket ends, not at the next poll', async () => {
+    ({ h, fake } = await startFloor({ rule: RULE, source: 'workflow', row: 'workflow' }))
+    // The longest poll the Config allows: a node that waited for it would not settle within this test's wait.
+    await mount(60_000)
+    const cwd = agency()
+    const run = await startRun(cwd, script(cwd, 'text'))
+    const { ticket } = await acceptNode(run, 'digest')
+    fake.end(unitOf(ticket), { lines: runLines('session-1', 'Digest written') })
+    await later(h!)
+    expect(stored(ticket).ended?.outcome).toBe('completed')
+    expect(await ended(run)).toMatchObject({ state: 'completed', result: { answer: 'Digest written' } })
   })
 
   it('runs the three-node fixture as three units, its schema node answering with the JSON value of its final text', async () => {
