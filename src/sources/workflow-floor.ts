@@ -87,7 +87,7 @@ export class WorkflowFloor {
   private waiter: TicketWaiter | undefined
   private readonly stopped = new AbortController()
   private readonly driving = new Set<string>()
-  constructor(private readonly host: SourceHost, private readonly config: FloorConfig, private readonly logger?: FloorLogger) {}
+  constructor(private readonly host: SourceHost, private readonly config: FloorConfig, private readonly logger: FloorLogger) {}
 
   /** Waits for setup, then resumes every run that had not ended; it resolves once they are under way, not once they end. */
   async start(): Promise<void> {
@@ -229,17 +229,17 @@ export class WorkflowFloor {
       const waits = 'it waits until its trigger %s is requeued'
       if (state === 'offered') {
         const unexpired = 'an Eval the main Session never receives does not expire, so its trigger %s waits for it'
-        this.logger?.warn(`workflow run %s: node %s has been offered since %s, more than %s; ${unexpired}`, meta.run, node, since,
+        this.logger.warn(`dsh-superagent-workflow: run %s: node %s has been offered since %s, more than %s; ${unexpired}`, meta.run, node, since,
           span(this.config.offeredWarnSeconds.get()), trigger)
-      } else if (state === 'unavailable') this.logger?.warn(`workflow run %s: node %s was not assessed (%s); ${waits}`, meta.run, node, why, trigger)
-      else this.logger?.info(`workflow run %s: node %s is held (%s); ${waits}`, meta.run, node, why, trigger)
+      } else if (state === 'unavailable') this.logger.warn(`dsh-superagent-workflow: run %s: node %s was not assessed (%s); ${waits}`, meta.run, node, why, trigger)
+      else this.logger.info(`dsh-superagent-workflow: run %s: node %s is held (%s); ${waits}`, meta.run, node, why, trigger)
     }
     this.reportHealth()
   }
   private reportHealth(): void {
     const running = this.driving.size, waiting = this.waiter?.size ?? 0
     const held = this.waiter?.count('held') ?? 0, unassessed = this.waiter?.count('unavailable') ?? 0, overdue = this.waiter?.count('offered') ?? 0
-    const decided = [...held ? [`${held} held`] : [], ...unassessed ? [`${unassessed} not assessed (the main Session was unavailable)`] : [],
+    const decided = [...held ? [`${held} held`] : [], ...unassessed ? [`${unassessed} not assessed`] : [],
       ...overdue ? [`${overdue} offered for more than ${span(this.config.offeredWarnSeconds.get())}`] : []]
     const detail = `${running} runs under way, ${waiting} nodes waiting for their tickets${decided.length ? `: ${decided.join(', ')}` : ''}`
     this.source?.report(SOURCE, { state: 'ready', detail, at: new Date().toISOString() })

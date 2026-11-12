@@ -155,10 +155,13 @@ describe('the window of a workflow run', () => {
     // The waiting nodes' poll tells the Source's health and the log which wait on a decision and which on the main Session.
     await until(() => String(h.board.all.workflow?.detail).includes('not assessed'))
     expect(h.board.all.workflow).toMatchObject({ state: 'ready',
-      detail: '1 runs under way, 2 nodes waiting for their tickets: 1 held, 1 not assessed (the main Session was unavailable)' })
+      detail: '1 runs under way, 2 nodes waiting for their tickets: 1 held, 1 not assessed' })
     await new Promise(resolve => setTimeout(resolve, 30))
-    expect(h.logger.warn.mock.calls).toEqual([[expect.stringContaining('not assessed'), run, 'a1', 'Assessment timed out', a1]])
-    expect(h.logger.info.mock.calls).toEqual([[expect.stringContaining('held'), run, 'a2', expect.stringContaining('hold: a2 waits'), a2]])
+    // Each line names the plugin first, as the other entries' lines do.
+    expect(h.logger.warn.mock.calls).toEqual([[expect.stringMatching(/^dsh-superagent-workflow: run %s: node %s was not assessed/), run, 'a1',
+      'Assessment timed out', a1]])
+    expect(h.logger.info.mock.calls).toEqual([[expect.stringMatching(/^dsh-superagent-workflow: run %s: node %s is held/), run, 'a2',
+      expect.stringContaining('hold: a2 waits'), a2]])
     // Neither is a failure, and nothing is offered again until a requeue.
     expect(h.journal(run)).not.toContain('"type":"failed"')
     expect(h.offered()).toHaveLength(0)
