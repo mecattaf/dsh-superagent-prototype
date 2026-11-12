@@ -93,7 +93,7 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `stateDir` | yes | Absolute path: the database, the lock, the command shims in `worker-bin`, the agent's git configuration and, by default, the Ticket directories in `work`. Back it up before upgrades |
-| `engine` | no | `true` by default. `false` keeps the entry inert in this process: no lock, database, environment change, route, tool or Session, and the Source entries wait. Set it where another process loads the same bundles, for example only for the agent presets, while one process owns `stateDir`. Changing it restarts dsh-superagent |
+| `engine` | no | `true` by default. `false` keeps the entry inert in this process: no lock, database, environment change, route, tool or Session, and the Source entries wait. The entry then needs no host service, so it also activates in a headless app; leave the Source rows disabled there, since DeepSeek Harness reports a waiting row on every start. Set it where another process loads the same bundles, for example only for the agent presets, while one process owns `stateDir`. Changing it restarts dsh-superagent |
 | `executor` | no | `dsh` (default) runs each Ticket in a DSH Session of this process; `dshd` runs each Assignment as one dshd headless unit |
 | `dshd.*` | with `executor: dshd` | `pairs` (name → headless `profile`, `env`, `maxWorkers`), `defaultPair`, `cwd`, `env`, `passEnv`, `args`, `prefix`, `command`, `watchSeconds`, `briefArgvMaxChars` |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
@@ -285,6 +285,7 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 | `status` exits 1 | The service does not run, runs twice, does not answer, or its runtime reports an error; the output and the newest log say which |
 | `… timed out after 90 s`, `… was stopped by …`, `… exited with code …` or `… could not run: …` | A CLI failed without printing why; run the named program by hand as the operator's user to see its own message |
 | The panel says dsh-superagent is not answering | It is restarting, or did not start because of its configuration; the DeepSeek Harness log names the cause |
+| `dsh-superagent engine is pending (waiting for services: …)` (log) | The app lacks a service the engine runs on, such as the web server in a headless app. Set `engine: false` in a process that only runs workers, or load the bundle in an app that has the named services |
 | `dsh-superagent configuration has keys it does not use` (log) | Remove the named keys; the message says where each value lives now |
 | The log says the plugin is incompatible with the running dsh | Install a DeepSeek Harness version within the `engines.dsh` range |
 | The panel shows "Failed to load plugins" after a DeepSeek Harness upgrade | Restart the running instance |
