@@ -139,8 +139,8 @@ describe('workflow nodes on the dshd executor', () => {
   })
 
   it('gives each node the token usage its worker printed and the run the total of the nodes it measured, counting the nodes it could not', async () => {
-    // The usage two rehearsal workers' DSH Sessions recorded per step: a Gufo pair and a Claude pair.
-    const GUFO = [{ inputTokens: 3076, outputTokens: 116, totalTokens: 8662, cacheReadTokens: 5470 },
+    // The usage two workers' DSH Sessions recorded per step: an OpenAI-compatible provider and Claude.
+    const OPENAI = [{ inputTokens: 3076, outputTokens: 116, totalTokens: 8662, cacheReadTokens: 5470 },
       { inputTokens: 38, outputTokens: 1, totalTokens: 8701, cacheReadTokens: 8662 }]
     const CLAUDE = { inputTokens: 2, outputTokens: 239, cacheReadTokens: 32343, cacheWriteTokens: 372 }
     await start()
@@ -150,7 +150,7 @@ describe('workflow nodes on the dshd executor', () => {
     const a1 = await acceptNode(run, 'a1'), a2 = await acceptNode(run, 'a2')
     // A unit that still runs has printed no usage that counts yet.
     expect((await status(run)).usage).toEqual({ total: { inputTokens: 0, outputTokens: 0 }, measured_nodes: 0, unmeasured_nodes: 0 })
-    fake.end(unitOf(a1.ticket), { lines: runLines('session-a1', 'DONE', GUFO) })
+    fake.end(unitOf(a1.ticket), { lines: runLines('session-a1', 'DONE', OPENAI) })
     fake.end(unitOf(a2.ticket), { lines: runLines('session-a2', 'DONE', [CLAUDE]) })
     await later(h!)
     const b1 = await acceptNode(run, 'b1')

@@ -71,22 +71,22 @@ describe('dshd 0.1.0 output (captured 12 Nov)', () => {
 })
 
 describe('a run\'s token usage', () => {
-  // The usage two rehearsal workers' DSH Sessions recorded on each step's assistant/message, which a headless --json run
-  // prints on that step's step_end status: a Gufo pair (OpenAI-style totals) and a Claude pair (cache writes, no total).
-  const GUFO = [{ inputTokens: 3076, outputTokens: 116, totalTokens: 8662, cacheReadTokens: 5470 },
+  // The usage two workers' DSH Sessions recorded on each step's assistant/message, which a headless --json run
+  // prints on that step's step_end status: an OpenAI-compatible provider (totals, no cache writes) and Claude (cache writes, no total).
+  const OPENAI = [{ inputTokens: 3076, outputTokens: 116, totalTokens: 8662, cacheReadTokens: 5470 },
     { inputTokens: 38, outputTokens: 1, totalTokens: 8701, cacheReadTokens: 8662 }]
   const CLAUDE = { inputTokens: 2, outputTokens: 239, cacheReadTokens: 32343, cacheWriteTokens: 372 }
   const read = (lines: string[], complete = true) => ({ invocationId: 'invocation-1', complete, lines })
 
   it('sums the usage every step of a whole run printed, keeping a bucket only when every step reports it', () => {
-    expect(usageOf(read(runLines('session-g', 'DONE', GUFO)))).toEqual({ inputTokens: 3114, outputTokens: 117, totalTokens: 17363, cacheReadTokens: 14132 })
+    expect(usageOf(read(runLines('session-o', 'DONE', OPENAI)))).toEqual({ inputTokens: 3114, outputTokens: 117, totalTokens: 17363, cacheReadTokens: 14132 })
     expect(usageOf(read(runLines('session-c', 'DONE', [CLAUDE])))).toEqual(CLAUDE)
-    expect(usageOf(read(runLines('session-m', 'DONE', [GUFO[0], CLAUDE])))).toEqual({ inputTokens: 3078, outputTokens: 355, cacheReadTokens: 37813 })
+    expect(usageOf(read(runLines('session-m', 'DONE', [OPENAI[0], CLAUDE])))).toEqual({ inputTokens: 3078, outputTokens: 355, cacheReadTokens: 37813 })
   })
   it('knows no usage when a step printed none, the lines do not reach back to the run\'s start, or no step ended', () => {
-    expect(usageOf(read(runLines('session-g', 'DONE', [GUFO[0], undefined])))).toBeUndefined()
-    expect(usageOf(read(runLines('session-g', 'DONE', GUFO), false))).toBeUndefined()
-    expect(usageOf(read(runLines('session-g', 'DONE')))).toBeUndefined()
+    expect(usageOf(read(runLines('session-o', 'DONE', [OPENAI[0], undefined])))).toBeUndefined()
+    expect(usageOf(read(runLines('session-o', 'DONE', OPENAI), false))).toBeUndefined()
+    expect(usageOf(read(runLines('session-o', 'DONE')))).toBeUndefined()
     expect(usageOf(read(['dshd-run: run started', JSON.stringify({ type: 'status', phase: 'step_end', turn: 1, step: 1, usage: { inputTokens: 'many' } })]))).toBeUndefined()
   })
 })
