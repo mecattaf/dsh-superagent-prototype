@@ -151,6 +151,26 @@ describe('dshd.removeEnded', () => {
     await h!.restart({ executor: 'dshd', dshd: testDshd({ pairs: PAIRS, defaultPair: 'opus', removeEnded: true }) }); await later()
     expect(fake.removals).toEqual([nameOf(done.ticket)])
   })
+  it('queues at most 64 removals a start, the units that ended first, and leaves the rest to the next start', async () => {
+    await start()
+    const { ticket } = await h!.acceptedTicket(request('1'))
+    fake.end(nameOf(ticket), { lines: runLines('session-1', 'Done.') })
+    await later(); await later()
+    // 65 more ended units of the same ended Ticket, which dshd no longer knows, ended before the real one.
+    const ended = binding(ticket)!
+    const extra = Array.from({ length: 65 }, (_, i) => `extra-${String(i).padStart(2, '0')}`)
+    for (const [i, id] of extra.entries()) {
+      h!.runtime.store.set(BINDING(id), { ...ended, name: `gone-${i}`, ended: { ...ended.ended!, at: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString() } })
+    }
+    const removed = () => extra.filter(id => h!.runtime.store.get(BINDING(id))?.removedAt)
+    const on = { executor: 'dshd' as const, dshd: testDshd({ pairs: PAIRS, defaultPair: 'opus', removeEnded: true }) }
+    await h!.restart(on); await later()
+    expect(removed()).toEqual(extra.slice(0, 64))
+    expect(fake.removals).toEqual([])
+    await h!.restart(on); await later()
+    expect(removed()).toEqual(extra)
+    expect(fake.removals).toEqual([nameOf(ticket)])
+  })
   it('leaves at a start the units another host launched to that host', async () => {
     await start()
     const { ticket } = await h!.acceptedTicket(request('1'))

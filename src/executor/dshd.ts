@@ -161,7 +161,7 @@ export interface DshdExecutorHost {
   readonly engine: Pick<EngineForExecutor, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'report' | 'assignmentInterrupted'>
   readonly store: Pick<Store, 'tickets' | 'triggers' | 'get' | 'set' | 'keys' | 'settings' | 'atomic' | 'afterCommit'>
   /** Durable effect queue through which launches, watches and stops run. */
-  readonly effects: Pick<Effects, 'enqueue' | 'handle' | 'pending'>
+  readonly effects: Pick<Effects, 'enqueue' | 'handle'>
   /** The `worker` health entry. */
   readonly health: HealthEntry
   readonly machine: Pick<Machine, 'stateDir' | 'dshd'>
@@ -508,7 +508,6 @@ export class DshdExecutor implements ExecutorPort {
     const swept = store.keys(BINDING).flatMap(key => {
       const binding = store.get(key), assignmentId = key.slice(BINDING.prefix.length), ticketId = binding?.recipe.labels[LABEL.ticket]
       if (binding?.state !== 'ended' || binding.removedAt || binding.host !== this.hostname() || !ticketId) return []
-      if (effects.pending('dshd-rm', assignmentId)) return []
       const ticket = store.tickets.get(ticketId)
       return ticket && !liveTicket(ticket) ? [{ ticketId, assignmentId, at: binding.ended?.at ?? binding.launchedAt }] : []
     })
