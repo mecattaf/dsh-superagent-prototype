@@ -22,6 +22,9 @@ export class SourceRegistry implements SourceScope {
     const refused = (name: string) => new Error(`Source kind ${kind.kind} declares the health entry ${name}, which another part reports`)
     const synced = kind.health.find(name => name.startsWith('sync:'))
     if (synced) throw refused(synced)
+    // The prefix keeps a kind's tools apart from the host's and other kinds', and inside the `orchestrator_` names bridges pass.
+    const unprefixed = kind.tools?.find(tool => !tool.name.startsWith(`orchestrator_${kind.kind}_`))
+    if (unprefixed) throw new Error(`Source kind ${kind.kind} adds the tool ${unprefixed.name}, whose name does not start with orchestrator_${kind.kind}_`)
     const entries = new Map<string, HealthEntry>()
     const release = () => { for (const [name, entry] of entries) { entry.release(); this.health.delete(name) } }
     for (const name of kind.health) {
