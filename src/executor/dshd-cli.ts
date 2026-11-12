@@ -18,7 +18,8 @@ export interface DshdPort {
   run(recipe: DshdRecipe, signal: AbortSignal): Promise<DshdRunResult>
   get(name: string, signal: AbortSignal): Promise<DshdStatus | 'not-found'>
   wait(name: string, timeoutSeconds: number, signal: AbortSignal): Promise<DshdWaitResult | 'not-found'>
-  read(name: string, signal: AbortSignal): Promise<DshdRead | 'not-found'>
+  /** The newest `lines` journal lines of the unit's current or last run (`-n`), by default dshd's 200. */
+  read(name: string, signal: AbortSignal, lines?: number): Promise<DshdRead | 'not-found'>
   stop(name: string, signal: AbortSignal): Promise<DshdStatus | 'not-found'>
 }
 /** dshd cannot reach systemd or its own parts (exit 7: systemd-unavailable, tool-missing, template-missing); a later try may succeed. */
@@ -44,7 +45,7 @@ const Refusal = z.object({ error: z.object({ kind: z.string(), message: z.string
 interface Exit { exitCode: number | null; stdout: string; stderr: string }
 /** Calls that may end before dshd answers, such as one cut by the host's stop; `wait` gets its own timeout on top. */
 const CALL_TIMEOUT_MS = 60_000
-/** `read --json` carries the whole journal of a run, so it may be large. */
+/** `read --json` may carry a long stretch of a run's journal, so it may be large. */
 const READ_MAX_BYTES = 1 << 24
 const lastLine = (text: string): string => text.trim().split('\n').at(-1) ?? ''
 function json(text: string): unknown {
@@ -78,8 +79,9 @@ export class DshdCli implements DshdPort {
     if (exit.exitCode !== 0 && exit.exitCode !== 124) return this.missing('wait', name, exit)
     return this.parse('wait', name, WaitOutcome, exit)
   }
-  async read(name: string, signal: AbortSignal): Promise<DshdRead | 'not-found'> {
-    const exit = await this.call([this.command, 'read', '--json', name], '/', signal, CALL_TIMEOUT_MS, READ_MAX_BYTES)
+  async read(name: string, signal: AbortSignal, lines?: number): Promise<DshdRead | 'not-found'> {
+    const argv = [this.command, 'read', '--json', ...lines === undefined ? [] : ['-n', String(lines)], name]
+    const exit = await this.call(argv, '/', signal, CALL_TIMEOUT_MS, READ_MAX_BYTES)
     if (exit.exitCode !== 0) return this.missing('read', name, exit)
     return this.parse('read', name, Read, exit)
   }
