@@ -524,18 +524,15 @@ export class DshdExecutor implements ExecutorPort {
       if (relay) this.host.sessions.relay(relay.id, JSON.stringify({ ...JSON.parse(relay.text) as object, unit: binding.name, session: sessionId ?? null }))
     })
   }
-  /** The `dshd-stop` effect: stops the unit, then, once the Ticket has ended, queues the removal of its units (see `removeLater`). */
-  private async stopQueued(payload: { ticketId: string; assignmentId: string; reason: string }): Promise<void> {
-    await this.stopUnit(payload)
-    this.removeLater(payload.ticketId)
-  }
   /**
-   * Stops the unit of an Assignment the domain ended (see `stopUnit`), then sweeps the briefs of the Tickets that have ended: a
-   * Ticket's end stops every Assignment it has not ended, so each Ticket that wrote a brief passes here once it ends.
+   * The `dshd-stop` effect: stops the unit of an Assignment the domain ended (see `stopUnit`), then sweeps the briefs of the
+   * Tickets that have ended: a Ticket's end stops every Assignment it has not ended, so each Ticket that wrote a brief passes
+   * here once it ends. Once the Ticket has ended, it also queues the removal of its units (see `removeLater`).
    */
   private async stopQueued(payload: { ticketId: string; assignmentId: string; reason: string }): Promise<void> {
     await this.stopUnit(payload)
     await this.sweepBriefs()
+    this.removeLater(payload.ticketId)
   }
   /**
    * Stops the unit of an Assignment the domain ended, only while its current run is the one this binding started; the domain
