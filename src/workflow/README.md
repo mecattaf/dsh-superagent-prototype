@@ -19,7 +19,7 @@ The code is unchanged. These are all the differences from that commit:
 3. **`fidelity.spec.ts`** reads recorded runs only from the directory `NAIVE_PROJECTS` names. Substrate's file also fell back to two directories under one machine's home. Without that variable, the tests against recorded runs are skipped, as they were on any machine without those runs. The three synthetic tests always run.
 4. **Not vendored:**
    - `conformance.test.ts`: all 28 of its tests compare against private recorded runs on one machine, named by session id, and are skipped everywhere else. It stays in Substrate.
-   - `bin/naive-run.mjs`: a `tsx` loader for `cli.ts`. `main(argv)` in `cli.ts` is the same entry, and the tests call it.
+   - `bin/naive-run.mjs`: a `tsx` loader for `cli.ts`. `main(argv)` in `cli.ts` is the same entry. `cli.ts` is kept only because the vendored tests `successor-r2`, `successor-r3` and `successor-r5` call `main`: `index.ts` does not export it, the plugin never runs it, and `lib/` does not contain it.
    - `package.json`, `tsconfig.json` and `vitest.config.ts`: the repository's own configuration builds and tests this code, with TypeScript 6.0.3 and vitest 4.1.8.
    - The original README, whose contract is summarized below.
 5. **Dependencies.** `effect` `4.0.0-rc.112`, a peer dependency in Substrate, and `ajv` `8.20.0`, the version Substrate's lockfile resolves, are exact `dependencies` here. `tsdown.config.ts` keeps them out of the bundle, as it does `zod`.

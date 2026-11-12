@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { threadKey, type Trigger } from '../src/core/index.ts'
 import { NODE_FAILURE, settle, TicketBackend, TicketWaiter } from '../src/sources/workflow-backend.ts'
-import { nodeOf } from '../src/sources/workflow-trigger.ts'
+import { nodeOf, RETRY_NOTE, SCHEMA_INSTRUCTION } from '../src/sources/workflow-trigger.ts'
 import { FIXTURE, neverStopped, newDirectory, requeue, WORKFLOW_SETTINGS, workflowHost, type WorkflowHost } from './fixtures/workflow.ts'
 
 const B1 = '{"a1": "alpha t", "a2": "beta t"}'
@@ -144,10 +144,43 @@ describe('workflow runs', () => {
     expect(second!.threads).toEqual(first!.threads)
     // Status traces the node's latest attempt, not the Ticket of the one before.
     expect(h.floor.status(run)[0]!.nodes.find(node => node.label === 'b1')).toMatchObject({ state: 'offered', trigger_id: second!.id })
+    // The second attempt's new worker is told why the first was not accepted, before the schema instruction, which stays last.
+    const [prompt, schema] = first!.text.split(`\n\n${SCHEMA_INSTRUCTION}`)
+    const head = `${prompt!}\n\n${RETRY_NOTE} `, tail = `\n\n${SCHEMA_INSTRUCTION}${schema!}`
+    expect(first!.text).not.toContain(RETRY_NOTE)
+    expect(second!.text.startsWith(head) && second!.text.endsWith(tail)).toBe(true)
+    expect(second!.text.slice(head.length, -tail.length)).toMatch(/^\S[^\n]*$/)
     h.accept('b1'); h.report('b1', B1)
     await until(() => h.run(run)?.state !== 'running')
     expect(h.run(run)).toMatchObject({ state: 'completed', result: RESULT })
     expect(h.store.tickets.list()).toHaveLength(4)
+  })
+  it('a node whose Thread is unsubscribed once accepted still settles when its Ticket ends', async () => {
+    const { host: h, directory } = start()
+    const run = await firstWave(h, directory)
+    const b1 = h.receive.mock.calls.map(([item]) => item as Trigger).find(item => item.meta.label === 'b1')!
+    const ticket = h.accept('b1')
+    // As `orchestrator_thread_unsubscribe` does, before the Source has seen the Ticket.
+    expect(h.engine.unsubscribe(threadKey(b1.threads[0]!))).toBe(true)
+    const node = () => h.floor.status(run)[0]!.nodes.find(item => item.label === 'b1')
+    await until(() => node()?.state === 'ticket')
+    expect(node()).toMatchObject({ trigger_id: b1.id, ticket_id: ticket.id })
+    h.report('b1', B1)
+    await until(() => h.run(run)?.state !== 'running')
+    expect(h.run(run)).toMatchObject({ state: 'completed', result: RESULT })
+    expect(node()).toMatchObject({ state: 'done', ticket_id: ticket.id })
+  })
+  it('status names a node\'s latest attempt after maxAttempts is lowered', async () => {
+    const { host: h1, directory } = start(undefined, { config: { maxAttempts: 2 } })
+    const run = await firstWave(h1, directory)
+    h1.accept('b1'); h1.report('b1', 'Both files say alpha and beta.')
+    await until(() => h1.offered().length === 1)
+    const second = (h1.receive.mock.calls.at(-1)![0] as Trigger).id
+    expect(second).toMatch(/-a2$/)
+    await h1.stop()
+    const { host: h2 } = start(directory, { config: { maxAttempts: 1 } })
+    await h2.started
+    expect(h2.floor.status(run)[0]!.nodes.find(item => item.label === 'b1')).toMatchObject({ trigger_id: second })
   })
   it('K6 a failed node is replayed as null on resume, never re-dispatched', async () => {
     const { host: h1, directory } = start()

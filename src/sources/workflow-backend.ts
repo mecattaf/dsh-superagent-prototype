@@ -1,6 +1,7 @@
 /** The interpreter's Backend over the Engine: a call becomes a Trigger, and its answer is the result of the Ticket accepted from it. */
 import { latestAssignment, threadKey, type Ticket } from '../core/index.ts'
 import { isNoAnswer } from '../executor/dshd-summary.ts'
+import { KV } from '../kv.ts'
 import { retryableFailure, type AgentCall, type AgentOutcome, type Backend } from '../workflow/index.ts'
 import type { SourceContext } from './host.ts'
 import type { WorkflowRun } from './workflow-store.ts'
@@ -34,11 +35,22 @@ export function settle(ticket: Ticket | undefined, structured: boolean): AgentOu
   if (state === undefined) return undefined
   return { error: `${NODE_FAILURE}${state}: ${(report?.summary ?? ticket.ended?.reason ?? '').slice(0, 500)}`, agentId: ticket.id }
 }
-type Tickets = Pick<SourceContext, 'threads' | 'tickets'>
-/** The Ticket accepted from `trigger`, which subscribes to the Trigger's Thread. */
+type Tickets = Pick<SourceContext, 'threads' | 'tickets' | 'state'>
+/**
+ * The Ticket accepted from `trigger`: the one it is pinned to, else the one among the Trigger's Thread subscriptions or, once
+ * a person or the main Session unsubscribed that Thread, among the open Tickets. The Ticket found is pinned, so it is still
+ * found after an unsubscribe once it has ended.
+ */
 export function ticketOf(source: Tickets, trigger: string, thread: string): Ticket | undefined {
+  const pin = KV.workflow.ticket(trigger)
+  const pinned = source.state.get(pin)
+  const known = pinned === undefined ? undefined : source.tickets.get(pinned)
+  if (known) return known
+  const from = (ticket: Ticket | undefined): ticket is Ticket => ticket?.origin.triggerIds.includes(trigger) ?? false
   const subscribed = source.threads.get(thread)?.subscriptions ?? []
-  return subscribed.map(id => source.tickets.get(id)).find(ticket => ticket?.origin.triggerIds.includes(trigger))
+  const ticket = subscribed.map(id => source.tickets.get(id)).find(from) ?? source.tickets.open().find(from)
+  if (ticket) source.state.set(pin, ticket.id)
+  return ticket
 }
 
 /**

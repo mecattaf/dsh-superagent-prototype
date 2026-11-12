@@ -9,7 +9,7 @@ import { extractMeta, runWorkflow, type LoadedJournal, type RunResult, type Work
 import { health, sourceContext, type SourceContext, type SourceHost } from './host.ts'
 import { retriedOnResume, TicketBackend, ticketOf, TicketWaiter } from './workflow-backend.ts'
 import { KvJournal, type WorkflowRun, type WorkflowState } from './workflow-store.ts'
-import { nodeThread, nodeTriggerId, SOURCE } from './workflow-trigger.ts'
+import { MAX_ATTEMPTS, nodeThread, nodeTriggerId, SOURCE } from './workflow-trigger.ts'
 
 /** The workflow Source's machine settings, as the plugin's Config declares them; `pollMs` is read at each use. */
 export interface FloorConfig { pollMs: Volatile<number>; concurrency: number; maxAttempts: number; pair: string }
@@ -56,9 +56,12 @@ export function pinnedResolver(store: WorkflowState, run: Pick<WorkflowRun, 'id'
   }
 }
 
-/** A node's Thread key and the Trigger id of its latest attempt, or undefined before its first. */
-function latestAttempt(source: Pick<SourceContext, 'triggers'>, run: string, node: string, attempts: number) {
-  for (let attempt = attempts; attempt >= 1; attempt--) {
+/**
+ * A node's Thread key and the Trigger id of its latest attempt, or undefined before its first. It looks from the most attempts
+ * the Config allows, so lowering `maxAttempts` after a run made a later attempt still names that attempt.
+ */
+function latestAttempt(source: Pick<SourceContext, 'triggers'>, run: string, node: string) {
+  for (let attempt = MAX_ATTEMPTS; attempt >= 1; attempt--) {
     const trigger = nodeTriggerId(run, node, attempt)
     if (source.triggers.get(trigger)) return { trigger, thread: threadKey({ source: SOURCE, id: nodeThread(run, node) }) }
   }
@@ -186,7 +189,7 @@ export class WorkflowFloor {
       if (!match) return []
       const node = `${match[1]!}-o${match[2]!}`
       const head = { node, ...started.label !== undefined && { label: started.label }, ...started.phase !== undefined && { phase: started.phase } }
-      const latest = latestAttempt(source, run.id, node, this.config.maxAttempts)
+      const latest = latestAttempt(source, run.id, node)
       const ticket = latest && ticketOf(source, latest.trigger, latest.thread)
       const traced = { ...head, ...latest && { trigger_id: latest.trigger }, ...ticket && { ticket_id: ticket.id } }
       if (journal.results.has(started.key)) return [{ ...traced, state: 'done' }]
