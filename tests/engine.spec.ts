@@ -29,11 +29,16 @@ function host(omit: readonly string[] = []) {
     subprocess: { spawn: vi.fn(() => { throw new Error('The entry must not start a process here') }) },
   }
   const ctx = new Context()
+  // Capture every level: the default buffer keeps only the levels at or above the logger's default.
+  const messages: { type: string; args: unknown[] }[] = []
+  ctx.logger.exporter({ levels: { default: 3 }, export: message => { messages.push(message) } })
+  /** The text of each message logged at `type`. */
+  const logged = (type: string): string[] => messages.filter(message => message.type === type).map(message => message.args.map(String).join(' '))
   for (const [name, service] of Object.entries(services)) if (!omit.includes(name)) ctx.reflect.provide(name, service)
   // A Source plugin, as github-watch and feishu-watch are: it starts only once the `orchestrator` service exists.
   const source = vi.fn()
   ctx.plugin({ name: 'source', inject: ['orchestrator'], apply: source })
-  return { ctx, services, source, stateDir: join(directory, 'state'), directory }
+  return { ctx, services, source, logged, stateDir: join(directory, 'state'), directory }
 }
 
 it('with the engine off, takes no lock, opens no database, changes no process environment and registers nothing', async () => {
@@ -71,12 +76,6 @@ it('by default runs as before: locks the state directory, opens its database, se
   await vi.waitFor(() => { expect(existsSync(`${stateDir}.lock`)).toBe(false) })
 })
 
-/** The text of each message the context logged at `type`. */
-function logged(ctx: Context, type: string): string[] {
-  const { buffer } = ctx.logger as unknown as { buffer: { type: string; args: unknown[] }[] }
-  return buffer.filter(message => message.type === type).map(message => message.args.map(String).join(' '))
-}
-
 /** A stand-in for DSH's Loader service: `await()` settles once the plugin tree has no lifecycle work left. */
 function loader(ctx: Context) {
   let settle = () => {}
@@ -86,12 +85,12 @@ function loader(ctx: Context) {
 }
 
 it('with the engine off, activates in a headless app, which has no web server, Session controller or workspace registry', async () => {
-  const { ctx, source, stateDir, directory } = host(WEB_ONLY)
+  const { ctx, source, logged, stateDir, directory } = host(WEB_ONLY)
   const fiber = await ctx.plugin(plugin, { stateDir, engine: false })
   // DSH reports every entry that stays pending as "did not activate" on each boot; a dormant entry is active and quiet.
   expect(fiber.state).toBe(ACTIVE)
-  expect(logged(ctx, 'info').join('\n')).toContain('engine is off')
-  expect(logged(ctx, 'warn')).toEqual([])
+  expect(logged('info').join('\n')).toContain('engine is off')
+  expect(logged('warn')).toEqual([])
   expect(readdirSync(directory)).toEqual([])
   expect(ctx.get('orchestrator')).toBeUndefined()
   expect(source).not.toHaveBeenCalled()
@@ -99,24 +98,26 @@ it('with the engine off, activates in a headless app, which has no web server, S
 })
 
 it('with the engine on, still reports a host service the engine waits for once the plugin tree settled without it', async () => {
-  const { ctx, stateDir } = host(['webServer'])
+  const { ctx, logged, stateDir } = host(['webServer'])
   const tree = loader(ctx)
   await ctx.plugin(plugin, { stateDir })
   expect(existsSync(stateDir)).toBe(false)
   await tree.settle()
-  expect(logged(ctx, 'warn').join('\n')).toMatch(/engine .*waiting for service: webServer/)
+  expect(logged('warn').join('\n')).toMatch(/engine .*waiting for service: webServer/)
   expect(existsSync(stateDir)).toBe(false)
 })
 
 it('with the engine on, starts the Runtime once a host service that arrives late is provided, and reports nothing', async () => {
-  const { ctx, services, stateDir } = host(['webServer'])
+  const { ctx, services, logged, stateDir } = host(['webServer'])
+  const tree = loader(ctx)
   const fiber = await ctx.plugin(plugin, { stateDir })
   expect(existsSync(stateDir)).toBe(false)
   ctx.reflect.provide('webServer', services.webServer)
   await vi.waitFor(() => { expect(ctx.get('orchestrator')).toBeDefined() })
   expect(existsSync(`${stateDir}.lock`)).toBe(true)
   expect(services.webServer.register).toHaveBeenCalled()
-  expect(logged(ctx, 'warn')).toEqual([])
+  await tree.settle()
+  expect(logged('warn')).toEqual([])
   await fiber.dispose()
   await vi.waitFor(() => { expect(existsSync(`${stateDir}.lock`)).toBe(false) })
 })
