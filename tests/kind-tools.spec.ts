@@ -48,4 +48,13 @@ describe('a Source kind\'s main-Session tools', () => {
     expect(host.tools.get(main)!.has('orchestrator_probe_echo')).toBe(false)
     await host.stop()
   })
+  it('a kind\'s tools leave the main Session when dsh-superagent stops, though DSH keeps the Session', async () => {
+    const host = await startRuntime()
+    const main = host.runtime.masterId
+    host.runtime.sources.register(probe('orchestrator_probe_echo'))
+    expect(host.tools.get(main)!.has('orchestrator_probe_echo')).toBe(true)
+    await host.stop()
+    expect(host.agents.has(main)).toBe(true)
+    expect(host.tools.get(main)!.has('orchestrator_probe_echo')).toBe(false)
+  })
 })
