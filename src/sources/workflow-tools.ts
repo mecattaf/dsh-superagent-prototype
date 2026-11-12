@@ -7,13 +7,13 @@ export function workflowTools(floor: Pick<WorkflowFloor, 'startRun' | 'status'>)
   return [
     sourceTool({
       name: 'orchestrator_workflow_start',
-      description: 'Start a workflow script on an explicit request that names the script and the directory to run it in. Each agent() call of the script arrives as an inferred candidate from the workflow Source, which you assess like any other: accepting it runs that node as a ticket in the directory, and the run waits for each ticket it needs. A repeated trigger_id starts nothing new.',
+      description: 'Start a workflow script on an explicit request naming the script and its directory. Each agent() call arrives as an inferred workflow candidate you assess like any other; accepting one runs its node as a ticket there, which the run waits for. A repeated trigger_id starts nothing new.',
       schema: z.object({
-        script: z.string().min(1).describe('The workflow script: an absolute path, or one relative to cwd.'),
-        cwd: z.string().regex(/^\//, 'An absolute path').describe('The absolute directory every node of the run works in.'),
-        args: z.unknown().optional().describe('The value the script reads as args.'),
-        pair: z.string().min(1).optional().describe('The compute pair every node runs on; without it, the Source\'s pair, else the Executor\'s default.'),
-        trigger_id: z.string().min(1).optional().describe('The trigger of the request this run answers; starting with the same trigger, script, cwd and args again returns the run it started.'),
+        script: z.string().min(1).describe('Path, absolute or relative to cwd.'),
+        cwd: z.string().regex(/^\//, 'An absolute path').describe('Absolute directory all nodes work in.'),
+        args: z.unknown().optional().describe('Value the script reads as args.'),
+        pair: z.string().min(1).optional().describe('Compute pair of all nodes; else the Source\'s, else the Executor\'s default.'),
+        trigger_id: z.string().min(1).optional().describe('The request\'s trigger; repeating it with the same script, cwd and args returns its run.'),
       }).strict(),
       execute: async args => floor.startRun(args),
     }),

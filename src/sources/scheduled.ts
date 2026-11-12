@@ -279,10 +279,10 @@ export function scheduledKind(config: ScheduledConfig): SourceKind<ScheduledSett
     },
     environment: {
       variables: [
-        { key: 'DSH_SUPERAGENT_SCHEDULED_OCCURRENCE', description: { zh: '开始工单的定时发生记录的文件名，不含 .json；工单不是从定时发生开始时为空', en: 'File name, without .json, of the occurrence record that started the ticket; empty when the ticket did not start from a scheduled occurrence' } },
-        { key: 'DSH_SUPERAGENT_SCHEDULED_ITEM', description: { zh: '开始工单的定时项，写作 namespace:item；工单不是从定时发生开始时为空', en: 'The scheduled item that started the ticket, as namespace:item; empty when the ticket did not start from a scheduled occurrence' } },
-        { key: 'DSH_SUPERAGENT_SCHEDULED_DUE', description: { zh: '这次发生的到期时间（ISO 8601，UTC）；手动运行时是请求的时间；工单不是从定时发生开始时为空', en: 'Due instant of the occurrence, ISO 8601 in UTC, or when a manual run was requested; empty when the ticket did not start from a scheduled occurrence' } },
-        { key: 'DSH_SUPERAGENT_SCHEDULED_CWD', description: { zh: '这次发生为工作指定的工作目录；工单不是从定时发生开始时为空', en: 'The working directory the occurrence names for its work; empty when the ticket did not start from a scheduled occurrence' } },
+        { key: 'DSH_SUPERAGENT_SCHEDULED_OCCURRENCE', ticket: true, description: { zh: '开始工单的定时发生记录的文件名，不含 .json；工单不是从定时发生开始时为空', en: 'Record file name, without .json, of the occurrence that started the ticket; else empty' } },
+        { key: 'DSH_SUPERAGENT_SCHEDULED_ITEM', ticket: true, description: { zh: '开始工单的定时项，写作 namespace:item；工单不是从定时发生开始时为空', en: 'Scheduled item that started the ticket, as namespace:item; else empty' } },
+        { key: 'DSH_SUPERAGENT_SCHEDULED_DUE', ticket: true, description: { zh: '这次发生的到期时间（ISO 8601，UTC）；手动运行时是请求的时间；工单不是从定时发生开始时为空', en: 'Due instant (ISO 8601, UTC) of the occurrence that started the ticket, or a manual run\'s request time; else empty' } },
+        { key: 'DSH_SUPERAGENT_SCHEDULED_CWD', ticket: true, description: { zh: '这次发生为工作指定的工作目录；工单不是从定时发生开始时为空', en: 'Working directory named by the occurrence that started the ticket; else empty' } },
       ],
       values: ({ trigger }) => {
         if (trigger?.source !== SOURCE) return { ...EMPTY }
