@@ -80,4 +80,20 @@ describe('DshdCli', () => {
       .toMatchObject({ state: 'stopped' })
     await expect(cli(answering('ok')).get('sa-fix-a1', signal)).rejects.toThrow('printed what dsh-superagent does not read: ok')
   })
+  it('reads the last line dshd printed, after a notice on stdout or a diagnostic on stderr, and an aborted call as no answer at all', async () => {
+    expect(await cli(answering(`notice: a line before the outcome\n${JSON.stringify(status())}`)).get('sa-fix-a1', signal)).toMatchObject({ state: 'running' })
+    expect(await cli(answering('', `warning: a diagnostic\n${refusal('not-found')}`, 3)).get('sa-fix-a1', signal)).toBe('not-found')
+    // A call that our abort or a signal ended may have printed anything; even an error object is not dshd's answer.
+    await expect(cli(answering('', refusal('not-found'), null)).get('sa-fix-a1', signal)).rejects.toThrow('dshd get sa-fix-a1 was stopped before it finished')
+  })
+  it('lets read --json print a 16 MiB journal, and gives wait --json its own timeout on top of the call timeout', async () => {
+    const subprocess = answering(JSON.stringify({ name: 'sa-fix-a1', invocationId: 'invocation-1', complete: true, streams: ['stdout', 'stderr'], lines: [] }))
+    await cli(subprocess).read('sa-fix-a1', signal)
+    expect(subprocess.spawn.mock.calls[0]![0]).toMatchObject({ stdio: { stdout: { maxBytes: 1 << 24 } } })
+    const timeout = vi.spyOn(AbortSignal, 'timeout')
+    try {
+      await cli(answering(JSON.stringify({ outcome: 'still-running', warnings: [], ...status() }))).wait('sa-fix-a1', 30, signal)
+      expect(timeout).toHaveBeenCalledWith(90_000)
+    } finally { timeout.mockRestore() }
+  })
 })
