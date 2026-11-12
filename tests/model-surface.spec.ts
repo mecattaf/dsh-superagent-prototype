@@ -401,6 +401,12 @@ it.each(['orchestrator', 'worker'] as const)('keeps the %s within its character 
   expect(prompt + tools, `${prompt} characters of prompt and ${tools} of tools`).toBeLessThanOrEqual(BUDGET[role])
 })
 
+it('shows a Source\'s ticket variables to workers only, as the Executor\'s', () => {
+  const prompt = (id: string) => host.sections.get(id)!({})
+  expect(prompt(host.runtime.masterId)).not.toContain('DSH_SUPERAGENT_SCHEDULED_ITEM')
+  expect(prompt(sessions.workerA)).toContain('DSH_SUPERAGENT_SCHEDULED_ITEM')
+})
+
 it('keeps the routing rules in dispatch, which says the main Session may accept the rest of a stop message as new work', () => {
   const route = toolsOf('orchestrator').get('orchestrator_route')!.description
   const dispatch = surfaces.find(surface => surface.where === 'orchestrator prompt runtime/dispatch')!.text
