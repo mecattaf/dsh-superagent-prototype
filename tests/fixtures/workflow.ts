@@ -65,7 +65,9 @@ export function workflowHost(directory: string, options: { slots?: number; confi
     sources, deployment: testDeployment(), ready: Promise.resolve(), configured: () => true, receive }
   const host = { sources, context: (kind: { kind: string; health: readonly string[] }) => sourceContextOf(deps, kind) }
   const logger = { info: vi.fn<(format: string, ...args: unknown[]) => void>(), warn: vi.fn<(format: string, ...args: unknown[]) => void>() }
-  const floor = new WorkflowFloor(host, { pollMs: { get: () => 5 }, concurrency: 16, maxAttempts: 1, pair: '', ...options.config }, logger)
+  // A test clock may run hours behind the wall clock the floor's threshold reads, so only a test that sets the threshold has one.
+  const floor = new WorkflowFloor(host, { pollMs: { get: () => 5 }, offeredWarnSeconds: { get: () => Infinity }, concurrency: 16, maxAttempts: 1, pair: '',
+    ...options.config }, logger)
   const unregister = sources.register(workflowKind(floor))
   const started = floor.start()
 
