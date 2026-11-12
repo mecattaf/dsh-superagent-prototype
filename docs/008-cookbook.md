@@ -620,7 +620,7 @@ return notes
 `src/workflow/cli.ts` runs a script under a mock backend that calls no model, so `meta`, the builtins and the shape of the run are checked before any Ticket exists:
 
 ```sh
-node src/workflow/cli.ts release-notes.workflow.js --print-result
+node --experimental-transform-types src/workflow/cli.ts release-notes.workflow.js --print-result
 ```
 
 ### 4. Start and follow the run
