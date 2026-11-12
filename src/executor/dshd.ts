@@ -1,6 +1,6 @@
 /** dshd executor: runs each Assignment as one dshd headless unit and settles it from the way the unit ended. */
 import type { Context } from '@deepseek-ai/cordis'
-import { mkdir, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { hostname as osHostname } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { key, latestAssignment, liveTicket, runningAssignment, waitsForPerson } from '../core/index.ts'
@@ -519,10 +519,18 @@ export class DshdExecutor implements ExecutorPort {
     })
   }
   /**
+   * Stops the unit of an Assignment the domain ended (see `stopUnit`), then sweeps the briefs of the Tickets that have ended: a
+   * Ticket's end stops every Assignment it has not ended, so each Ticket that wrote a brief passes here once it ends.
+   */
+  private async stopQueued(payload: { ticketId: string; assignmentId: string; reason: string }): Promise<void> {
+    await this.stopUnit(payload)
+    await this.sweepBriefs()
+  }
+  /**
    * Stops the unit of an Assignment the domain ended, only while its current run is the one this binding started; the domain
    * already ended the Assignment, so nothing is reported.
    */
-  private async stopQueued({ assignmentId }: { ticketId: string; assignmentId: string; reason: string }): Promise<void> {
+  private async stopUnit({ assignmentId }: { ticketId: string; assignmentId: string; reason: string }): Promise<void> {
     const binding = this.host.store.get(BINDING(assignmentId))
     // A launch under way checks the Assignment again when it binds, and queues the stop again then.
     if (!binding || binding.state === 'ended' || (binding.state === 'launching' && this.launching.has(assignmentId))) {
@@ -553,6 +561,24 @@ export class DshdExecutor implements ExecutorPort {
   private sameHost(binding: DshdBinding): void {
     if (binding.host !== this.hostname()) {
       throw new Error(`The unit ${binding.name} runs on ${binding.host}, and this process runs on ${this.hostname()}: only ${binding.host} can observe it`)
+    }
+  }
+  /**
+   * Removes the briefs under `stateDir/briefs` that belong to no Assignment of an open Ticket. A Ticket that has ended launches
+   * no unit again, and each Assignment has a brief of its own, so nothing reads them; an open Ticket's briefs stay whatever its
+   * units did, as do files not named `<Assignment ID>.json`. A brief that cannot be removed is logged and left for the next sweep.
+   */
+  private async sweepBriefs(): Promise<void> {
+    const directory = join(this.host.machine.stateDir, 'briefs')
+    const left = (error: unknown) => { this.host.context.logger.warn('dsh-superagent could not sweep %s: %s', directory, String(error)) }
+    let files: string[]
+    try { files = await readdir(directory) }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') left(error); return }
+    // Read after the listing: the Assignment of any brief listed exists by now, so an open Ticket's brief is never taken.
+    const open = new Set(this.host.store.tickets.open().flatMap(ticket => ticket.assignments.map(assignment => assignment.id)))
+    for (const file of files) {
+      if (!file.endsWith('.json') || open.has(file.slice(0, -'.json'.length))) continue
+      await rm(join(directory, file), { force: true }).catch(left)
     }
   }
   /** Records a failed launch on its Ticket and relays it to the main Session; the Ticket waits for a person's message or a retry. */

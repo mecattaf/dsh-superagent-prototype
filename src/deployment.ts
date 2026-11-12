@@ -49,7 +49,7 @@ export const Config = s.object({
   dshd: s.object({
     command: s.string().default('dshd').description('The dshd CLI: a command name on PATH or an absolute path.'),
     prefix: s.string().pattern(/^[a-z][a-z0-9]{0,9}$/).default('sa').description('First part of every unit name.'),
-    pairs: DshdPairs.default({}).description('Provider-harness pairs by name, each `{profile, env, maxWorkers}`: the headless profile its workers boot, the environment added for its units and its own limit.'),
+    pairs: DshdPairs.default({}).description('Provider-harness pairs by name, each `{profile, env, maxWorkers}`: the headless profile its workers boot, the environment added for its units and its own limit. Values of `env` are recorded in the unit recipe: no secrets.'),
     defaultPair: s.string().default('').description('The pair a Ticket runs on when its Trigger names none.'),
     cwd: s.string().default('').description('Directory of a Ticket whose Trigger names none. Absolute path; empty: a directory under the Execution directory.'),
     env: DshdEnv.default({}).description('Environment added for every unit, by name. Values are recorded in the unit recipe: no secrets.'),
