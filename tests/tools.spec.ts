@@ -106,9 +106,10 @@ it('keeps the main Session\'s resources from an Executor Session, which lists on
   expect(offered).not.toMatch(/preview/i)
 })
 
-it('registers every tool so that DSH\'s own tool registry projects its schema, whose parameters it requires to be lossless JSON', async () => {
-  const { sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
-  for (const session of [h.runtime.masterId, sessionId]) {
+it('registers every tool so that DSH\'s own tool registry projects its schema with lossless parameters and runs a read through execute', async () => {
+  const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  const reads = new Map([[h.runtime.masterId, { resource: 'tickets' }], [sessionId, { resource: `ticket/${ticket.id}` }]])
+  for (const [session, read] of reads) {
     const tools = [...h.tools.get(session)!.values()] as unknown as ToolDefinition[]
     expect(tools.length, session).toBeGreaterThan(0)
     // The real registry, not a copy of its rule: `schemas()` detaches each tool's parameters and throws on one that is not lossless JSON.
@@ -119,6 +120,10 @@ it('registers every tool so that DSH\'s own tool registry projects its schema, w
     const schemas = registry.schemas()
     expect(schemas.map(({ name }) => name).sort(), session).toEqual(tools.map(({ name }) => name).sort())
     for (const { name, parameters } of schemas) expect(parameters, name).toEqual(tools.find(tool => tool.name === name)!.parameters)
+    // One read through the registry's execute: the arguments snapshot, the output schema, the lossless value check and the render.
+    const result = await registry.execute({ callId: 'call-1' as never, name: 'orchestrator_read', arguments: read, signal: new AbortController().signal })
+    expect(result, session).toMatchObject({ isError: false, value: await h.runTool(session, 'orchestrator_read', read) })
+    expect(result.content.length, session).toBeGreaterThan(0)
   }
 })
 
