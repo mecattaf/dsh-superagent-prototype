@@ -339,6 +339,9 @@ describe('scheduled Source', () => {
     let turns = 0, running = true
     const turn = () => { if (running) { turns += 1; setImmediate(turn) } }
     setImmediate(turn)
+    // The turns that had passed at each receive.
+    const marks: number[] = [], receive = h.receive.getMockImplementation()!
+    h.receive.mockImplementation(async trigger => { marks.push(turns); return receive(trigger) })
     const round = readInbox(h.ctx, h.inbox)
     // What the round has left in place by the time it first yields; checked after it ends, so a failure leaves no round running.
     const before = h.waiting()
@@ -346,7 +349,10 @@ describe('scheduled Source', () => {
     running = false
     // Nothing is read, quarantined or moved before the round first yields.
     expect(before).toHaveLength(21)
-    expect(turns).toBeGreaterThan(0)
+    // The loop turns at least once for each record read before the first receive, and again while each received file moves.
+    expect(marks).toHaveLength(20)
+    expect(marks[0]).toBeGreaterThanOrEqual(21)
+    for (let index = 1; index < marks.length; index++) expect(marks[index]).toBeGreaterThan(marks[index - 1]!)
     expect(h.done()).toHaveLength(20)
     expect(readdirSync(join(h.inbox, '.bad')).sort()).toEqual(['x-bad.json', 'x-bad.json.error'])
   })
