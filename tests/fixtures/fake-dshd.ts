@@ -6,7 +6,7 @@ import { DshdUnavailable, type DshdLastRun, type DshdPort, type DshdRead, type D
   type DshdWaitResult } from '../../src/executor/dshd-cli.ts'
 
 interface Instance { recipe: DshdRecipe; id: string; state: string; invocationId: string | null; lastRun: DshdLastRun; lines: string[] }
-type Verb = 'run' | 'get' | 'wait' | 'read' | 'stop'
+type Verb = 'run' | 'get' | 'wait' | 'read' | 'stop' | 'rm'
 /** The lines a headless `--json` run prints: its Session, then its answer, around dshd-run's own lines (as `READ_JSON_RUN` in dshd-0.1.0.ts). */
 export const runLines = (sessionId: string, final?: string): string[] => ['dshd-run: run started', JSON.stringify({ type: 'session', sessionId, cwd: '/' }),
   JSON.stringify({ type: 'text', text: 'Working.' }),
@@ -19,6 +19,8 @@ export class FakeDshd implements DshdPort {
   readonly runs: DshdRecipe[] = []
   /** Every name `stop` stopped. */
   readonly stops: string[] = []
+  /** Every name `rm` removed. */
+  readonly removals: string[] = []
   /** While set, the CLI's answer to `run` waits for it (or for the caller's abort), after the instance was created. */
   hold?: Promise<void>
   private invocations = 0
@@ -65,6 +67,16 @@ export class FakeDshd implements DshdPort {
     if (!instance) return 'not-found'
     if (instance.state === 'running') { this.stops.push(name); this.end(name, { ending: 'stopped', signal: 15 }) }
     return this.status(instance)
+  }
+  /** As `dshd rm`: refuses a running instance (`instance-running`, exit 4), else answers its status and deletes it. */
+  async rm(name: string): Promise<DshdStatus | 'not-found'> {
+    this.fail('rm')
+    const instance = this.instances.get(name)
+    if (!instance) return 'not-found'
+    if (instance.state === 'running') throw Object.assign(new Error(`${name} is running`), { kind: 'instance-running', exit: 4 })
+    const status = this.status(instance)
+    this.instances.delete(name); this.removals.push(name)
+    return status
   }
   /** The instance's run ends: exit 0 by default, with a Session and an answer in what it printed. */
   end(name: string, how: { exitCode?: number; signal?: number; ending?: string; lines?: string[] } = {}): void {
@@ -119,10 +131,11 @@ export class FakeDshd implements DshdPort {
         }
         // dshd's stop answers stopped, or already-stopped for a unit that was not running.
         const running = this.instances.get(name)?.state === 'running'
-        const result = verb === 'get' ? await this.get(name) : verb === 'wait' ? await this.wait(name) : verb === 'read' ? await this.read(name) : await this.stop(name)
+        const result = verb === 'get' ? await this.get(name) : verb === 'wait' ? await this.wait(name) : verb === 'read' ? await this.read(name)
+          : verb === 'rm' ? await this.rm(name) : await this.stop(name)
         if (this.answersNothing(verb)) return null
         if (result === 'not-found') { stderr = JSON.stringify({ error: { kind: 'not-found', message: `no instance ${name}`, hint: null } }); return 3 }
-        stdout = JSON.stringify(verb === 'read' ? { name, streams: ['stdout', 'stderr'], ...result }
+        stdout = JSON.stringify(verb === 'read' ? { name, streams: ['stdout', 'stderr'], ...result } : verb === 'rm' ? { outcome: 'removed', ...result }
           : verb === 'stop' ? { outcome: running ? 'stopped' : 'already-stopped', ...result } : result)
         return 0
       } catch (error) {

@@ -25,6 +25,8 @@ declare module '../app/effects.ts' {
     'dshd-watch': { ticketId: string; assignmentId: string }
     /** Stop the dshd unit of an Assignment the domain ended; the key is the Assignment ID. */
     'dshd-stop': { ticketId: string; assignmentId: string; reason: string }
+    /** Remove the dshd record of an ended unit whose Ticket ended (`dshd.removeEnded`); the key is the Assignment ID. */
+    'dshd-rm': { ticketId: string; assignmentId: string }
   }
 }
 
@@ -51,6 +53,8 @@ export interface DshdBinding {
   /** The worker's DSH Session, from the unit's `session` event once read. */
   sessionId?: string
   ended?: { at: string; verdict: Verdict; exitCode?: number; signal?: number; ending?: string | null }
+  /** Since when dshd holds no record of the unit, under `dshd.removeEnded`: `dshd rm` removed it, or dshd no longer knew it. */
+  removedAt?: string
 }
 /** The binding of each Assignment the dshd executor launched, by Assignment ID. */
 export const BINDING = KV.dshd.binding
@@ -187,7 +191,8 @@ export interface DshdExecutorHost {
  * Executes each Assignment as one dshd headless unit (`dshd@<name>.service`) in the Ticket's directory, under the profile of its
  * provider-harness pair. Launches go through the `launch` effect and `WorkerSlots`; a `dshd-watch` effect follows each unit until
  * it ends, and its end settles the Assignment: exit 0 reports ready, any other end failed, and a unit a reboot cut restarts as
- * upstream restarts interrupted work. A unit outlives this process, so a restart adopts the units that still run.
+ * upstream restarts interrupted work. A unit outlives this process, so a restart adopts the units that still run. With
+ * `dshd.removeEnded`, a `dshd-rm` effect removes the units of a Ticket that ended once their bindings record their Sessions.
  */
 export class DshdExecutor implements ExecutorPort {
   /** A unit starts from its own environment, so it needs no account unless the deployment names a repository. */
@@ -216,6 +221,7 @@ export class DshdExecutor implements ExecutorPort {
     host.effects.handle('dshd-watch', payload => this.watch(payload), { limit: () => LIMITS.maxWorkers.max, retry: [2000, 60_000] })
     // Fixed: a bound on `dshd stop` calls in flight at once, which are short, not a deployment tunable.
     host.effects.handle('dshd-stop', payload => this.stopQueued(payload), { limit: () => 4, retry: [2000, 60_000] })
+    host.effects.handle('dshd-rm', payload => this.removeQueued(payload), { limit: () => 4, retry: [2000, 60_000] })
   }
   /** The Ticket's execution attributes, with the directory its unit runs in (see `cwdOf`). */
   prepare(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Ticket {
@@ -518,6 +524,11 @@ export class DshdExecutor implements ExecutorPort {
       if (relay) this.host.sessions.relay(relay.id, JSON.stringify({ ...JSON.parse(relay.text) as object, unit: binding.name, session: sessionId ?? null }))
     })
   }
+  /** The `dshd-stop` effect: stops the unit, then, once the Ticket has ended, queues the removal of its units (see `removeLater`). */
+  private async stopQueued(payload: { ticketId: string; assignmentId: string; reason: string }): Promise<void> {
+    await this.stopUnit(payload)
+    this.removeLater(payload.ticketId)
+  }
   /**
    * Stops the unit of an Assignment the domain ended (see `stopUnit`), then sweeps the briefs of the Tickets that have ended: a
    * Ticket's end stops every Assignment it has not ended, so each Ticket that wrote a brief passes here once it ends.
@@ -556,6 +567,44 @@ export class DshdExecutor implements ExecutorPort {
       if (latest.state !== 'ended') this.host.store.set(BINDING(assignmentId), { ...latest, state: 'ended', ended: { at: now(), verdict } })
     })
     this.stopping.delete(assignmentId)
+  }
+  /**
+   * Under `dshd.removeEnded`, queues a `dshd-rm` for each ended unit of a Ticket that has ended. Every Ticket end stops its
+   * Assignments that had not ended, through `dshd-stop`, so this runs once a Ticket's last unit is recorded ended.
+   */
+  private removeLater(ticketId: string): void {
+    if (!this.host.machine.dshd.removeEnded) return
+    const ticket = this.host.store.tickets.get(ticketId)
+    if (!ticket || liveTicket(ticket)) return
+    for (const { id } of ticket.assignments) {
+      const binding = this.host.store.get(BINDING(id))
+      if (binding?.state === 'ended' && !binding.removedAt) this.host.effects.enqueue('dshd-rm', id, { ticketId, assignmentId: id })
+    }
+  }
+  /**
+   * Removes an ended unit's dshd record with `dshd rm` once its Ticket has ended and its binding records how it ended and its
+   * Session, reading the Session from the unit's journal first when the binding has none. Only a unit that holds the bound run,
+   * carries this orchestrator's labels and does not run is removed; one that names no Session is kept. DSH keeps the Session.
+   */
+  private async removeQueued({ ticketId, assignmentId }: { ticketId: string; assignmentId: string }): Promise<void> {
+    const { store, machine } = this.host
+    const ticket = store.tickets.get(ticketId)
+    const binding = store.get(BINDING(assignmentId))
+    if (!machine.dshd.removeEnded || !ticket || liveTicket(ticket) || binding?.state !== 'ended' || binding.removedAt) return
+    this.sameHost(binding)
+    const signal = this.host.lifetime
+    const status = await this.dshd.get(binding.name, signal)
+    if (status !== 'not-found') {
+      const ours = status.labels[LABEL.orchestrator] === this.host.masterId && status.labels[LABEL.assignment] === assignmentId
+        && (!binding.invocationId || invocationOf(status) === binding.invocationId)
+      const verdict = verdictOf(status)
+      if (!ours || verdict === 'running' || verdict === 'unknown') return
+      const sessionId = binding.sessionId ?? (await this.printed(binding.name, binding.invocationId, signal)).sessionId
+      if (sessionId === undefined) return
+      if (!binding.sessionId) store.atomic(() => { store.set(BINDING(assignmentId), { ...store.get(BINDING(assignmentId)) ?? binding, sessionId }) })
+      await this.dshd.rm(binding.name, signal)
+    }
+    store.atomic(() => { store.set(BINDING(assignmentId), { ...store.get(BINDING(assignmentId)) ?? binding, removedAt: now() }) })
   }
   /** A binding is observed only on the host that launched its unit: dshd units are local to one user manager. */
   private sameHost(binding: DshdBinding): void {

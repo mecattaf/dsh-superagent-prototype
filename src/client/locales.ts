@@ -46,6 +46,7 @@ const TEXT = {
   'health.worker': ['执行器事件处理', 'Executor event handling'],
   'health.dshd-watch': ['dshd 单元的结束观察', 'Watching dshd units until they end'],
   'health.dshd-stop': ['dshd 单元的停止', 'Stopping dshd units'],
+  'health.dshd-rm': ['已结束 dshd 单元的移除', 'Removing ended dshd units'],
   'health.evals': ['未完成的评估', 'Unavailable Evals'],
   none: ['暂无。', 'None.'],
   openSession: ['打开 Session', 'Open Session'],
