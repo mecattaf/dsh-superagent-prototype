@@ -620,13 +620,14 @@ describe('scheduled plugin entry', () => {
     expect(off.receive).not.toHaveBeenCalled()
   })
 
-  it('reports an error and reads nothing when another process holds the inbox lock', async () => {
+  it('reports an error and reads nothing when another process holds the inbox lock past the entry\'s lockWaitMs', async () => {
     const h = host({ registered: false })
+    h.deployment.lockWaitMs = 500
     drop(h.inbox, 'a.json', record(h.work))
     const release = lockSync(h.inbox, { stale: 30_000 })
     try {
       const stop = mount(h)
-      await vi.waitFor(() => { expect(h.board.all.scheduled).toMatchObject({ state: 'error', detail: expect.stringContaining('already being held') }) })
+      await vi.waitFor(() => { expect(h.board.all.scheduled).toMatchObject({ state: 'error', detail: expect.stringContaining('already being held') }) }, { timeout: 4_000 })
       await stop()
     } finally { release() }
     expect(h.waiting()).toEqual(['a.json'])
@@ -672,6 +673,20 @@ describe('scheduled plugin entry', () => {
     expect(foreign.waiting()).toEqual(['a.json'])
     expect(open.receive).not.toHaveBeenCalled()
     expect(foreign.receive).not.toHaveBeenCalled()
+  })
+
+  it('takes over the inbox lock a hard-killed process left once it goes stale, and reads the inbox', async () => {
+    const h = host({ registered: false })
+    drop(h.inbox, 'a.json', record(h.work))
+    // The killed process last refreshed its lock shortly before it died; the lock goes stale 30 s after that.
+    mkdirSync(`${h.inbox}.lock`)
+    const refreshed = new Date(Date.now() - 29_000)
+    utimesSync(`${h.inbox}.lock`, refreshed, refreshed)
+    const stop = mount(h)
+    await vi.waitFor(() => { expect(h.board.all.scheduled).toMatchObject({ state: 'ready', detail: expect.stringMatching(/^Read 1;/) }) }, { timeout: 4_000 })
+    expect(h.done()).toEqual(['a.json'])
+    await stop()
+    expect(existsSync(`${h.inbox}.lock`)).toBe(false)
   })
 
   it('reports a round that fails as an error at once, and ready again after the next round succeeds', async () => {

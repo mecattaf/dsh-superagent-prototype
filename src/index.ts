@@ -3,6 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-settings'
 import { Runtime } from './app/runtime.ts'
 import { Config, machineOf, type DeploymentConfig } from './deployment.ts'
+import { lockReleased } from './infra/lock.ts'
 
 export const name = 'dsh-superagent'
 export const inject = ['agents', 'sessionController', 'sessionPersistence', 'workspaceRegistry', 'permissionPresets', 'tools', 'systemPrompt', 'skills', 'webServer', 'llm', 'subprocess']
@@ -22,6 +23,11 @@ export async function apply(ctx: Context, config: DeploymentConfig): Promise<voi
   const restart = (): void => {
     ctx.fiber.restart().then(() => { ctx.get('settings')?.describe() }).catch((error: unknown) => { ctx.logger.error('dsh-superagent restart failed: %s', String(error)) })
   }
+  // A process killed before its shutdown leaves the state directory lock until it goes stale; wait for that within `lockWaitMs`.
+  const waiting = new AbortController()
+  ctx.effect(() => () => { waiting.abort() }, 'state directory lock wait')
+  await lockReleased(machine.stateDir, machine.lockWaitMs, waiting.signal)
+  if (waiting.signal.aborted) return
   const runtime = new Runtime(ctx, machine, restart)
   ctx.effect(() => async () => { await runtime.stop() })
   await runtime.ready

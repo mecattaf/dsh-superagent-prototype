@@ -17,6 +17,7 @@ import { Engine, key, reasonText, type EngineForSettings, type ReceiveResult, ty
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
+import { LOCK_STALE_MS } from '../infra/lock.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
@@ -92,7 +93,7 @@ export class Runtime extends Service implements SourceHost {
     // Lock the state directory before opening the database so another process cannot migrate or write concurrently.
     mkdirSync(machine.stateDir, { recursive: true, mode: 0o700 })
     const compromised = (error: Error) => { this.runtimeHealth.set({ state: 'error', detail: error.message }); this.stopped.abort() }
-    const release = lockSync(machine.stateDir, { stale: 30_000, onCompromised: compromised })
+    const release = lockSync(machine.stateDir, { stale: LOCK_STALE_MS, onCompromised: compromised })
     this.releaseLock = async () => { release() }
     let opened: Store | undefined
     try {

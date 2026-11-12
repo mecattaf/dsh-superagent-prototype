@@ -28,7 +28,7 @@ flowchart TB
 
 ### Runtime
 
-`Runtime` is the composition root; it contains no domain rules. Its constructor locks the state directory, opens the Store and builds each component. If construction fails, it closes the Store and releases the lock.
+`Runtime` is the composition root; it contains no domain rules. Its constructor locks the state directory, opens the Store and builds each component. The entry first waits, within `lockWaitMs`, for a lock that a process killed before its shutdown left to go stale. If construction fails, it closes the Store and releases the lock.
 
 Startup registers management routes and runs Setup. After setup resolves, it installs Session and Executor hooks, ensures the main Session exists, starts Policy syncs, resumes interrupted Assignments, and starts passes and effects. `ready` marks completion of startup.
 
@@ -387,6 +387,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/infra/paths.ts` | The package's root, where packaged files are |
 | `src/infra/text.ts` | Word counts and the chat message limit, `fill` and `sameName` |
 | `src/infra/health.ts` | The `HealthBoard`, every part's health entry, each claimed by its one writer |
+| `src/infra/lock.ts` | The staleness of the state directory and inbox locks, and `lockReleased`, the bounded wait for a lock a process killed before its shutdown left |
 | `src/sources/kind.ts` | The `SourceKind` protocol, with `tools`, the fork's one addition to it |
 | `src/sources/registry.ts` | `SourceRegistry` |
 | `src/sources/host.ts` | `SourceHost`, `SourceContext`, `Health`, `health` and the fixed health texts |

@@ -7,6 +7,7 @@ import { lockSync } from 'proper-lockfile'
 import { z } from 'zod'
 import { key, threadKey, type ThreadRef, type Trigger } from '../core/index.ts'
 import type { Deployment } from '../deployment.ts'
+import { LOCK_STALE_MS, lockReleased } from '../infra/lock.ts'
 import { health, sourceContext, type SourceContext } from './host.ts'
 import type { SourceKind } from './kind.ts'
 import { pause } from './poll.ts'
@@ -285,13 +286,17 @@ function lockInbox(inbox: string, compromised: (error: Error) => void): () => vo
   if ((uid !== undefined && stat.uid !== uid) || stat.mode & 0o022) {
     throw new Error(`The inbox ${inbox} must be owned by this user and not writable by group or others (mode ${(stat.mode & 0o777).toString(8)}, uid ${stat.uid})`)
   }
-  return lockSync(inbox, { stale: 30_000, onCompromised: compromised })
+  return lockSync(inbox, { stale: LOCK_STALE_MS, onCompromised: compromised })
 }
 async function watch(ctx: SourceContext, config: ScheduledConfig, signal: AbortSignal): Promise<void> {
   await ctx.ready
   // Setup restarts dsh-superagent once it resolves the deployment; until then the Source reads nothing.
   if (!ctx.configured()) { ctx.report(SOURCE, health('paused', 'setupPending')); return }
   const inbox = inboxOf(config, ctx.deployment)
+  // A process killed before its shutdown leaves the inbox lock until it goes stale, possibly later than the state directory's: wait for
+  // that within the entry's `lockWaitMs`.
+  await lockReleased(inbox, ctx.deployment.lockWaitMs, signal)
+  if (signal.aborted) return
   // A lock that another process took over means two readers: report it and stop reading, as the Runtime does for its state directory.
   const lost = new AbortController()
   const release = lockInbox(inbox, error => { ctx.report(SOURCE, { state: 'error', detail: `The inbox lock was lost: ${error.message}` }); lost.abort() })
