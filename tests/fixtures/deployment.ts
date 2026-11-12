@@ -14,7 +14,7 @@ export const testDshd = (overrides: Partial<DshdConfig> = {}): DshdConfig => ({
   args: ['--approval-policy', 'never'], watchSeconds: 30, briefArgvMaxChars: 64000, ...overrides,
 })
 export const testMachine = (overrides: Partial<Machine> = {}): Machine => ({
-  stateDir: '/tmp/dsh-superagent-test', promptMaxChars: reference(100000), admissionContextMaxPages: reference(10),
+  stateDir: '/tmp/dsh-superagent-test', lockWaitMs: 35000, promptMaxChars: reference(100000), admissionContextMaxPages: reference(10),
   admissionContextTimeoutMs: reference(15000), engine: true, executor: 'dsh', dshd: testDshd(), ...overrides,
 })
 export const testDeployment = (overrides: Partial<Deployment> = {}): Deployment => ({

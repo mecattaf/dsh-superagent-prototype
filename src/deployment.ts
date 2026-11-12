@@ -22,11 +22,13 @@ const DshdPairSchema = z.object({
   maxWorkers: z.number().int().min(1).max(LIMITS.maxWorkers.max).optional(),
 }).strict()
 const DshdMapsSchema = z.object({ pairs: z.record(z.string(), DshdPairSchema), env: z.record(z.string(), z.string()) })
-/** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir`, `engine`, `executor` or `dshd` remounts the plugin. */
+/** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir`, `engine`, `lockWaitMs`, `executor` or `dshd` remounts the plugin. */
 export const Config = s.object({
   stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
   engine: s.boolean().default(true)
     .description('Whether this process runs dsh-superagent. Off, the entry loads but takes no lock, opens no database, changes no process environment, registers no route or tool and starts no Session, so a process that loads the bundle only for its agent presets stays inert.'),
+  lockWaitMs: s.number().min(0).max(300_000).step(1).default(35_000)
+    .description('How long a start waits for the state directory lock while another process holds it, in milliseconds. The lock of a process that died goes stale within 30 s and is taken over; a live holder is refused once the time is up. 0: refuse at once.'),
   promptMaxChars: s.number().min(LIMITS.promptMaxChars.min).max(LIMITS.promptMaxChars.max).step(1).default(100000)
     .description('Largest saved prompt configuration, in characters.').volatile(),
   admissionContextMaxPages: s.number().min(LIMITS.admissionContextMaxPages.min).max(LIMITS.admissionContextMaxPages.max).step(1).default(10)
@@ -68,6 +70,7 @@ export interface DshdConfig {
 }
 export interface Machine {
   stateDir: string
+  lockWaitMs: number
   promptMaxChars: Volatile<number>
   admissionContextMaxPages: Volatile<number>
   admissionContextTimeoutMs: Volatile<number>
@@ -85,11 +88,11 @@ const MOVED: Record<string, string> = {
 export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
-  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, engine, executor, dshd } = config
+  const { stateDir, lockWaitMs, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, engine, executor, dshd } = config
   const wrong = (what: string): never => { throw new Error(`dsh-superagent dshd configuration: ${what}; docs/006-deployment.md lists the keys`) }
   const maps = DshdMapsSchema.safeParse({ pairs: dshd.pairs, env: dshd.env })
   if (!maps.success) wrong(maps.error.issues.map(issue => `${['dshd', ...issue.path].join('.')}: ${issue.message}`).join('; '))
-  const machine: Machine = { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, engine, executor, dshd: { ...dshd, ...maps.data! } }
+  const machine: Machine = { stateDir, lockWaitMs, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, engine, executor, dshd: { ...dshd, ...maps.data! } }
   if (executor === 'dshd') {
     if (!Object.hasOwn(dshd.pairs, dshd.defaultPair)) wrong(`the default pair ${JSON.stringify(dshd.defaultPair)} is not among the pairs (${Object.keys(dshd.pairs).join(', ') || 'none'})`)
     if (dshd.cwd && !isAbsolute(dshd.cwd)) wrong(`cwd ${dshd.cwd} is not an absolute path`)
