@@ -88,13 +88,17 @@ function header(record: OccurrenceRecord, due: string, missed: number): string {
   const earlier = missed === 0 ? 'no earlier due occurrence was missed' : `${missed} earlier due occurrence(s) did not run`
   return `[Scheduled occurrence] ${title}\nDue ${due}; ${earlier}. ${facts}`
 }
-/** Builds the Trigger of one record; equal records give equal Trigger ids. */
+/** What tells one occurrence of an item from another: the run id of a manual run, or the due instant of a schedule record. */
+const instance = (record: OccurrenceRecord): string => record.kind === 'manual' ? `run:${record.run!}` : new Date(record.due).toISOString()
+/** The id a release before the namespace was part of it gave an occurrence; Triggers stored under it keep it. */
+const unscopedId = (record: OccurrenceRecord): string => key(SOURCE, record.cwd, record.item, instance(record))
+/** Builds the Trigger of one record; equal records give equal Trigger ids, and two namespaces never share one. */
 export function scheduledTrigger(record: OccurrenceRecord, occurrence: string, extra: { missed: number; superseded?: true }): Trigger {
   const due = new Date(record.due).toISOString()
   const meta: ScheduledMeta = { occurrence, namespace: record.namespace, item: record.item, cwd: record.cwd, kind: record.kind, due,
     missed: extra.missed, revision: record.revision, ...record.pair ? { pair: record.pair } : {}, ...extra.superseded ? { superseded: true as const } : {} }
   return {
-    id: key(SOURCE, record.cwd, record.item, record.kind === 'manual' ? `run:${record.run!}` : due),
+    id: key(SOURCE, record.namespace, record.cwd, record.item, instance(record)),
     source: SOURCE,
     threads: [occurrenceThread(occurrence)],
     // An occurrence has no sender: an empty actor id uses the admission cell of an unlisted sender who does not address the agent.
@@ -154,7 +158,7 @@ function readRecord(file: string, tally: InboxTally): OccurrenceRecord | string 
  * `read` counts the live and manual records received, `superseded` the older ones. A throw from `receive` ends the round
  * and leaves its record, and the ones after it, for the next.
  */
-export async function readInbox(ctx: Pick<SourceContext, 'receive' | 'threads'>, inbox: string, signal?: AbortSignal): Promise<InboxTally> {
+export async function readInbox(ctx: Pick<SourceContext, 'receive' | 'threads' | 'triggers'>, inbox: string, signal?: AbortSignal): Promise<InboxTally> {
   const done = join(inbox, '.done'), bad = join(inbox, '.bad')
   mkdirSync(done, { recursive: true, mode: 0o700 })
   mkdirSync(bad, { recursive: true, mode: 0o700 })
@@ -169,7 +173,7 @@ export async function readInbox(ctx: Pick<SourceContext, 'receive' | 'threads'>,
   }
   // Within one item, only the latest due runs; a record with that same due is the same occurrence and answers duplicate.
   const latest = new Map<string, number>()
-  const itemOf = (record: OccurrenceRecord) => JSON.stringify([record.cwd, record.item])
+  const itemOf = (record: OccurrenceRecord) => JSON.stringify([record.namespace, record.cwd, record.item])
   for (const { record } of entries) {
     if (record.kind === 'schedule') latest.set(itemOf(record), Math.max(latest.get(itemOf(record)) ?? -Infinity, Date.parse(record.due)))
   }
@@ -177,11 +181,17 @@ export async function readInbox(ctx: Pick<SourceContext, 'receive' | 'threads'>,
   const superseded = entries.filter(entry => older(entry.record)), live = entries.filter(entry => !older(entry.record))
   const missed = new Map<string, number>()
   for (const { record } of superseded) missed.set(itemOf(record), (missed.get(itemOf(record)) ?? 0) + 1 + record.missed)
+  // An occurrence a release before the namespace was in the id stored keeps its stored id, so its record answers duplicate.
+  // The namespace in the stored meta tells it from another namespace's occurrence that had the same id.
+  const kept = (trigger: Trigger, record: OccurrenceRecord): Trigger => {
+    const stored = ctx.triggers.get(unscopedId(record))
+    return stored?.source === SOURCE && stored.meta.namespace === record.namespace ? { ...trigger, id: stored.id } : trigger
+  }
   const received = [
     ...superseded.map(entry => ({ entry, trigger: scheduledTrigger(entry.record, entry.name.slice(0, -5), { missed: entry.record.missed, superseded: true }) })),
     ...live.map(entry => ({ entry, trigger: scheduledTrigger(entry.record, entry.name.slice(0, -5),
       { missed: entry.record.missed + (entry.record.kind === 'schedule' ? missed.get(itemOf(entry.record)) ?? 0 : 0) }) })),
-  ]
+  ].map(({ entry, trigger }) => ({ entry, trigger: kept(trigger, entry.record) }))
   for (const { entry, trigger } of received) {
     if (signal?.aborted) break
     // The file moves only after the Trigger is committed, so a crash between the two re-reads it and answers duplicate.
