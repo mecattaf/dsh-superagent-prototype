@@ -75,6 +75,18 @@ describe('DshdCli', () => {
     expect(eventsOf(read as never)).toEqual({ sessionId: 'session-1', final: 'Done.' })
     expect(eventsOf({ lines: ['dshd-run: run started'] })).toEqual({})
   })
+  it('asks read for its newest -n lines only when given a count, and takes the session id from the final event once no session event is left', async () => {
+    const lines = ['{"type":"text","text":"Still working."}', '{"type":"final","sessionId":"session-1","reason":{"kind":"completed"},"text":"Done."}',
+      'dshd-run: run ended: success']
+    const subprocess = answering(JSON.stringify({ name: 'sa-fix-a1', invocationId: 'invocation-1', complete: false, streams: ['stdout', 'stderr'], lines }))
+    const read = await cli(subprocess).read('sa-fix-a1', signal)
+    await cli(subprocess).read('sa-fix-a1', signal, 65536)
+    expect(subprocess.spawn.mock.calls.map(([spec]) => spec.argv)).toEqual([['dshd', 'read', '--json', 'sa-fix-a1'], ['dshd', 'read', '--json', '-n', '65536', 'sa-fix-a1']])
+    expect(eventsOf(read as never)).toEqual({ sessionId: 'session-1', final: 'Done.' })
+    // The session event still names the Session while it is in the lines; a final event without one, as before dsh 0.2.2, names none.
+    expect(eventsOf({ lines: ['{"type":"session","sessionId":"session-0"}', lines[1]!] })).toEqual({ sessionId: 'session-0', final: 'Done.' })
+    expect(eventsOf({ lines: ['{"type":"final","text":"Done."}'] })).toEqual({ final: 'Done.' })
+  })
   it('reads a stop as the status it leaves, and refuses output it cannot read', async () => {
     expect(await cli(answering(JSON.stringify({ outcome: 'stopped', warnings: [], ...status({ state: 'stopped' }) }))).stop('sa-fix-a1', signal))
       .toMatchObject({ state: 'stopped' })
