@@ -1,7 +1,7 @@
 /** Scheduled source kind and Cordis plugin entry: one Trigger per occurrence record a scheduler drops into an inbox directory. */
 import type { Context } from '@deepseek-ai/cordis'
 import s from '@deepseek-ai/schemastery'
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
 import { z } from 'zod'
@@ -44,11 +44,15 @@ export const OccurrenceRecordSchema = z.object({
   { message: 'run is required for kind manual and absent for kind schedule', path: ['run'] })
 export type OccurrenceRecord = z.infer<typeof OccurrenceRecordSchema>
 
-/** Plugin configuration of the dsh-superagent-scheduled entry; changing `inbox` remounts the plugin. */
+/** Plugin configuration of the dsh-superagent-scheduled entry; changing any key remounts the plugin. */
 export const Config = s.object({
   // Empty passes the pattern too: Schemastery checks the default against it.
   inbox: s.string().pattern(/^(\/|$)/).default('')
     .description('Directory scheduled occurrence records (*.json) are dropped into. Absolute path; empty for <stateDir>/inbox/scheduled. Read records move to .done/ beside them, invalid ones to .bad/.'),
+  doneMaxAgeDays: s.number().min(0).step(1).default(0)
+    .description('Days a read record stays in .done/, counted from its modification time; 0 keeps it however old. Only *.json files directly in .done/ are removed.'),
+  doneMaxCount: s.number().min(0).step(1).default(0)
+    .description('Most read records kept in .done/, the newest by modification time; 0 keeps every one.'),
 })
 export type ScheduledConfig = ReturnType<typeof Config>
 /** The inbox of this plugin: its configured path, else `<stateDir>/inbox/scheduled` of the deployment. */
@@ -202,6 +206,45 @@ export async function readInbox(ctx: Pick<SourceContext, 'receive' | 'threads'>,
   return tally
 }
 
+const DAY_MS = 86_400_000
+/**
+ * Removes read records from `<inbox>/.done` beyond the configured retention, and returns how many it removed; with both bounds
+ * 0 it lists nothing. Only regular `*.json` files directly in `.done` count, which is what a round moves there: `.bad`, the
+ * waiting records, dot-files, other names, folders and links are never removed, and a link is never followed. A record's age
+ * is its modification time, which its producer set when it wrote it; past `doneMaxCount`, the oldest go first.
+ */
+export function pruneDone(inbox: string, retention: Pick<ScheduledConfig, 'doneMaxAgeDays' | 'doneMaxCount'>, now = Date.now()): number {
+  const { doneMaxAgeDays, doneMaxCount } = retention
+  if (!doneMaxAgeDays && !doneMaxCount) return 0
+  const done = join(inbox, '.done')
+  const records: { file: string; name: string; modified: number }[] = []
+  for (const entry of readdirSync(done, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith('.json') || entry.name.startsWith('.')) continue
+    const file = join(done, entry.name)
+    let modified: number
+    try { modified = lstatSync(file).mtimeMs } catch (error) {
+      // Removed by someone else since the listing: nothing left to remove.
+      if (code(error) === 'ENOENT') continue
+      throw error
+    }
+    records.push({ file, name: entry.name, modified })
+  }
+  // Newest first; equal times by name, so the same directory always keeps the same records.
+  records.sort((a, b) => b.modified - a.modified || (a.name < b.name ? 1 : -1))
+  let removed = 0
+  for (const [index, { file, modified }] of records.entries()) {
+    const expired = doneMaxAgeDays > 0 && now - modified > doneMaxAgeDays * DAY_MS
+    if (!expired && !(doneMaxCount > 0 && index >= doneMaxCount)) continue
+    try { unlinkSync(file) } catch (error) {
+      // Removed by someone else since the listing; it no longer counts.
+      if (code(error) !== 'ENOENT') throw error
+      continue
+    }
+    removed += 1
+  }
+  return removed
+}
+
 /** The ready health of the Source: what it read since it started, and what it could not read in its last round. */
 function readyDetail(total: Omit<InboxTally, 'unreadable'>, unreadable: number): string {
   return `Read ${total.read}; superseded ${total.superseded}; invalid ${total.invalid}${total.lastInvalid ? `, last: ${total.lastInvalid}` : ''}`
@@ -231,6 +274,8 @@ async function watch(ctx: SourceContext, config: ScheduledConfig, signal: AbortS
         const at = new Date().toISOString()
         try {
           const round = await readInbox(ctx, inbox, stop)
+          // Retention runs after the round, and only while this process still holds the inbox.
+          if (!stop.aborted) pruneDone(inbox, config)
           failures = 0
           total.read += round.read; total.superseded += round.superseded; total.invalid += round.invalid
           if (round.lastInvalid) total.lastInvalid = round.lastInvalid
