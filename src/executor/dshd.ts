@@ -64,6 +64,11 @@ const UNCERTAIN = new Set(['masked', 'orphaned', 'inconsistent', 'unknown'])
 const UNAVAILABLE_TRIES = 3
 /** Longest worker answer the summary of a unit that did not complete carries; a completed unit's answer is its whole result. */
 const FINAL_CHARS = 3800
+/**
+ * Lines of the longer `dshd read` for a run whose newest 200 lines name no Session: a whole run at 256 bytes a line fills
+ * `DshdCli`'s 16 MiB read cap. journalctl takes no more than a signed int.
+ */
+const READ_RUN_LINES = 1 << 16
 const RETRIED = 'A person retried this ticket. Continue the assignment from the current directory and what it holds now.'
 const DSHD_WORKER_NOTE = 'You are one headless task that dsh-superagent started. Work in the current directory. Nothing reaches you after this '
   + 'message and there is no report tool: when the work is done, end with a short final answer. Your session log is the record. '
@@ -117,13 +122,18 @@ const SessionEvent = (line: string): Record<string, unknown> | undefined => {
   try { const value: unknown = JSON.parse(line); return value && typeof value === 'object' ? value as Record<string, unknown> : undefined }
   catch { return undefined /* A line dshd-run or dsh wrote that is not a headless event. */ }
 }
-/** The Session ID of the first `session` event and the text of the last `final` event a headless `--json` run printed. */
+/**
+ * The Session ID and the text of the last `final` event a headless `--json` run printed. The Session is the first `session`
+ * event's or, when the lines no longer reach back to it, the one dsh 0.2.2 repeats on `final`.
+ */
 export function eventsOf(read: Pick<DshdRead, 'lines'>): { sessionId?: string; final?: string } {
-  let sessionId: string | undefined, final: string | undefined
+  let sessionId: string | undefined, finalSessionId: string | undefined, final: string | undefined
   for (const event of read.lines.map(SessionEvent)) {
     if (event?.type === 'session' && sessionId === undefined && typeof event.sessionId === 'string') sessionId = event.sessionId
     if (event?.type === 'final' && typeof event.text === 'string') final = event.text
+    if (event?.type === 'final' && typeof event.sessionId === 'string') finalSessionId = event.sessionId
   }
+  sessionId ??= finalSessionId
   return { ...(sessionId !== undefined ? { sessionId } : {}), ...(final !== undefined ? { final } : {}) }
 }
 /**
@@ -385,10 +395,28 @@ export class DshdExecutor implements ExecutorPort {
     const verdict = verdictOf(status)
     if (verdict === 'running') throw new Later(`Unit ${name} still runs`)
     if (verdict === 'unknown') throw new Error(`Unit ${name} is ${status.state}: dsh-superagent keeps its Assignment until dshd can tell how it ended`)
-    const read = await this.dshd.read(name, signal)
-    const events = read !== 'not-found' && read.invocationId === binding.invocationId ? eventsOf(read) : {}
+    const events = await this.printed(name, binding.invocationId, signal)
     const child = status.lastRun?.child ?? {}
     this.settle(ticketId, assignmentId, verdict, { ...child, ending: status.lastRun?.ending ?? null }, events)
+  }
+  /**
+   * What the bound run printed, from `dshd read`: its answer from the newest lines, and its Session from them or, when they do
+   * not reach back to the run's start and name none, from a longer read. A longer read dshd does not answer readably, such as
+   * one past the read cap, leaves the Session unknown; the end settles either way.
+   */
+  private async printed(name: string, invocationId: string | undefined, signal: AbortSignal): Promise<{ sessionId?: string; final?: string }> {
+    const read = await this.dshd.read(name, signal)
+    if (read === 'not-found' || read.invocationId !== invocationId) return {}
+    const events = eventsOf(read)
+    if (events.sessionId !== undefined || read.complete) return events
+    try {
+      const longer = await this.dshd.read(name, signal, READ_RUN_LINES)
+      const sessionId = longer !== 'not-found' && longer.invocationId === invocationId ? eventsOf(longer).sessionId : undefined
+      return sessionId === undefined ? events : { ...events, sessionId }
+    } catch (error) {
+      if (signal.aborted) throw error
+      return events
+    }
   }
   /**
    * Records how the unit ended on its binding and, while its Assignment is the one running the live Ticket, tells the Engine in
