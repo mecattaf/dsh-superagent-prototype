@@ -44,6 +44,8 @@ The main Session assesses node candidates as it assesses any inferred candidate.
 | Other work first | Accept the other work now and hold the node |
 | No answer | An Eval that expires twice more is recorded unavailable; the node waits as a held one does, until it is requeued |
 
+So every node costs one Eval of the main Session, and a run moves only as fast as that Session assesses: while it cannot answer, each new node waits as a held one does, and so does its run. This keeps admission as upstream defines it, where a senderless Trigger can only be an inferred candidate or ignored (`src/admission.ts`). Letting a node launch without an Eval, with the main Session reordering only by hold and release, would need a new admission value in that table.
+
 ## Results, failures and resume
 
 - A node's result is the summary of its Ticket's `ready` report, verbatim, once the Ticket ended completed; a node with a schema parses it as one JSON value, inside one code fence at most.
