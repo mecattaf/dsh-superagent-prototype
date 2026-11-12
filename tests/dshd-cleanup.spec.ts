@@ -91,20 +91,25 @@ describe('dshd.removeEnded', () => {
     expect(binding(ticket)).toMatchObject({ state: 'ended', sessionId: 'session-s', ended: { verdict: 'stopped' }, removedAt: expect.any(String) })
     expect(fake.removals).toEqual([name])
   })
-  it('never removes a unit that runs another invocation, carries another orchestrator\'s labels, or names no Session', async () => {
+  it('never removes a unit that runs or ran another invocation, carries another orchestrator\'s labels, dshd cannot tell about, or names no Session', async () => {
     await start({ removeEnded: true })
-    const rerun = await h!.acceptedTicket(request('1'))
-    const foreign = await h!.acceptedTicket(request('5'))
-    const silent = await h!.acceptedTicket(request('9'))
-    for (const { ticket } of [rerun, foreign, silent]) fake.end(nameOf(ticket), { exitCode: 1, lines: ticket === silent.ticket ? [] : runLines(`session-${ticket.id}`) })
+    const running = await h!.acceptedTicket(request('1'))
+    const rerun = await h!.acceptedTicket(request('5'))
+    const foreign = await h!.acceptedTicket(request('9'))
+    const uncertain = await h!.acceptedTicket(request('13'))
+    const silent = await h!.acceptedTicket(request('17'))
+    const all = [running, rerun, foreign, uncertain, silent]
+    for (const { ticket } of all) fake.end(nameOf(ticket), { exitCode: 1, lines: ticket === silent.ticket ? [] : runLines(`session-${ticket.id}`) })
     await later()
-    // Someone ran the first unit again, and another orchestrator took over the second's name.
-    fake.rerun(nameOf(rerun.ticket))
-    const labels = fake.instances.get(nameOf(foreign.ticket))!.recipe.labels
-    labels['superagent.orchestrator'] = 'another-orchestrator'
-    for (const { ticket } of [rerun, foreign, silent]) h!.runtime.engine.stopTicket(ticket.id)
+    // Someone ran the first unit again, and the second again to its end; another orchestrator took over the third's name; dshd
+    // can no longer tell about the fourth.
+    fake.rerun(nameOf(running.ticket))
+    fake.rerun(nameOf(rerun.ticket)); fake.end(nameOf(rerun.ticket), { lines: runLines('session-other', 'Another answer.') })
+    fake.instances.get(nameOf(foreign.ticket))!.recipe.labels['superagent.orchestrator'] = 'another-orchestrator'
+    fake.instances.get(nameOf(uncertain.ticket))!.state = 'orphaned'
+    for (const { ticket } of all) h!.runtime.engine.stopTicket(ticket.id)
     await later(); await later()
-    for (const { ticket } of [rerun, foreign, silent]) {
+    for (const { ticket } of all) {
       expect(stored(ticket).ended).toBeDefined()
       expect(fake.instances.has(nameOf(ticket))).toBe(true)
       expect(binding(ticket)).not.toHaveProperty('removedAt')
