@@ -4,7 +4,7 @@ This document describes the workflow Source: how a workflow script's `agent()` c
 
 ## What it is
 
-The workflow Source is the plugin `dsh-superagent-workflow`, inserted disabled by the bundle. It runs workflow scripts with the interpreter in `src/workflow`, a vendored copy of Substrate's. A script's `agent()` call is a node. Each attempt of a node is one Trigger of the `workflow` Source on the node's own Thread; the node's result is the result of the Ticket accepted from it.
+The workflow Source is the plugin `dsh-superagent-workflow`, inserted disabled by the bundle; enable it in the profile with `disabled: false` on that row. It runs workflow scripts with the interpreter in `src/workflow`, a vendored copy of Substrate's. A script's `agent()` call is a node. Each attempt of a node is one Trigger of the `workflow` Source on the node's own Thread; the node's result is the result of the Ticket accepted from it.
 
 | Concept | Definition | Rules it keeps |
 | --- | --- | --- |

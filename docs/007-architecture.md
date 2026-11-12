@@ -263,6 +263,8 @@ Each model request binds the Session to the current prompt revision. The revisio
 
 `status` and `promptVersion` serve prompt pages. Saves go through `Prompts.save` and notify the main Session. `modelRetry` exposes model-budget retry state. `addMainTools` gives the main Session the tools of a registered Source kind, as described under Sources.
 
+This fork registers every main and worker Session tool's parameters through `toolParameters`, a JSON round trip of `z.toJSONSchema(schema)`, where upstream passes `z.toJSONSchema(schema)` itself. zod 4.4 adds a non-enumerable `~standard` property to that result, and DSH's tool registry refuses parameters that are not lossless JSON when `schemas()` projects them, so a provider adapter that lists the tools through it, such as a Claude Code bridge, fails every turn of the Session. Keep the round trip on a rebase until upstream's registration produces plain JSON.
+
 ### Glue
 
 | Glue | Translates |
