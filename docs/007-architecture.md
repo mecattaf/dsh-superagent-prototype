@@ -255,7 +255,7 @@ Each model request binds the Session to the current prompt revision. The revisio
 ## Dependency rules
 
 - **Explicit, narrow dependencies.** Each class receives an interface that names what it uses, mostly as `Pick` types of other classes: `ExecutorHost`, `AssessorHost`, `SessionsHost`, `SettingsHost`, `SetupHost`, `PassesHost` and `OutboxHost` for the core classes, and `HttpHost`, `MainToolsHost`, `ExecutorToolsHost`, `ResourceHost`, `LinkHost` and `SourceContextDeps` for the glue, with the Engine as the `Pick` of the role that calls it. The Runtime passes itself only behind such an interface. A Source plugin injects the `orchestrator` service, which its type names as a `SourceHost`: the registry and `context(kind)`; its kind's code sees only its `SourceContext`.
-- **What may import what.** `src/core` imports nothing outside itself apart from Node's hashing, and does no I/O. `src/sources` imports nothing from `src/app`. The panel imports only types from the host side, and the plain values of `src/admission.ts`, `src/limits.ts`, `src/setup.ts`, `src/navigation.ts`, `src/sources/host.ts`, `src/core/errors.ts`, `src/core/reasons.ts` and the filter lists of `src/app/api.ts`.
+- **What may import what.** `src/core` imports nothing outside itself apart from Node's hashing, and does no I/O. `src/sources` imports nothing from `src/app`. `src/workflow` imports nothing outside itself apart from Node, `effect` and `ajv`, and nothing imports it yet. The panel imports only types from the host side, and the plain values of `src/admission.ts`, `src/limits.ts`, `src/setup.ts`, `src/navigation.ts`, `src/sources/host.ts`, `src/core/errors.ts`, `src/core/reasons.ts` and the filter lists of `src/app/api.ts`.
 - **One writer per state.** Each kind of state has one writer, and the others read it or ask that writer.
 
   | State | Writer |
@@ -374,6 +374,17 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/feishu-read.ts` | The `feishu/` reads of a Trigger's message, its root, parent and topic, and `feishuThreadContext`, which gives them to assessments with their images |
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
+| `src/workflow/README.md` | Where `src/workflow` comes from: Substrate's interpreter at a fixed commit, vendored unchanged, every deviation with its reason, and the contract it keeps |
+| `src/workflow/index.ts` | The interpreter's exports |
+| `src/workflow/interpreter.ts` | `runWorkflow`: runs one workflow script against one `Backend`, with the caps, the retries, budgets, `workflow()` nesting and resume from a journal by chained key or by content identity |
+| `src/workflow/backend.ts` | The `Backend` seam, the one attempt at one `agent()` call that a backend owns, and `MockBackend` |
+| `src/workflow/replay.ts` | `ReplayBackend`: answers every call from a recorded journal, in its recorded completion order, and records divergences |
+| `src/workflow/journal.ts` | The journal in the harness's line format, `parseJournal`, `splitRuns`, the file and memory sinks, and the events written beside it |
+| `src/workflow/key.ts` | A call's resume identity: the harness's chained key and the content identity |
+| `src/workflow/meta.ts` | The script's `meta` literal, parsed without running the script |
+| `src/workflow/jsonschema.ts` | The schema checks before a structured call and the validation of its result |
+| `src/workflow/sandbox.ts` | The script's realm: a `node:vm` context with only the workflow builtins, and the guards that keep a resumed run equal to its journal |
+| `src/workflow/cli.ts` | `main`, the offline runner of one script under the mock or the replay backend |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
 | `src/client/provider.tsx` | What every page reads from its host: copy, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
@@ -442,10 +453,13 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/panel-settings.spec.tsx`, `panel-prompts.spec.tsx`, `panel-deployment.spec.tsx`, `panel-panel.spec.tsx` | The settings groups, drafts and history, the prompts, the Deployment page, and the panel's search, glossary and route memory |
 | `tests/draft.spec.ts`, `tests/prompt-config.spec.ts`, `tests/markdown.spec.ts`, `tests/marks.spec.ts` | Draft states, merges and the save bar's line; the prompt configuration by section and the line diff; the Markdown subset and its links; the mark of every state the views classify |
 | `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
-| `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |
+| `tests/workflow/semantics.spec.ts`, `edges.spec.ts`, `meta.spec.ts`, `sessions.spec.ts` | The interpreter's builtins, caps, budgets, retries, nesting and realm, the `meta` literal, and `agent({session})` calls |
+| `tests/workflow/successor-r1.spec.ts`, `successor-r2.spec.ts`, `successor-r3.spec.ts`, `successor-r5.spec.ts`, `reverify-2026-09-24.spec.ts` | Resume and replay: content identity, killed and divergent journals, budgets across a resume, and the D17 time guards |
+| `tests/workflow/fidelity.spec.ts` | The run record's fields as the harness writes them; against recorded runs only when `NAIVE_PROJECTS` names a directory of them |
+| `tests/class-docs.spec.ts` | Every class in `src`, apart from the vendored `src/workflow`, has a JSDoc block before it |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
 
-`tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.
+`tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`. `tests/workflow/helpers.ts` is the interpreter tests' own helper.
 
 ## Persistence
 
