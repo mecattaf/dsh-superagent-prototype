@@ -179,8 +179,10 @@ async function readRecord(file: string, tally: InboxTally): Promise<OccurrenceRe
  * Reads every waiting record of `inbox` once, oldest name first, and moves each one it received out of the way. Older
  * schedule records of an item are received first as superseded, and the ones that did not run go into the item's latest
  * record's count. `read` counts the live and manual records received, `superseded` the older ones. A throw from `receive`
- * ends the round and leaves its record, and the ones after it, for the next. Every file call is a promise, so a round of many
- * records does not hold up the Sessions and the web app the process also serves.
+ * ends the round and leaves its record, and the ones after it, for the next. A superseded record moves only after its item's
+ * live record is committed, so a round cut between the two, by a throw, an abort or a crash, reads both again and the live
+ * record's `missed` still counts the superseded ones. Every file call is a promise, so a round of many records does not hold
+ * up the Sessions and the web app the process also serves.
  */
 export async function readInbox(ctx: Pick<SourceContext, 'receive' | 'threads' | 'triggers'>, inbox: string, signal?: AbortSignal): Promise<InboxTally> {
   const done = join(inbox, '.done'), bad = join(inbox, '.bad')
@@ -209,10 +211,9 @@ export async function readInbox(ctx: Pick<SourceContext, 'receive' | 'threads' |
     const stored = ctx.triggers.get(unscopedId(record))
     return stored?.source === SOURCE && stored.meta.namespace === record.namespace ? { ...trigger, id: stored.id } : trigger
   }
-  /** Receives one record's Trigger, labels its Thread, then moves the file; the receive's answer, or undefined once aborted. */
+  /** Receives one record's Trigger and labels its Thread; the receive's answer, or undefined once aborted. */
   const take = async (entry: Entry, trigger: Trigger) => {
     if (signal?.aborted) return undefined
-    // The file moves only after the Trigger is committed, so a crash between the two re-reads it and answers duplicate.
     const result = await ctx.receive(trigger)
     // The occurrence's own Thread is labelled with its item, which is how people find an item's occurrences together. A
     // duplicate is labelled too, in case a crash came before; a Thread that does not exist, as for a filtered one, is left alone.
@@ -222,24 +223,37 @@ export async function readInbox(ctx: Pick<SourceContext, 'receive' | 'threads' |
       ctx.threads.describe(threadKey(trigger.threads[0]!), { label: title(record),
         facts: { due: { label: due, value: String(trigger.meta.due) }, revision: { label: { zh: '版本', en: 'Revision' }, value: record.revision } } })
     }
-    try { await moveInto(entry.file, done) } catch (error) {
+    return result
+  }
+  /** Moves a received record into `.done`: only after its Trigger is committed, so a crash between the two re-reads it and answers duplicate. */
+  const finish = async (file: string) => {
+    try { await moveInto(file, done) } catch (error) {
       if (code(error) !== 'ENOENT') throw error
       // Withdrawn by its producer after the read; the Trigger is stored all the same.
     }
-    return result
   }
   // An older record counts as missed only when it is kept as superseded: one a crash left after it was stored as live ran.
   const missed = new Map<string, number>()
+  // The superseded records of each item, left in place until the item's live record is committed.
+  const waiting = new Map<string, string[]>()
   for (const entry of superseded) {
     const trigger = kept(scheduledTrigger(entry.record, entry.name.slice(0, -5), { missed: entry.record.missed, superseded: true }), entry.record)
     if (await take(entry, trigger) === undefined) return tally
     tally.superseded += 1
     if (ctx.triggers.get(trigger.id)?.meta.superseded === true) missed.set(itemOf(entry.record), (missed.get(itemOf(entry.record)) ?? 0) + 1 + entry.record.missed)
+    waiting.set(itemOf(entry.record), [...waiting.get(itemOf(entry.record)) ?? [], entry.file])
   }
   for (const entry of live) {
     const trigger = kept(scheduledTrigger(entry.record, entry.name.slice(0, -5),
       { missed: entry.record.missed + (entry.record.kind === 'schedule' ? missed.get(itemOf(entry.record)) ?? 0 : 0) }), entry.record)
     if (await take(entry, trigger) === undefined) return tally
+    // The live record is committed with the full count: its item's superseded records move first, then the record itself, so a
+    // round cut between the moves reads the live record again as duplicate rather than an older record as live.
+    if (entry.record.kind === 'schedule') {
+      for (const file of waiting.get(itemOf(entry.record)) ?? []) await finish(file)
+      waiting.delete(itemOf(entry.record))
+    }
+    await finish(entry.file)
     tally.read += 1
   }
   return tally
@@ -306,43 +320,50 @@ async function watch(ctx: SourceContext, config: ScheduledConfig, signal: AbortS
   // Setup restarts dsh-superagent once it resolves the deployment; until then the Source reads nothing.
   if (!ctx.configured()) { ctx.report(SOURCE, health('paused', 'setupPending')); return }
   const inbox = inboxOf(config, ctx.deployment)
-  // A process killed before its shutdown leaves the inbox lock until it goes stale, possibly later than the state directory's: wait for
-  // that within the entry's `lockWaitMs`.
-  await lockReleased(inbox, ctx.deployment.lockWaitMs, signal)
-  if (signal.aborted) return
-  // A lock that another process took over means two readers: report it and stop reading, as the Runtime does for its state directory.
-  const lost = new AbortController()
-  const release = lockInbox(inbox, error => { ctx.report(SOURCE, { state: 'error', detail: `The inbox lock was lost: ${error.message}` }); lost.abort() })
-  const stop = AbortSignal.any([signal, lost.signal])
   const total: Omit<InboxTally, 'unreadable'> = { read: 0, superseded: 0, invalid: 0 }
-  let failures = 0
-  try {
-    while (!stop.aborted) {
-      const settings = ctx.config<ScheduledSettings>(SOURCE)
-      if (!settings) ctx.report(SOURCE, health('paused', 'sourceOff'))
-      else {
-        const at = new Date().toISOString()
-        try {
-          const round = await readInbox(ctx, inbox, stop)
-          // Retention runs after the round, and only while this process still holds the inbox.
-          if (!stop.aborted) pruneDone(inbox, config)
-          failures = 0
-          total.read += round.read; total.superseded += round.superseded; total.invalid += round.invalid
-          if (round.lastInvalid) total.lastInvalid = round.lastInvalid
-          if (!stop.aborted) ctx.report(SOURCE, { state: 'ready', at, detail: readyDetail(total, round.unreadable) })
-        } catch (error) {
-          // A local directory that cannot be read needs a person at once; a record left by a failed receive is read again next round.
-          failures += 1
-          if (!stop.aborted) ctx.report(SOURCE, health('error', 'pollFailures', { count: String(failures), error: String(error) }))
-        }
+  while (!signal.aborted) {
+    // A process killed before its shutdown leaves the inbox lock until it goes stale, possibly later than the state directory's: wait for
+    // that within the entry's `lockWaitMs`. A process that still holds it then is a second reader: `lockInbox` throws, and the Source
+    // reports it and reads nothing.
+    await lockReleased(inbox, ctx.deployment.lockWaitMs, signal)
+    if (signal.aborted) return
+    // A lock lost or taken over may mean two readers: report it and stop reading at once, as the Runtime does for its state directory.
+    const lost = new AbortController()
+    const release = lockInbox(inbox, error => { ctx.report(SOURCE, { state: 'error', detail: `The inbox lock was lost: ${error.message}` }); lost.abort() })
+    try { await rounds(ctx, config, inbox, AbortSignal.any([signal, lost.signal]), total) } finally {
+      try { release() } catch (error) {
+        // A compromised lock is already released; nothing else is held.
+        if (!lost.signal.aborted) throw error
       }
-      await pause((settings?.pollSeconds ?? 10) * 1000, stop)
     }
-  } finally {
-    try { release() } catch (error) {
-      // A compromised lock is already released; nothing else is held.
-      if (!lost.signal.aborted) throw error
+    // A lost lock, as after a stall past its stale time, would otherwise end the Source for the life of the process while the floor
+    // runs: wait the stale time, then take the lock back as at the start.
+    if (lost.signal.aborted) await pause(LOCK_STALE_MS, signal)
+  }
+}
+/** Reads the inbox every `pollSeconds` until `stop`, adding what each round read to `total`. */
+async function rounds(ctx: SourceContext, config: ScheduledConfig, inbox: string, stop: AbortSignal, total: Omit<InboxTally, 'unreadable'>): Promise<void> {
+  let failures = 0
+  while (!stop.aborted) {
+    const settings = ctx.config<ScheduledSettings>(SOURCE)
+    if (!settings) ctx.report(SOURCE, health('paused', 'sourceOff'))
+    else {
+      const at = new Date().toISOString()
+      try {
+        const round = await readInbox(ctx, inbox, stop)
+        // Retention runs after the round, and only while this process still holds the inbox.
+        if (!stop.aborted) pruneDone(inbox, config)
+        failures = 0
+        total.read += round.read; total.superseded += round.superseded; total.invalid += round.invalid
+        if (round.lastInvalid) total.lastInvalid = round.lastInvalid
+        if (!stop.aborted) ctx.report(SOURCE, { state: 'ready', at, detail: readyDetail(total, round.unreadable) })
+      } catch (error) {
+        // A local directory that cannot be read needs a person at once; a record left by a failed receive is read again next round.
+        failures += 1
+        if (!stop.aborted) ctx.report(SOURCE, health('error', 'pollFailures', { count: String(failures), error: String(error) }))
+      }
     }
+    await pause((settings?.pollSeconds ?? 10) * 1000, stop)
   }
 }
 
