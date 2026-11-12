@@ -18,6 +18,8 @@ Opening a blank managed Session in the Web UI can select the profile's default p
 
 Both presets run with `danger-full-access` as the operator's OS user and read messages from subscribed Threads. Account wrappers choose the agent's credentials by default; they do not isolate the process. A worker can execute programs by path and read the operator's home directory. For isolation, use a dedicated OS account containing only the agent's credentials.
 
+With `executor: dshd`, the values of `dshd.env` and of a pair's `env` pass in the `dshd run` command line, dshd records them in the unit recipe and dsh-superagent in the Assignment's binding, so none may be a secret: a key belongs in the worker profile's DSH credentials. A brief of up to `dshd.briefArgvMaxChars` is the unit's task argument, so it is in the recipe and, while the unit runs, in the process list; a low value (1000 at least) sends longer briefs through `<stateDir>/briefs/`, which only the operator can read.
+
 ## Prerequisites
 
 - Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+ and tmux
