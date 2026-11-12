@@ -301,6 +301,28 @@ it('releases the tools it registered for a Session once its agent is disposed, a
   expect(h.tools.get(worker)!.size).toBe(0)
 })
 
+/** DSH's lossless JSON rule for a tool's `parameters`: finite numbers, plain arrays, plain objects with only enumerable string keys. */
+function lossless(value: unknown): boolean {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true
+  if (typeof value === 'number') return Number.isFinite(value) && !Object.is(value, -0)
+  if (typeof value !== 'object') return false
+  if (Array.isArray(value)) {
+    return Object.getPrototypeOf(value) === Array.prototype && Reflect.ownKeys(value).length === value.length + 1 && value.every(lossless)
+  }
+  if (![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false
+  return Reflect.ownKeys(value).every(key => typeof key === 'string' && Object.getOwnPropertyDescriptor(value, key)!.enumerable)
+    && Object.values(value).every(lossless)
+}
+
+it('registers every tool\'s parameters as lossless JSON, which the tool registry\'s schema projection requires', async () => {
+  const { sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  for (const session of [h.runtime.masterId, sessionId]) {
+    const tools = [...h.tools.get(session)!.values()] as unknown as { name: string; parameters: unknown }[]
+    expect(tools.length, session).toBeGreaterThan(0)
+    for (const { name, parameters } of tools) expect(lossless(parameters), name).toBe(true)
+  }
+})
+
 it('reads a thread by the key cards show: its label, tickets, latest decisions and triggers, newest first, also for its own worker', async () => {
   const { ticket, trigger, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   const key = `feishu:${CHAT}:om_1`
