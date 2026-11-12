@@ -186,7 +186,7 @@ With the dshd executor, a `launch` held by a pair at its own `maxWorkers` tries 
 
 ### Sources
 
-Sources extend the host through `SourceKind`, defined in `src/sources/kind.ts`. A kind declares its identity, title, description, configuration `schema` and `fields`, derived `facts`, and `health` entries. Optional behavior includes `scope`, a `channel` (`allowed`, `send`, `link`), `threadContext`, `find`, `policy`, `environment`, `refreshLabels` and `tools`.
+Sources extend the host through `SourceKind`, defined in `src/sources/kind.ts`. A kind declares its identity, title, description, configuration `schema` and `fields`, derived `facts`, and `health` entries. Optional behavior includes `scope`, a `channel` (`allowed`, `send`, `link`), `threadContext`, `find`, `policy`, `environment`, `refreshLabels`, `tools` and `ticketEnded`.
 
 `tools` is this fork's one addition to upstream's Source protocol: main-Session tools that a kind adds while it is registered, each typed with `sourceTool` and named `orchestrator_<kind>_…`. It exists because the main Session receives tools only from `mainTools` when it is decorated, and then restricts what it inherits, while a Source plugin registers its kind only once dsh-superagent is ready, after that decoration. The hook is these four changes to upstream files, and touches nothing under `src/core`:
 
@@ -199,9 +199,11 @@ Sources extend the host through `SourceKind`, defined in `src/sources/kind.ts`. 
 
 The prefix keeps a kind's tools apart from the host's and each other's, and inside the `orchestrator_` names that bridges to other agent runtimes pass. The workflow Source is the one kind that uses it.
 
+`ticketEnded` is the fork's second addition: the Runtime's handler of the Engine's domain events, which already words a ticket's pull request end for its conversations, also hands every ended Ticket to `SourceRegistry.ticketEnded`, which calls each kind that declares the hook. It runs inside the transaction that ended the Ticket, so a kind only reads there and never throws. The workflow Source settles a node as its Ticket ends with it, instead of at its next poll; it still polls for a worker's failed or blocked report, which ends nothing, because no domain event tells of a report. The hook changes `src/sources/kind.ts`, `src/sources/registry.ts` and `src/app/runtime.ts`, and nothing under `src/core`.
+
 `SourceRegistry` (`registry.ts`) owns registered kinds and stored instances, and implements the Engine's `SourceScope`. Registration claims health entries on `HealthBoard`; duplicate claims and reserved `sync:` names are refused. A SourceContext writes only through its registration's claimed entries, so reports after unregistration do nothing.
 
-Registry configuration methods include `kind`, `instances`, `instance`, `validate`, `validatePolicy`, `policyPart`, `channelAllowed`, `declarations`, `environments`, `find` and `scope`. `find` asks each kind that supports search.
+Registry configuration methods include `kind`, `instances`, `instance`, `validate`, `validatePolicy`, `policyPart`, `channelAllowed`, `declarations`, `environments`, `find`, `scope` and `ticketEnded`. `find` asks each kind that supports search, and `ticketEnded` tells each kind that hears of ended Tickets.
 
 Generic code accesses Source behavior through the registry. `send(message, commands)` calls the kind's Channel and returns `sent`, `gone` or `waiting` if the kind is not installed. `link` resolves its Channel link. `threadContext` pairs a kind's reader with its configuration, or returns nothing when the kind has no reader. Invalid stored configuration disables the instance.
 
@@ -388,7 +390,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/infra/text.ts` | Word counts and the chat message limit, `fill` and `sameName` |
 | `src/infra/health.ts` | The `HealthBoard`, every part's health entry, each claimed by its one writer |
 | `src/infra/lock.ts` | The staleness of the state directory and inbox locks, and `lockReleased`, the bounded wait for a lock a process killed before its shutdown left |
-| `src/sources/kind.ts` | The `SourceKind` protocol, with `tools`, the fork's one addition to it |
+| `src/sources/kind.ts` | The `SourceKind` protocol, with `tools` and `ticketEnded`, the fork's two additions to it |
 | `src/sources/registry.ts` | `SourceRegistry` |
 | `src/sources/host.ts` | `SourceHost`, `SourceContext`, `Health`, `health` and the fixed health texts |
 | `src/sources/poll.ts` | What GitHub and Feishu polling share: `POLL_HORIZON_MS`, `polled`, `cursorAt`, and `pollThreads`, which keeps a failure on its Thread as `pollError` |

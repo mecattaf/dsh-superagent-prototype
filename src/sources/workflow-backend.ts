@@ -54,9 +54,10 @@ export function ticketOf(source: Tickets, trigger: string, thread: string): Tick
 }
 
 /**
- * Waits for the Tickets of nodes: one timer, every `pollMs` as it reads at each poll, reads each waiting node's Thread and its
- * Ticket until it settles. Once stopped, what still waits never settles, so a run parked at stop writes nothing more and resumes
- * from its journal.
+ * Waits for the Tickets of nodes. A node settles at once when its Ticket ends, which `ended` hears from the Source kind's
+ * `ticketEnded`. A worker's failed or blocked report ends nothing and no domain event tells of it, so one timer, every `pollMs`
+ * as it reads at each poll, also reads each waiting node's Thread and its Ticket until it settles. Once stopped, what still
+ * waits never settles, so a run parked at stop writes nothing more and resumes from its journal.
  */
 export class TicketWaiter {
   private readonly waiting = new Map<string, { thread: string; structured: boolean; settled: (outcome: AgentOutcome) => void }>()
@@ -71,6 +72,14 @@ export class TicketWaiter {
       this.waiting.set(trigger, { thread, structured, settled })
       this.arm()
     })
+  }
+  /** Settles each node that waits for `ticket`, the Ticket accepted from its Trigger, which has just ended. */
+  ended(ticket: Ticket): void {
+    for (const [trigger, { structured, settled }] of [...this.waiting]) {
+      if (!ticket.origin.triggerIds.includes(trigger)) continue
+      const outcome = settle(ticket, structured)
+      if (outcome) { this.waiting.delete(trigger); settled(outcome) }
+    }
   }
   /** How many nodes wait. */
   get size(): number { return this.waiting.size }

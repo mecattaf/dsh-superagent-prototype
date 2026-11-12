@@ -1,7 +1,7 @@
 /** SourceKind plugin contract: configuration schema, UI form fields, policy integration, channel adapter, and thread context reader. */
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { z } from 'zod'
-import type { OutboundMessage, ScopeResult, Trigger } from '../core/index.ts'
+import type { OutboundMessage, ScopeResult, Ticket, Trigger } from '../core/index.ts'
 import type { Deployment } from '../deployment.ts'
 import type { Commands } from '../infra/commands.ts'
 import type { SourceContext, SourceHost } from './host.ts'
@@ -112,6 +112,8 @@ export interface SourceKind<C extends Record<string, unknown> = Record<string, u
   environment?: { variables: readonly VariableSpec[]; values(input: EnvironmentInput<C>): Record<string, string> }
   /** Main-Session tools the kind adds while it is registered; each name starts with `orchestrator_<kind>_`. */
   tools?: readonly SourceTool[]
+  /** Hears that a Ticket ended, inside the transaction that ended it, so it only reads, and never throws. */
+  ticketEnded?(ticket: Ticket): void
 }
 /** A main-Session tool of a Source kind: its arguments are parsed with `schema` before `execute` runs. */
 export interface SourceTool { name: string; description: string; schema: z.ZodType; execute(args: unknown, signal: AbortSignal): Promise<unknown> }

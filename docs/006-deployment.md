@@ -155,7 +155,7 @@ The optional `dsh-superagent-workflow` entry runs workflow scripts: each `agent(
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `pollMs` | 2000 | How often a node that waits reads its Ticket, in milliseconds; a change applies at the next poll, without a restart |
+| `pollMs` | 2000 | How often a node that waits reads its Ticket for a failed or blocked report, which ends nothing, in milliseconds; a node whose Ticket ends settles at once. A change applies at the next poll, without a restart |
 | `concurrency` | 16 | `agent()` calls of one run in flight at once; Execution's `maxWorkers` still caps the Tickets that run |
 | `maxAttempts` | 1 | Attempts at each call, each one a new Trigger; with 1, a node whose Ticket fails or whose reply does not match its schema is `null` |
 | `pair` | empty | The compute pair of the nodes of a run that names none; empty leaves the choice to the Executor |

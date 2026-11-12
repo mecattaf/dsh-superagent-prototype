@@ -139,6 +139,8 @@ export class WorkflowFloor {
     }
     return this.runs().sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, STATUS_RUNS).map(run => this.runStatus(source, run))
   }
+  /** Settles the nodes that wait for `ticket`, which has just ended. */
+  ticketEnded(ticket: Ticket): void { this.waiter?.ended(ticket) }
   /** How many runs this process drives now. */
   get active(): number { return this.driving.size }
 
