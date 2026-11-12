@@ -29,9 +29,10 @@ const presetOf = (rows: readonly Row[], id: string) => rows.map(row => row.confi
 it('defines the worker preset Executor Sessions run under, with a shell that moves long commands to the background', async () => {
   const rows = await patched()
   expect(rows.map(row => row.id)).toEqual(['dsh-superagent', 'dsh-superagent-github', 'dsh-superagent-feishu', 'dsh-superagent-scheduled',
-    'dsh-superagent-worker-preset', 'dsh-superagent-router-preset'])
+    'dsh-superagent-workflow', 'dsh-superagent-worker-preset', 'dsh-superagent-router-preset'])
   // The optional Sources are inserted off; a profile turns them on.
-  expect(rows.filter(row => row.disabled === true).map(row => row.id)).toEqual(['dsh-superagent-feishu', 'dsh-superagent-scheduled'])
+  expect(rows.filter(row => row.disabled === true).map(row => row.id)).toEqual(['dsh-superagent-feishu', 'dsh-superagent-scheduled',
+    'dsh-superagent-workflow'])
   expect(rows.find(row => row.id === 'dsh-superagent-scheduled')?.name).toBe('dsh-superagent/scheduled-watch')
   const preset = presetOf(rows, WORKER_PRESET)
   expect(preset.id).toBe(WORKER_PRESET)

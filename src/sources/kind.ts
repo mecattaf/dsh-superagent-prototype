@@ -110,6 +110,13 @@ export interface SourceKind<C extends Record<string, unknown> = Record<string, u
   refreshLabels?(host: SourceHost, signal?: AbortSignal): Promise<Record<string, string>>
   /** Variables the kind registers with the execution environment and how their values are computed. */
   environment?: { variables: readonly VariableSpec[]; values(input: EnvironmentInput<C>): Record<string, string> }
+  /** Main-Session tools the kind adds while it is registered; each name starts with `orchestrator_<kind>_`. */
+  tools?: readonly SourceTool[]
 }
+/** A main-Session tool of a Source kind: its arguments are parsed with `schema` before `execute` runs. */
+export interface SourceTool { name: string; description: string; schema: z.ZodType; execute(args: unknown, signal: AbortSignal): Promise<unknown> }
+/** Types a kind's tool by its schema, as the host's own tools are typed. */
+export const sourceTool = <S extends z.ZodType>(tool: { name: string; description: string; schema: S; execute(args: z.infer<S>, signal: AbortSignal): Promise<unknown> }):
+  SourceTool => tool as unknown as SourceTool
 
 export interface SourceInstance<C extends Record<string, unknown> = Record<string, unknown>> { id: string; kind: string; enabled: boolean; config: C }
