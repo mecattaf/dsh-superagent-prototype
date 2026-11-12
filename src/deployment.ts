@@ -43,7 +43,7 @@ export const Config = s.object({
     cwd: s.string().default('').description('Directory of a Ticket whose Trigger names none. Absolute path; empty: a directory under the Execution directory.'),
     env: s.any().default({}).description('Environment added for every unit, by name. Values are recorded in the unit recipe: no secrets.'),
     passEnv: s.array(s.string()).default(['HOME', 'USER', 'LOGNAME', 'LANG', 'LOCALE_ARCHIVE', 'TZDIR', 'PATH', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', 'DSH_HOME'])
-      .description('Names copied from this process\'s environment into every unit.'),
+      .description('Names copied from this process\'s environment into every unit; LOCALE_ARCHIVE and TZDIR are where a NixOS host keeps locales and time zones.'),
     args: s.array(s.string()).default(['--approval-policy', 'never']).description('dsh headless options placed before --json and the task.'),
     watchSeconds: s.number().min(5).max(600).step(1).default(30).description('How long one dshd wait follows a unit before looking again.'),
     briefArgvMaxChars: s.number().min(1000).max(120000).step(1).default(64000)
