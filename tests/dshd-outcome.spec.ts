@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { latestAssignment, waitsForPerson, type Ticket, type Trigger } from '../src/core/index.ts'
 import { DshdCli, DshdUnavailable, invocationOf, type DshdLastRun, type DshdRecipe } from '../src/executor/dshd-cli.ts'
-import { BINDING, eventsOf, unitName, verdictOf, type Verdict } from '../src/executor/dshd.ts'
+import { BINDING, eventsOf, unitName, usageOf, verdictOf, type Verdict } from '../src/executor/dshd.ts'
 import { testDshd } from './fixtures/deployment.ts'
 import { FakeDshd, runLines } from './fixtures/fake-dshd.ts'
 import { GET_EXITED, READ_JSON_RUN, READ_LINES, RUN_CREATED, WAIT_ENDED_EXITED, WAIT_ENDED_FAILED, WAIT_STILL_RUNNING } from './fixtures/dshd-0.1.0.ts'
@@ -67,6 +67,27 @@ describe('dshd 0.1.0 output (captured 12 Nov)', () => {
     expect(eventsOf(read)).toEqual({ sessionId: 'session-0a4a53d1-0169-42ca-a8bf-ad6731f124e6', final: 'READY' })
     // `dshd read -n 3`: the final event and dshd-run's last two lines.
     expect(eventsOf({ lines: read.lines.slice(-3) })).toEqual({ sessionId: 'session-0a4a53d1-0169-42ca-a8bf-ad6731f124e6', final: 'READY' })
+  })
+})
+
+describe('a run\'s token usage', () => {
+  // The usage two rehearsal workers' DSH Sessions recorded on each step's assistant/message, which a headless --json run
+  // prints on that step's step_end status: a Gufo pair (OpenAI-style totals) and a Claude pair (cache writes, no total).
+  const GUFO = [{ inputTokens: 3076, outputTokens: 116, totalTokens: 8662, cacheReadTokens: 5470 },
+    { inputTokens: 38, outputTokens: 1, totalTokens: 8701, cacheReadTokens: 8662 }]
+  const CLAUDE = { inputTokens: 2, outputTokens: 239, cacheReadTokens: 32343, cacheWriteTokens: 372 }
+  const read = (lines: string[], complete = true) => ({ invocationId: 'invocation-1', complete, lines })
+
+  it('sums the usage every step of a whole run printed, keeping a bucket only when every step reports it', () => {
+    expect(usageOf(read(runLines('session-g', 'DONE', GUFO)))).toEqual({ inputTokens: 3114, outputTokens: 117, totalTokens: 17363, cacheReadTokens: 14132 })
+    expect(usageOf(read(runLines('session-c', 'DONE', [CLAUDE])))).toEqual(CLAUDE)
+    expect(usageOf(read(runLines('session-m', 'DONE', [GUFO[0], CLAUDE])))).toEqual({ inputTokens: 3078, outputTokens: 355, cacheReadTokens: 37813 })
+  })
+  it('knows no usage when a step printed none, the lines do not reach back to the run\'s start, or no step ended', () => {
+    expect(usageOf(read(runLines('session-g', 'DONE', [GUFO[0], undefined])))).toBeUndefined()
+    expect(usageOf(read(runLines('session-g', 'DONE', GUFO), false))).toBeUndefined()
+    expect(usageOf(read(runLines('session-g', 'DONE')))).toBeUndefined()
+    expect(usageOf(read(['dshd-run: run started', JSON.stringify({ type: 'status', phase: 'step_end', turn: 1, step: 1, usage: { inputTokens: 'many' } })]))).toBeUndefined()
   })
 })
 
@@ -197,14 +218,32 @@ describe('the dshd executor on these outcomes', () => {
       expect(latestAssignment(stored(ticket))!.report).toMatchObject({ state: 'failed', summary: `Unit ${name} ended task-failed (exit 1).\n\nUnit ${name}; session unknown.` })
       expect(reported()).toEqual([expect.objectContaining({ unit: name, session: null })])
     })
-    it('reads it once when its final event names the Session', async () => {
+    it('reads it again for its usage when its final event names the Session, and keeps that Session when the longer read reaches no further', async () => {
       const lines = [...all.slice(-198, -3), JSON.stringify({ type: 'final', sessionId: 'session-long', reason: { kind: 'completed' }, text: 'Done.' }),
         'dshd-run: dsh exited with status 0; exiting 0', 'dshd-run: run ended: success']
       const dshd = replay({ run: [{ stderr: refusal('task-already-ran'), exit: 4 }], get: [{ stdout: GET_EXITED, exit: 0 }],
         read: [{ stdout: JSON.stringify({ name: 'probe-20261112-g4', invocationId: 'f72771583e9a465d810ef7da34505aa6', complete: false, streams: ['stdout', 'stderr'], lines }), exit: 0 }] })
       const ticket = await accepted(dshd)
-      expect(dshd.verbs).toEqual(['run', 'get', 'get', 'read'])
+      expect(dshd.verbs).toEqual(['run', 'get', 'get', 'read', 'read'])
       expect(binding(ticket)).toMatchObject({ state: 'ended', sessionId: 'session-long', ended: { verdict: 'completed' } })
+      // The newest lines do not reach back to the run's start, and neither does the longer read: the usage is not known.
+      expect(binding(ticket).usage).toBeUndefined()
+      expect(latestAssignment(stored(ticket))!.report).toMatchObject({ state: 'ready', summary: 'Done.' })
+    })
+    it('records on the binding the usage of every step of the whole run the longer read prints', async () => {
+      const usage = { inputTokens: 10, outputTokens: 2, cacheReadTokens: 100 }
+      const exited = (lines: string[], complete: boolean) => JSON.stringify({ name: 'probe-20261112-g4', invocationId: 'f72771583e9a465d810ef7da34505aa6',
+        complete, streams: ['stdout', 'stderr'], lines })
+      const whole = ['dshd-run: run started', JSON.stringify({ type: 'session', sessionId: 'session-long', cwd: '/srv/agency' }),
+        ...Array.from({ length: 300 }, (_, step) => JSON.stringify({ type: 'status', phase: 'step_end', turn: 1, step: step + 1, usage })),
+        JSON.stringify({ type: 'final', sessionId: 'session-long', reason: { kind: 'completed' }, text: 'Done.' }),
+        'dshd-run: dsh exited with status 0; exiting 0', 'dshd-run: run ended: success']
+      const dshd = replay({ run: [{ stderr: refusal('task-already-ran'), exit: 4 }], get: [{ stdout: GET_EXITED, exit: 0 }],
+        read: [{ stdout: exited(whole.slice(-200), false), exit: 0 }, { stdout: exited(whole, true), exit: 0 }] })
+      const ticket = await accepted(dshd)
+      expect(dshd.calls.filter(argv => argv[1] === 'read').map(argv => argv.slice(2))).toEqual([['--json', binding(ticket).name], ['--json', '-n', '65536', binding(ticket).name]])
+      expect(binding(ticket)).toMatchObject({ state: 'ended', sessionId: 'session-long', usage: { inputTokens: 3000, outputTokens: 600, cacheReadTokens: 30000 },
+        ended: { verdict: 'completed' } })
       expect(latestAssignment(stored(ticket))!.report).toMatchObject({ state: 'ready', summary: 'Done.' })
     })
   })
