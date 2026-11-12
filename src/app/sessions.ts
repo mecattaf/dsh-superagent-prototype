@@ -214,9 +214,9 @@ export class Sessions {
    */
   addMainTools(kind: string, tools: readonly Tool[]): () => void {
     this.kindTools.set(kind, tools)
-    const master = this.ctx.agents.get(this.host.masterId as SessionId)
-    const binding = master && this.bindings.get(master)
-    if (master && binding?.kinds) this.registerKind(master, binding.kinds, kind, tools)
+    const main = this.ctx.agents.get(this.host.masterId as SessionId)
+    const binding = main && this.bindings.get(main)
+    if (main && binding?.kinds) this.registerKind(main, binding.kinds, kind, tools)
     return () => {
       if (this.kindTools.get(kind) === tools) this.kindTools.delete(kind)
       for (const { kinds } of this.bindings.values()) {
