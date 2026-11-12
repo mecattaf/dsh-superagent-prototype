@@ -73,6 +73,8 @@ const FINAL_CHARS = 3800
  * `DshdCli`'s 16 MiB read cap. journalctl takes no more than a signed int.
  */
 const READ_RUN_LINES = 1 << 16
+/** Most `dshd-rm` effects one start queues for Tickets that ended before `dshd.removeEnded` reached them; later starts take the rest. */
+const SWEEP_UNITS = 64
 const RETRIED = 'A person retried this ticket. Continue the assignment from the current directory and what it holds now.'
 const DSHD_WORKER_NOTE = 'You are one headless task that dsh-superagent started. Work in the current directory. Nothing reaches you after this '
   + 'message and there is no report tool: when the work is done, end with a short final answer. Your session log is the record. '
@@ -157,9 +159,9 @@ export interface DshdExecutorHost {
   /** DSH Cordis context, whose subprocess service runs the dshd CLI. */
   readonly context: Context
   readonly engine: Pick<EngineForExecutor, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'report' | 'assignmentInterrupted'>
-  readonly store: Pick<Store, 'tickets' | 'triggers' | 'get' | 'set' | 'settings' | 'atomic' | 'afterCommit'>
+  readonly store: Pick<Store, 'tickets' | 'triggers' | 'get' | 'set' | 'keys' | 'settings' | 'atomic' | 'afterCommit'>
   /** Durable effect queue through which launches, watches and stops run. */
-  readonly effects: Pick<Effects, 'enqueue' | 'handle'>
+  readonly effects: Pick<Effects, 'enqueue' | 'handle' | 'pending'>
   /** The `worker` health entry. */
   readonly health: HealthEntry
   readonly machine: Pick<Machine, 'stateDir' | 'dshd'>
@@ -223,6 +225,7 @@ export class DshdExecutor implements ExecutorPort {
   /**
    * Reconciles open Tickets oldest first after a start. A running Assignment whose unit may still run is adopted and watched
    * again; one that ran in this process before a switch from the dsh executor is interrupted, as upstream does; pending ones launch.
+   * Under `dshd.removeEnded`, it then sweeps the ended units of Tickets that ended before (see `sweepEnded`).
    */
   resume(): void {
     for (const ticket of this.host.store.tickets.open().sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
@@ -233,6 +236,7 @@ export class DshdExecutor implements ExecutorPort {
         else if (binding.state !== 'ended') this.watchLater(ticket.id, running.id)
       } else if (latest?.state === 'pending' && !waitsForPerson(ticket)) this.start(ticket, latest)
     }
+    this.sweepEnded()
   }
   /** Units keep running when this process stops; the dshd calls under way end with the host's lifetime. */
   async shutdown(): Promise<void> {}
@@ -491,6 +495,25 @@ export class DshdExecutor implements ExecutorPort {
     for (const { id } of ticket.assignments) {
       const binding = this.host.store.get(BINDING(id))
       if (binding?.state === 'ended' && !binding.removedAt) this.host.effects.enqueue('dshd-rm', id, { ticketId, assignmentId: id })
+    }
+  }
+  /**
+   * Under `dshd.removeEnded`, queues at a start a `dshd-rm` for each ended unit this host launched whose Ticket ended with no
+   * removal recorded: Tickets that ended while the key was off, or while dshd stayed unavailable past a removal's retries. It
+   * queues at most `SWEEP_UNITS`, the units that ended first; `removeQueued` checks each one again before it removes it.
+   */
+  private sweepEnded(): void {
+    const { store, machine, effects } = this.host
+    if (!machine.dshd.removeEnded) return
+    const swept = store.keys(BINDING).flatMap(key => {
+      const binding = store.get(key), assignmentId = key.slice(BINDING.prefix.length), ticketId = binding?.recipe.labels[LABEL.ticket]
+      if (binding?.state !== 'ended' || binding.removedAt || binding.host !== this.hostname() || !ticketId) return []
+      if (effects.pending('dshd-rm', assignmentId)) return []
+      const ticket = store.tickets.get(ticketId)
+      return ticket && !liveTicket(ticket) ? [{ ticketId, assignmentId, at: binding.ended?.at ?? binding.launchedAt }] : []
+    })
+    for (const { ticketId, assignmentId } of swept.sort((a, b) => a.at.localeCompare(b.at)).slice(0, SWEEP_UNITS)) {
+      effects.enqueue('dshd-rm', assignmentId, { ticketId, assignmentId })
     }
   }
   /**
