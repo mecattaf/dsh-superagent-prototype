@@ -1,8 +1,16 @@
+import { Context } from '@deepseek-ai/cordis'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { sourceContextOf, type SourceContextDeps } from '../src/app/source-context.ts'
+import { Store } from '../src/app/store.ts'
 import type { Trigger } from '../src/core/index.ts'
+import { HealthBoard } from '../src/infra/health.ts'
+import { SettingsSchema } from '../src/policy.ts'
+import { SourceRegistry } from '../src/sources/registry.ts'
+import * as workflowPlugin from '../src/sources/workflow.ts'
 import { workflowKind } from '../src/sources/workflow.ts'
+import { WorkflowFloor } from '../src/sources/workflow-floor.ts'
 import { parseJournal, runWorkflow } from '../src/workflow/index.ts'
 import { startRuntime } from './fixtures/host.ts'
 import { FIXTURE, newDirectory, workflowHost, type WorkflowHost } from './fixtures/workflow.ts'
@@ -124,5 +132,26 @@ describe('a Source kind\'s main-Session tools', () => {
       expect(() => host.runtime.sources.register(kind)).toThrow('does not start with orchestrator_other_')
       await host.stop()
     })
+  })
+})
+
+describe('the plugin entry', () => {
+  it('waits without the orchestrator service, as where the engine is off, and registers its kind once the service exists, until disposed', async () => {
+    const start = vi.spyOn(WorkflowFloor.prototype, 'start')
+    const directory = newDirectory(); directories.push(directory)
+    const store = new Store(join(directory, 'orchestrator.sqlite'))
+    const sources = new SourceRegistry(() => SettingsSchema.parse({}), new HealthBoard())
+    const deps = { store, sources, ready: new Promise<void>(() => {}), configured: () => false } as unknown as SourceContextDeps
+    const ctx = new Context()
+    const fiber = ctx.plugin(workflowPlugin, {})
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(start).not.toHaveBeenCalled()
+    ctx.reflect.provide('orchestrator', { sources, context: (kind: { kind: string; health: readonly string[] }) => sourceContextOf(deps, kind) })
+    await vi.waitFor(() => { expect(sources.kind('workflow')).toBeDefined() })
+    expect(start).toHaveBeenCalledOnce()
+    await fiber.dispose()
+    expect(sources.kind('workflow')).toBeUndefined()
+    start.mockRestore()
+    store.close()
   })
 })

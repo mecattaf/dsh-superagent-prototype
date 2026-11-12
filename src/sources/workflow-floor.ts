@@ -81,7 +81,9 @@ export class WorkflowFloor {
   async start(): Promise<void> {
     const source = this.source = sourceContext(this.host, { kind: SOURCE, health: [SOURCE] })
     this.waiter = new TicketWaiter(source, this.config.pollMs)
-    await source.ready
+    // A stop while setup is still running ends the start at once, so the plugin's disposal never waits for setup.
+    const stopped = new Promise<void>(resolve => { this.stopped.signal.addEventListener('abort', () => { resolve() }, { once: true }) })
+    await Promise.race([source.ready, stopped])
     if (this.stopped.signal.aborted) return
     // Setup restarts dsh-superagent once it resolves the accounts; until then no run starts or resumes.
     if (!source.configured()) { source.report(SOURCE, health('paused', 'setupPending')); return }
