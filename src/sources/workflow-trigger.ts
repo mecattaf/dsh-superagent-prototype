@@ -6,7 +6,7 @@ import type { WorkflowRun } from './workflow-store.ts'
 export const SOURCE = 'workflow'
 /** The most attempts the Source's Config allows at one `agent()` call. */
 export const MAX_ATTEMPTS = 3
-/** What a node with a schema is asked to reply with, worded as Substrate's runners word it. */
+/** What a node with a schema is asked to reply with, worded as the vendored interpreter's runners word it. */
 export const SCHEMA_INSTRUCTION = 'Reply with one JSON value only, no prose and no code fence, valid against this JSON Schema:'
 
 /** How a later attempt's text introduces why the interpreter did not accept the attempt before it. */

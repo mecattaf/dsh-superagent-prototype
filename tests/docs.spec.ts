@@ -56,7 +56,7 @@ describe('documentation', () => {
     expect(documents.filter(path => /^(<{7}|>{7}) /m.test(read(path)))).toEqual([])
   })
   it('lists the node states of orchestrator_workflow_status as the workflow Source defines them', () => {
-    const states = [.../^export type NodeState = (.+)$/m.exec(read('src/sources/workflow-floor.ts'))![1]!.matchAll(/'([a-z]+)'/g)].map(([, state]) => `\`${state}\``)
+    const states = [.../^export type NodeState = (.+)$/m.exec(read('src/sources/workflow-runs.ts'))![1]!.matchAll(/'([a-z]+)'/g)].map(([, state]) => `\`${state}\``)
     // A list of states is backticked words joined by commas and a final "or", starting with the first state.
     const lists = documents.flatMap(path => read(path).split('\n').filter(line => line.includes('orchestrator_workflow_status'))
       .flatMap(line => [...line.matchAll(/`[a-z]+`(?:(?:, | or )`[a-z]+`)+/g)].map(([list]) => list).filter(list => list.startsWith(states[0]!)).map(list => ({ path, list }))))

@@ -53,29 +53,29 @@ describe('configuration schema', () => {
     expect(() => Config(minimal({ stateDir: '~/dir' }))).toThrow()
   })
   it('defaults engine to true and executor to dsh and reads the dshd block', () => {
-    const pairs = { opus: { profile: 'work-opus' }, local: { profile: 'work-local', env: { MODEL_KEY: 'none' }, maxWorkers: 1 } }
-    const read = machineOf(Config(minimal({ executor: 'dshd', dshd: { pairs, defaultPair: 'opus', cwd: '/srv/work', env: { A: '1' }, watchSeconds: 10 } })))
-    expect(read).toMatchObject({ engine: true, executor: 'dshd', dshd: testDshd({ defaultPair: 'opus', cwd: '/srv/work', env: { A: '1' }, watchSeconds: 10,
-      pairs: { opus: { profile: 'work-opus', env: {} }, local: { profile: 'work-local', env: { MODEL_KEY: 'none' }, maxWorkers: 1 } } }) })
+    const pairs = { alpha: { profile: 'work-alpha' }, local: { profile: 'work-local', env: { MODEL_KEY: 'none' }, maxWorkers: 1 } }
+    const read = machineOf(Config(minimal({ executor: 'dshd', dshd: { pairs, defaultPair: 'alpha', cwd: '/srv/work', env: { A: '1' }, watchSeconds: 10 } })))
+    expect(read).toMatchObject({ engine: true, executor: 'dshd', dshd: testDshd({ defaultPair: 'alpha', cwd: '/srv/work', env: { A: '1' }, watchSeconds: 10,
+      pairs: { alpha: { profile: 'work-alpha', env: {} }, local: { profile: 'work-local', env: { MODEL_KEY: 'none' }, maxWorkers: 1 } } }) })
     expect(() => Config(minimal({ executor: 'tmux' }))).toThrow()
     expect(() => Config(minimal({ dshd: { prefix: 'Not-A-Prefix' } }))).toThrow()
-    expect(() => machineOf(Config(minimal({ dshd: { pairs: { opus: { profile: 'work opus' } } } })))).toThrow('dsh-superagent dshd configuration: dshd.pairs.opus.profile')
+    expect(() => machineOf(Config(minimal({ dshd: { pairs: { alpha: { profile: 'work alpha' } } } })))).toThrow('dsh-superagent dshd configuration: dshd.pairs.alpha.profile')
     // The Schema knows the two maps' shapes, so a value of the wrong type fails as the configuration is read.
     expect(() => Config(minimal({ dshd: { env: { A: 1 } } }))).toThrow()
-    expect(() => Config(minimal({ dshd: { pairs: { opus: 'work-opus' } } }))).toThrow()
-    expect(() => Config(minimal({ dshd: { pairs: { opus: { env: {} } } } }))).toThrow()
+    expect(() => Config(minimal({ dshd: { pairs: { alpha: 'work-alpha' } } }))).toThrow()
+    expect(() => Config(minimal({ dshd: { pairs: { alpha: { env: {} } } } }))).toThrow()
     // An unknown pair key still reaches machineOf, which refuses it.
-    expect(() => machineOf(Config(minimal({ dshd: { pairs: { opus: { profile: 'work-opus', model: 'x' } } } })))).toThrow('dshd.pairs.opus')
+    expect(() => machineOf(Config(minimal({ dshd: { pairs: { alpha: { profile: 'work-alpha', model: 'x' } } } })))).toThrow('dshd.pairs.alpha')
   })
   it('rejects executor dshd whose default pair is not among its pairs, or whose directory is not absolute', () => {
-    const pairs = { opus: { profile: 'work-opus' } }
-    expect(() => machineOf(Config(minimal({ executor: 'dshd', dshd: { pairs, defaultPair: 'gufo' } }))))
-      .toThrow('dsh-superagent dshd configuration: the default pair "gufo" is not among the pairs (opus); docs/006-deployment.md lists the keys')
-    expect(() => machineOf(Config(minimal({ executor: 'dshd', dshd: { pairs, defaultPair: 'opus', cwd: 'work' } })))).toThrow('cwd work is not an absolute path')
-    expect(() => machineOf(Config(minimal({ executor: 'dshd', dshd: { pairs, defaultPair: 'opus', passEnv: ['HOME', 'GH_TOKEN', 'Api_Key'] } }))))
+    const pairs = { alpha: { profile: 'work-alpha' } }
+    expect(() => machineOf(Config(minimal({ executor: 'dshd', dshd: { pairs, defaultPair: 'beta' } }))))
+      .toThrow('dsh-superagent dshd configuration: the default pair "beta" is not among the pairs (alpha); docs/006-deployment.md lists the keys')
+    expect(() => machineOf(Config(minimal({ executor: 'dshd', dshd: { pairs, defaultPair: 'alpha', cwd: 'work' } })))).toThrow('cwd work is not an absolute path')
+    expect(() => machineOf(Config(minimal({ executor: 'dshd', dshd: { pairs, defaultPair: 'alpha', passEnv: ['HOME', 'GH_TOKEN', 'Api_Key'] } }))))
       .toThrow('passEnv names credential-shaped variables, which dshd would record: GH_TOKEN, Api_Key')
     // The dsh executor does not read the block.
-    expect(machineOf(Config(minimal({ dshd: { pairs, defaultPair: 'gufo' } }))).executor).toBe('dsh')
+    expect(machineOf(Config(minimal({ dshd: { pairs, defaultPair: 'beta' } }))).executor).toBe('dsh')
   })
   it('names keys the configuration does not define, and where the values of older keys live now', () => {
     const raw = minimal({ repository: 'acme/widgets', repositoryPath: '/srv/widgets', blockedCommands: [], author: { name: 'Alice' }, extra: 1 })

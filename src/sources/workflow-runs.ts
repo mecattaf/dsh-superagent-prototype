@@ -13,9 +13,9 @@ import { KvJournal, type WorkflowRun, type WorkflowState } from './workflow-stor
 import { MAX_ATTEMPTS, nodeThread, nodeTriggerId, SOURCE } from './workflow-trigger.ts'
 
 /** What the workflow Source logs through: the plugin's Cordis logger. */
-export interface FloorLogger { info(format: string, ...args: unknown[]): void; warn(format: string, ...args: unknown[]): void }
+export interface RunsLogger { info(format: string, ...args: unknown[]): void; warn(format: string, ...args: unknown[]): void }
 /** The workflow Source's machine settings, as the plugin's Config declares them; `pollMs` and `offeredWarnSeconds` are read at each use. */
-export interface FloorConfig { pollMs: Volatile<number>; offeredWarnSeconds: Volatile<number>; concurrency: number; maxAttempts: number; pair: string }
+export interface RunsConfig { pollMs: Volatile<number>; offeredWarnSeconds: Volatile<number>; concurrency: number; maxAttempts: number; pair: string }
 export interface StartRequest { script: string; cwd: string; args?: unknown; pair?: string; trigger_id?: string }
 export interface StartResult { run_id: string; state: 'started' | 'already-started'; script_sha256: string; name: string }
 /**
@@ -117,12 +117,12 @@ function latestAttempt(source: Pick<SourceContext, 'triggers'>, run: string, nod
  * The workflow Source at work: it starts runs on request, drives each one with the interpreter, journals it in the Store, and
  * after a restart resumes every run that had not ended, answering finished calls from the journal without raising them again.
  */
-export class WorkflowFloor {
+export class WorkflowRuns {
   private source: SourceContext | undefined
   private waiter: TicketWaiter | undefined
   private readonly stopped = new AbortController()
   private readonly driving = new Set<string>()
-  constructor(private readonly host: SourceHost, private readonly config: FloorConfig, private readonly logger: FloorLogger) {}
+  constructor(private readonly host: SourceHost, private readonly config: RunsConfig, private readonly logger: RunsLogger) {}
 
   /** Waits for setup, then resumes every run that had not ended; it resolves once they are under way, not once they end. */
   async start(): Promise<void> {

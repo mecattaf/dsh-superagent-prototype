@@ -16,7 +16,7 @@ import { KV } from '../../src/kv.ts'
 import { SettingsSchema, settingsPolicy } from '../../src/policy.ts'
 import { SourceRegistry } from '../../src/sources/registry.ts'
 import { workflowKind } from '../../src/sources/workflow.ts'
-import { WorkflowFloor, type FloorConfig } from '../../src/sources/workflow-floor.ts'
+import { WorkflowRuns, type RunsConfig } from '../../src/sources/workflow-runs.ts'
 import { KvJournal } from '../../src/sources/workflow-store.ts'
 import { testDeployment } from './deployment.ts'
 
@@ -34,7 +34,7 @@ export const newDirectory = (): string => mkdtempSync(join(tmpdir(), 'workflow-'
  * settings of a new Store, and `config` the Source's machine settings, polling every 5 ms unless it names its own `pollMs`.
  * `ready` and `configured` stand for setup, which has ended and resolved the accounts unless they say otherwise.
  */
-export function workflowHost(directory: string, options: { slots?: number; config?: Partial<FloorConfig>; now?: () => string; settings?: unknown
+export function workflowHost(directory: string, options: { slots?: number; config?: Partial<RunsConfig>; now?: () => string; settings?: unknown
   ready?: Promise<void>; configured?: () => boolean } = {}) {
   const store = new Store(join(directory, 'orchestrator.sqlite'))
   if (store.get(KV.settings.revision) === undefined) store.saveSettings(SettingsSchema.parse(options.settings ?? WORKFLOW_SETTINGS))
@@ -69,8 +69,8 @@ export function workflowHost(directory: string, options: { slots?: number; confi
   // The Ticket waiter reads pollMs each time it schedules a poll, so counting the reads counts the polls it scheduled.
   let polls = 0
   const logger = { info: vi.fn<(format: string, ...args: unknown[]) => void>(), warn: vi.fn<(format: string, ...args: unknown[]) => void>() }
-  // A test clock may run hours behind the wall clock the floor's threshold reads, so only a test that sets the threshold has one.
-  const floor = new WorkflowFloor(host, { pollMs: { get: () => { polls += 1; return 5 } }, offeredWarnSeconds: { get: () => Infinity }, concurrency: 16,
+  // A test clock may run hours behind the wall clock the Source's threshold reads, so only a test that sets the threshold has one.
+  const floor = new WorkflowRuns(host, { pollMs: { get: () => { polls += 1; return 5 } }, offeredWarnSeconds: { get: () => Infinity }, concurrency: 16,
     maxAttempts: 1, pair: '', ...options.config }, logger)
   const unregister = sources.register(workflowKind(floor))
   const started = floor.start()
@@ -103,7 +103,7 @@ export function workflowHost(directory: string, options: { slots?: number; confi
     launch()
     return ended
   }
-  /** Stops this host as a killed process would leave the Store: the floor parks its calls and the Store closes. */
+  /** Stops this host as a killed process would leave the Store: the Source parks its calls and the Store closes. */
   async function stop() {
     unregister(); floor.stop(); await started; store.close()
   }

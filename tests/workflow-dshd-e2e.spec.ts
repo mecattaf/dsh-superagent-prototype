@@ -12,10 +12,10 @@ import { BINDING } from '../src/executor/dshd.ts'
 import { KV } from '../src/kv.ts'
 import * as workflow from '../src/sources/workflow.ts'
 import { nodeTriggerId, SCHEMA_INSTRUCTION } from '../src/sources/workflow-trigger.ts'
-import { nodeUsage, type RunStatus } from '../src/sources/workflow-floor.ts'
+import { nodeUsage, type RunStatus } from '../src/sources/workflow-runs.ts'
 import { KvJournal } from '../src/sources/workflow-store.ts'
 import { reference } from './fixtures/deployment.ts'
-import { acceptCandidate, later, runArgv, startFloor } from './fixtures/dshd-floor.ts'
+import { acceptCandidate, later, runArgv, startDshdHost } from './fixtures/dshd-host.ts'
 import { FakeDshd, runLines } from './fixtures/fake-dshd.ts'
 import type { Host } from './fixtures/host.ts'
 import { FIXTURE } from './fixtures/workflow.ts'
@@ -50,9 +50,9 @@ function script(cwd: string, kind: 'text' | 'schema'): string {
   return 'once.workflow.js'
 }
 
-/** The floor with the `workflow-node` rule and admission cell seeded, and the workflow plugin mounted. */
+/** The host with the `workflow-node` rule and admission cell seeded, and the workflow plugin mounted. */
 async function start(): Promise<void> {
-  ({ h, fake } = await startFloor({ rule: RULE, source: 'workflow', row: 'workflow' }))
+  ({ h, fake } = await startDshdHost({ rule: RULE, source: 'workflow', row: 'workflow' }))
   await mount()
 }
 /** Mounts the plugin entry on the Runtime as DSH loads it, polling every `pollMs` (5 ms), and waits until its runs are under way. */
@@ -121,7 +121,7 @@ describe('workflow nodes on the dshd executor', () => {
   })
 
   it('a node settles as its Ticket ends, not at the next poll', async () => {
-    ({ h, fake } = await startFloor({ rule: RULE, source: 'workflow', row: 'workflow' }))
+    ({ h, fake } = await startDshdHost({ rule: RULE, source: 'workflow', row: 'workflow' }))
     // The longest poll the Config allows: a node that waited for it would not settle within this test's wait.
     await mount(60_000)
     const cwd = agency()
@@ -179,7 +179,7 @@ describe('workflow nodes on the dshd executor', () => {
   })
 
   it('sums a node\'s usage over the units of all its attempts, and shows none while a later attempt\'s unit runs', async () => {
-    ({ h, fake } = await startFloor({ rule: RULE, source: 'workflow', row: 'workflow' }))
+    ({ h, fake } = await startDshdHost({ rule: RULE, source: 'workflow', row: 'workflow' }))
     await mount(5, 2)
     const cwd = agency()
     const run = await startRun(cwd, script(cwd, 'text'))
@@ -199,13 +199,13 @@ describe('workflow nodes on the dshd executor', () => {
     expect((await status(run)).usage).toEqual({ total: both, measured_nodes: 1, unmeasured_nodes: 0 })
   })
 
-  it('a floor restart while a node\'s unit runs adopts the unit, and the resumed run completes with no second Trigger, Ticket or unit', async () => {
+  it('a restart while a node\'s unit runs adopts the unit, and the resumed run completes with no second Trigger, Ticket or unit', async () => {
     await start()
     const cwd = agency()
     const run = await startRun(cwd, script(cwd, 'text'))
     const { trigger, ticket } = await acceptNode(run, 'digest')
     const node = h!.runtime.store.triggers.get(trigger)!.meta.node as string
-    // The floor stops while the unit runs; DSH mounts the plugin again on the restarted Runtime, which resumes the run.
+    // The host stops while the unit runs; DSH mounts the plugin again on the restarted Runtime, which resumes the run.
     await unmount!(); unmount = undefined
     await h!.restart()
     await mount()
