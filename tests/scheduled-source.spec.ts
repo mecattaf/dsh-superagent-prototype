@@ -1,6 +1,6 @@
 /** The scheduled Source: occurrence records in an inbox directory become Triggers, read on a real Store through a `SourceContext`. */
 import { Context } from '@deepseek-ai/cordis'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -15,7 +15,7 @@ import { HealthBoard } from '../src/infra/health.ts'
 import { SettingsSchema, assessmentOutcome, settingsPolicy, type Assessment } from '../src/policy.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import * as scheduled from '../src/sources/scheduled.ts'
-import { Config, OccurrenceRecordSchema, inboxOf, occurrenceThread, readInbox, scheduledKind, scheduledTrigger, type OccurrenceRecord, type ScheduledConfig }
+import { Config, OccurrenceRecordSchema, inboxOf, occurrenceThread, pruneDone, readInbox, scheduledKind, scheduledTrigger, type OccurrenceRecord, type ScheduledConfig }
   from '../src/sources/scheduled.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 
@@ -479,7 +479,7 @@ describe('scheduled Source kind', () => {
   })
 
   it('reads <stateDir>/inbox/scheduled when inbox is empty, and the configured inbox otherwise, and shows it as the inbox fact', async () => {
-    expect(Config({})).toEqual({ inbox: '' })
+    expect(Config({})).toEqual({ inbox: '', doneMaxAgeDays: 0, doneMaxCount: 0 })
     expect(() => Config({ inbox: 'relative/inbox' })).toThrow()
     expect(inboxOf(Config({}), { stateDir: '/srv/state' })).toBe('/srv/state/inbox/scheduled')
     expect(inboxOf(Config({ inbox: '/srv/drop' }), { stateDir: '/srv/state' })).toBe('/srv/drop')
@@ -502,6 +502,89 @@ describe('scheduled Source kind', () => {
     await vi.waitFor(() => { expect(readdirSync(join(elsewhere, '.done'))).toEqual(['b.json']) })
     await stopConfigured()
     expect(existsSync(join(configured.stateDir, 'inbox'))).toBe(false)
+  })
+})
+
+const DAY = 86_400_000
+const NOW = Date.parse('2026-11-12T05:00:00.000Z')
+/** Writes `name` under `dir` as if written `days` before NOW. */
+const aged = (dir: string, name: string, days: number): string => {
+  const file = join(dir, name)
+  writeFileSync(file, '{}')
+  const at = new Date(NOW - days * DAY)
+  utimesSync(file, at, at)
+  return file
+}
+
+describe('scheduled .done retention', () => {
+  it('keeps every read record in .done by default, however old', () => {
+    const h = host()
+    const done = join(h.inbox, '.done')
+    mkdirSync(done)
+    for (const [index, days] of [400, 30, 1].entries()) aged(done, `r${index}.json`, days)
+    expect(pruneDone(h.inbox, Config({}), NOW)).toBe(0)
+    expect(h.done()).toEqual(['r0.json', 'r1.json', 'r2.json'])
+  })
+
+  it('removes read records older than doneMaxAgeDays from .done and keeps the newer ones', () => {
+    const h = host()
+    const done = join(h.inbox, '.done')
+    mkdirSync(done)
+    aged(done, 'old.json', 8); aged(done, 'edge.json', 6.9); aged(done, 'new.json', 0)
+    expect(pruneDone(h.inbox, Config({ doneMaxAgeDays: 7 }), NOW)).toBe(1)
+    expect(h.done()).toEqual(['edge.json', 'new.json'])
+  })
+
+  it('keeps the doneMaxCount newest read records in .done, and with both bounds removes a record either one names', () => {
+    const h = host()
+    const done = join(h.inbox, '.done')
+    mkdirSync(done)
+    // Named against their age, so the order kept is by modification time, not by name.
+    for (const [index, days] of [1, 2, 3, 4, 5].entries()) aged(done, `${String.fromCharCode(101 - index)}.json`, days)
+    expect(pruneDone(h.inbox, Config({ doneMaxCount: 3 }), NOW)).toBe(2)
+    expect(h.done()).toEqual(['c.json', 'd.json', 'e.json'])
+    // Three are within the count, and one of them is past the age.
+    expect(pruneDone(h.inbox, Config({ doneMaxAgeDays: 2, doneMaxCount: 3 }), NOW)).toBe(1)
+    expect(h.done()).toEqual(['d.json', 'e.json'])
+    expect(pruneDone(h.inbox, Config({ doneMaxCount: 3 }), NOW)).toBe(0)
+  })
+
+  it('removes only *.json files directly in .done: never .bad, the waiting records, other names, folders, links, or what a link points at', () => {
+    const h = host()
+    const done = join(h.inbox, '.done'), bad = join(h.inbox, '.bad'), outside = temp('scheduled-outside-')
+    mkdirSync(done); mkdirSync(bad)
+    aged(done, 'read.json', 30)
+    aged(bad, 'invalid.json', 30); aged(bad, 'invalid.json.error', 30)
+    aged(h.inbox, 'waiting.json', 30)
+    aged(done, 'notes.txt', 30); aged(done, '.hidden.json', 30)
+    mkdirSync(join(done, 'folder.json'))
+    aged(join(done, 'folder.json'), 'nested.json', 30)
+    const target = aged(outside, 'target.json', 30)
+    symlinkSync(target, join(done, 'link.json'))
+    expect(pruneDone(h.inbox, Config({ doneMaxAgeDays: 1, doneMaxCount: 1 }), NOW)).toBe(1)
+    expect(readdirSync(done).sort()).toEqual(['.hidden.json', 'folder.json', 'link.json', 'notes.txt'])
+    expect(readdirSync(join(done, 'folder.json'))).toEqual(['nested.json'])
+    expect(readdirSync(bad).sort()).toEqual(['invalid.json', 'invalid.json.error'])
+    expect(h.waiting()).toEqual(['waiting.json'])
+    expect(readdirSync(outside)).toEqual(['target.json'])
+  })
+
+  it('refuses a negative or fractional bound', () => {
+    expect(() => Config({ doneMaxAgeDays: -1 })).toThrow()
+    expect(() => Config({ doneMaxCount: 1.5 })).toThrow()
+    expect(Config({ doneMaxAgeDays: 30, doneMaxCount: 500 })).toEqual({ inbox: '', doneMaxAgeDays: 30, doneMaxCount: 500 })
+  })
+
+  it('applies the configured retention to .done after each round of the plugin entry', async () => {
+    const h = host({ registered: false })
+    const done = join(h.inbox, '.done')
+    mkdirSync(done)
+    // Read by an earlier floor; the record read now is newer, so a count of one keeps only it.
+    aged(done, 'earlier.json', 1)
+    drop(h.inbox, 'a.json', record(h.work))
+    const stop = mount(h, Config({ doneMaxCount: 1 }))
+    await vi.waitFor(() => { expect(h.done()).toEqual(['a.json']) })
+    await stop()
   })
 })
 
