@@ -1,7 +1,8 @@
 /** Scheduled source kind and Cordis plugin entry: one Trigger per occurrence record a scheduler drops into an inbox directory. */
 import type { Context } from '@deepseek-ai/cordis'
 import s from '@deepseek-ai/schemastery'
-import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs'
+import { access, mkdir, open, readdir, rename, stat, writeFile } from 'node:fs/promises'
 import { basename, extname, join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
 import { z } from 'zod'
@@ -123,36 +124,37 @@ const code = (error: unknown): string | undefined => (error as NodeJS.ErrnoExcep
 const issues = (error: z.ZodError): string =>
   error.issues.map(issue => `${issue.path.length ? `${issue.path.join('.')}: ` : ''}${issue.message}`).join('; ')
 /** Whether `path` is a directory; undefined when stat fails for a reason other than a missing path, which may pass. */
-const directory = (path: string): boolean | undefined => {
-  try { return statSync(path).isDirectory() } catch (error) {
+const directory = async (path: string): Promise<boolean | undefined> => {
+  try { return (await stat(path)).isDirectory() } catch (error) {
     // Missing: not a directory the work can run in. EACCES, EIO or ESTALE may be transient, so the record waits.
     return code(error) === 'ENOENT' || code(error) === 'ENOTDIR' ? false : undefined
   }
 }
 /** Moves `file` into `dir` under its own name; a name already taken there gets a numeric suffix, so nothing is overwritten. */
-function moveInto(file: string, dir: string): string {
+async function moveInto(file: string, dir: string): Promise<string> {
   const name = basename(file), extension = extname(name), stem = name.slice(0, name.length - extension.length)
   for (let attempt = 0; ; attempt++) {
     const target = join(dir, attempt ? `${stem}.${attempt}${extension}` : name)
-    if (!existsSync(target)) { renameSync(file, target); return target }
+    // As existsSync: a name that cannot be reached counts as free.
+    if (!await access(target).then(() => true, () => false)) { await rename(file, target); return target }
   }
 }
 /** Moves an invalid record into `.bad` with a one-line `.error` beside it; false when the producer withdrew the file first. */
-function quarantine(file: string, bad: string, reason: string): boolean {
+async function quarantine(file: string, bad: string, reason: string): Promise<boolean> {
   let target: string
-  try { target = moveInto(file, bad) } catch (error) {
+  try { target = await moveInto(file, bad) } catch (error) {
     if (code(error) === 'ENOENT') return false
     throw error
   }
-  writeFileSync(`${target}.error`, `${reason.replace(/\s*\n\s*/g, ' ')}\n`, { mode: 0o600 })
+  await writeFile(`${target}.error`, `${reason.replace(/\s*\n\s*/g, ' ')}\n`, { mode: 0o600 })
   return true
 }
 /** The valid record a file holds, or the reason it is not one; undefined when the file is gone or cannot be read. */
-function readRecord(file: string, tally: InboxTally): OccurrenceRecord | string | undefined {
+async function readRecord(file: string, tally: InboxTally): Promise<OccurrenceRecord | string | undefined> {
   let text: string, owner: number
   try {
-    const fd = openSync(file, 'r')
-    try { owner = fstatSync(fd).uid; text = readFileSync(fd, 'utf8') } finally { closeSync(fd) }
+    const handle = await open(file, 'r')
+    try { owner = (await handle.stat()).uid; text = await handle.readFile('utf8') } finally { await handle.close() }
   } catch (error) {
     // Withdrawn by its producer between the listing and the read: nothing to do. Any other error leaves it for the next round.
     if (code(error) !== 'ENOENT') tally.unreadable += 1
@@ -165,7 +167,7 @@ function readRecord(file: string, tally: InboxTally): OccurrenceRecord | string 
   try { value = JSON.parse(text) } catch (error) { return `not JSON: ${error instanceof Error ? error.message : String(error)}` }
   const parsed = OccurrenceRecordSchema.safeParse(value)
   if (!parsed.success) return issues(parsed.error)
-  const found = directory(parsed.data.cwd)
+  const found = await directory(parsed.data.cwd)
   if (found === undefined) { tally.unreadable += 1; return undefined }
   return found ? parsed.data : `cwd is not a directory: ${parsed.data.cwd}`
 }
@@ -173,19 +175,20 @@ function readRecord(file: string, tally: InboxTally): OccurrenceRecord | string 
  * Reads every waiting record of `inbox` once, oldest name first, and moves each one it received out of the way. Older
  * schedule records of an item are received first as superseded, and the ones that did not run go into the item's latest
  * record's count. `read` counts the live and manual records received, `superseded` the older ones. A throw from `receive`
- * ends the round and leaves its record, and the ones after it, for the next.
+ * ends the round and leaves its record, and the ones after it, for the next. Every file call is a promise, so a round of many
+ * records does not hold up the Sessions and the web app the process also serves.
  */
 export async function readInbox(ctx: Pick<SourceContext, 'receive' | 'threads' | 'triggers'>, inbox: string, signal?: AbortSignal): Promise<InboxTally> {
   const done = join(inbox, '.done'), bad = join(inbox, '.bad')
-  mkdirSync(done, { recursive: true, mode: 0o700 })
-  mkdirSync(bad, { recursive: true, mode: 0o700 })
+  await mkdir(done, { recursive: true, mode: 0o700 })
+  await mkdir(bad, { recursive: true, mode: 0o700 })
   const tally: InboxTally = { read: 0, superseded: 0, invalid: 0, unreadable: 0 }
   const entries: Entry[] = []
-  for (const name of readdirSync(inbox).filter(name => name.endsWith('.json') && !name.startsWith('.')).sort()) {
+  for (const name of (await readdir(inbox)).filter(name => name.endsWith('.json') && !name.startsWith('.')).sort()) {
     const file = join(inbox, name)
-    const record = readRecord(file, tally)
+    const record = await readRecord(file, tally)
     if (typeof record === 'string') {
-      if (quarantine(file, bad, record)) { tally.invalid += 1; tally.lastInvalid = name }
+      if (await quarantine(file, bad, record)) { tally.invalid += 1; tally.lastInvalid = name }
     } else if (record) entries.push({ name, file, record })
   }
   // Within one item, only the latest due runs; a record with that same due is the same occurrence and answers duplicate.
@@ -209,7 +212,7 @@ export async function readInbox(ctx: Pick<SourceContext, 'receive' | 'threads' |
       ctx.threads.describe(threadKey(trigger.threads[0]!), { label: title(record),
         facts: { due: { label: due, value: String(trigger.meta.due) }, revision: { label: { zh: '版本', en: 'Revision' }, value: record.revision } } })
     }
-    try { moveInto(entry.file, done) } catch (error) {
+    try { await moveInto(entry.file, done) } catch (error) {
       if (code(error) !== 'ENOENT') throw error
       // Withdrawn by its producer after the read; the Trigger is stored all the same.
     }
@@ -282,9 +285,9 @@ function readyDetail(total: Omit<InboxTally, 'unreadable'>, unreadable: number):
  */
 function lockInbox(inbox: string, compromised: (error: Error) => void): () => void {
   mkdirSync(inbox, { recursive: true, mode: 0o700 })
-  const stat = statSync(inbox), uid = process.getuid?.()
-  if ((uid !== undefined && stat.uid !== uid) || stat.mode & 0o022) {
-    throw new Error(`The inbox ${inbox} must be owned by this user and not writable by group or others (mode ${(stat.mode & 0o777).toString(8)}, uid ${stat.uid})`)
+  const info = statSync(inbox), uid = process.getuid?.()
+  if ((uid !== undefined && info.uid !== uid) || info.mode & 0o022) {
+    throw new Error(`The inbox ${inbox} must be owned by this user and not writable by group or others (mode ${(info.mode & 0o777).toString(8)}, uid ${info.uid})`)
   }
   return lockSync(inbox, { stale: LOCK_STALE_MS, onCompromised: compromised })
 }
