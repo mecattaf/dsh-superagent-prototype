@@ -744,10 +744,13 @@ describe('scheduled plugin entry', () => {
     expect(h.receive).not.toHaveBeenCalled()
   })
 
+  // Reads every 20 s, so the lock's refresh, every 15 s, finds it lost while no round is in flight.
+  const SLOW = { sources: { scheduled: { enabled: true, config: { pollSeconds: 20 } } } }
+
   it('reports a lost inbox lock, stops reading, and reads again once it takes the lock back', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
-      const h = host({ registered: false })
+      const h = host({ registered: false, settings: SLOW })
       drop(h.inbox, 'a.json', record(h.work))
       const stop = mount(h)
       await vi.waitFor(() => { expect(h.done()).toEqual(['a.json']) })
@@ -755,7 +758,7 @@ describe('scheduled plugin entry', () => {
       rmSync(`${h.inbox}.lock`, { recursive: true })
       await vi.advanceTimersByTimeAsync(LOCK_STALE_MS / 2)
       await vi.waitFor(() => { expect(h.board.all.scheduled).toMatchObject({ state: 'error', detail: expect.stringContaining('The inbox lock was lost') }) })
-      // Within the stale time it reads nothing, and says why it stopped rather than that the release of the lost lock failed.
+      // Past the next round it would have read, it reads nothing, and says why it stopped rather than that the release of the lost lock failed.
       drop(h.inbox, 'b.json', record(h.work, { item: 'weekly-report' }))
       await vi.advanceTimersByTimeAsync(10_000)
       expect(h.waiting()).toEqual(['b.json'])
@@ -773,15 +776,14 @@ describe('scheduled plugin entry', () => {
 
   it('after a lost lock, reads nothing while another process holds it past lockWaitMs, and reports that as at the start', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    let other: (() => void) | undefined
     try {
-      const h = host({ registered: false })
+      const h = host({ registered: false, settings: SLOW })
       h.deployment.lockWaitMs = 500
       const stop = mount(h)
       await vi.waitFor(() => { expect(h.board.all.scheduled).toMatchObject({ state: 'ready' }) })
-      // Another process removes the lock and takes it for itself; this process finds out at its next refresh.
-      rmSync(`${h.inbox}.lock`, { recursive: true })
-      other = lockSync(h.inbox, { stale: 30_000 })
+      // Another process takes the lock over: the lock directory carries its time, not this process's, which this one finds at its next refresh.
+      const lock = `${h.inbox}.lock`, theirs = new Date(statSync(lock).mtimeMs - 1_000)
+      rmSync(lock, { recursive: true }); mkdirSync(lock); utimesSync(lock, theirs, theirs)
       await vi.advanceTimersByTimeAsync(LOCK_STALE_MS / 2)
       await vi.waitFor(() => { expect(h.board.all.scheduled).toMatchObject({ state: 'error', detail: expect.stringContaining('The inbox lock was lost') }) })
       drop(h.inbox, 'a.json', record(h.work))
@@ -791,12 +793,9 @@ describe('scheduled plugin entry', () => {
       expect(h.waiting()).toEqual(['a.json'])
       expect(h.receive).not.toHaveBeenCalled()
       await stop()
-      // The lock it lost is not released twice: the other process keeps it.
-      expect(existsSync(`${h.inbox}.lock`)).toBe(true)
-    } finally {
-      other?.()
-      vi.useRealTimers()
-    }
+      // This process does not release the lock it lost: the other one keeps it.
+      expect(existsSync(lock)).toBe(true)
+    } finally { vi.useRealTimers() }
   })
 
   it('reports an error and reads nothing from an inbox that group or others can write, or that another user owns', async () => {
