@@ -9,12 +9,14 @@ import { SOURCE } from './workflow-trigger.ts'
 
 export { SOURCE } from './workflow-trigger.ts'
 /**
- * The Source's machine settings. `pollMs` applies without a restart, as the waiting nodes read it at each poll; changing another
- * remounts the plugin, which resumes every run from its journal.
+ * The Source's machine settings. `pollMs` and `offeredWarnSeconds` apply without a restart, as the waiting nodes read them at
+ * each poll; changing another remounts the plugin, which resumes every run from its journal.
  */
 export const Config = s.object({
   pollMs: s.number().min(500).max(60000).step(1).default(2000)
     .description('How often a node that waits reads its ticket, in milliseconds.').volatile(),
+  offeredWarnSeconds: s.number().min(60).max(604800).step(1).default(3600)
+    .description('How long a node may stay offered in one evaluation before the log warns once and the health detail counts it, in seconds; an evaluation whose candidate never reaches the main Session does not expire, and nothing here expires it.').volatile(),
   concurrency: s.number().min(1).max(64).step(1).default(16)
     .description('agent() calls of one run in flight at once; the Executor\'s worker limit still caps the tickets that run.'),
   maxAttempts: s.number().min(1).max(3).step(1).default(1)
