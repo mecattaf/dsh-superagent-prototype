@@ -15,11 +15,11 @@ The workflow Source is the plugin `dsh-superagent-workflow`, inserted disabled b
 
 ## Settings a deployment gives it
 
-The plugin's Config holds machine settings, set on the row `dsh-superagent-workflow` of a profile's `cordis.patch.yml`:
+The plugin's Config holds machine settings, set on the row `dsh-superagent-workflow` of a profile's `cordis.patch.yml`. Changing any key but `pollMs` restarts the plugin, which resumes every run from its journal:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `pollMs` | 2000 | How often a node that waits reads its Ticket |
+| `pollMs` | 2000 | How often a node that waits reads its Ticket; a change applies at the next poll, without a restart |
 | `concurrency` | 16 | `agent()` calls of one run in flight; the Executor's `maxWorkers` still caps the Tickets that run |
 | `maxAttempts` | 1 | Attempts at each call, each a new Trigger; with 1, a failed node or a reply that does not match its schema is `null` |
 | `pair` | empty | The compute pair of a run that names none; empty leaves it to the Executor |
@@ -37,7 +37,7 @@ The kind adds two main-Session tools. They reach the main Session when the plugi
 | Tool | Does |
 | --- | --- |
 | `orchestrator_workflow_start` | Starts `script` in the absolute directory `cwd` with `args` and `pair`. A repeated `trigger_id` with the same script, directory and arguments returns the run it started. It refuses a relative or missing directory, a script it cannot read, and a script whose `meta` is invalid |
-| `orchestrator_workflow_status` | One run, or the newest runs, with each node `waiting`, `offered`, `held`, `ticket`, `done` or `null` |
+| `orchestrator_workflow_status` | One run, or the newest runs, with each node `waiting`, `offered`, `held`, `ticket`, `done` or `null`, and its latest Trigger and its Ticket once it has them. A node a resumed run answered from its journal is `done` or `null` as its journal line says |
 
 ## The window
 
@@ -53,7 +53,8 @@ The main Session assesses node candidates as it assesses any inferred candidate.
 
 ## Results, failures and resume
 
-- A node's result is the summary of its Ticket's `ready` report once the Ticket ended completed; a node with a schema parses it as one JSON value, inside one code fence at most.
+- A node's result is the summary of its Ticket's `ready` report, verbatim, once the Ticket ended completed; a node with a schema parses it as one JSON value, inside one code fence at most.
+- A node has no answer when that summary is no JSON value and the node has a schema, or when the summary only says the unit exited 0, which the dshd Executor reports for a worker that gave no final answer. The interpreter treats no answer as it treats any: it tries the node again while attempts remain, else the node is `null`, with `no structured output` or `no text output` in its journal line.
 - A Ticket that ends otherwise, or whose worker reports `failed` or `blocked`, makes the node `null` with the reason in its journal line. A resumed run answers that line with the same `null`, and never raises the node again.
 - At start, the plugin resumes every run that has not ended. A node with a result or a failure in the journal answers from it. A node whose Trigger the Engine already has waits for that Trigger's Ticket, and one whose Trigger never reached the Engine raises it once.
 - When the plugin stops, every node that waits parks: its run writes nothing more until the next start.

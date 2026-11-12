@@ -182,7 +182,18 @@ Each kind has a health entry under its name. It reports an error once one of its
 
 ### Sources
 
-Sources extend the host through `SourceKind`, defined in `src/sources/kind.ts`. A kind declares its identity, title, description, configuration `schema` and `fields`, derived `facts`, and `health` entries. Optional behavior includes `scope`, a `channel` (`allowed`, `send`, `link`), `threadContext`, `find`, `policy`, `environment` and `refreshLabels`.
+Sources extend the host through `SourceKind`, defined in `src/sources/kind.ts`. A kind declares its identity, title, description, configuration `schema` and `fields`, derived `facts`, and `health` entries. Optional behavior includes `scope`, a `channel` (`allowed`, `send`, `link`), `threadContext`, `find`, `policy`, `environment`, `refreshLabels` and `tools`.
+
+`tools` is this fork's one addition to upstream's Source protocol: main-Session tools that a kind adds while it is registered, each typed with `sourceTool` and named `orchestrator_<kind>_…`. It exists because the main Session receives tools only from `mainTools` when it is decorated, and then restricts what it inherits, while a Source plugin registers its kind only once dsh-superagent is ready, after that decoration. The hook is four small changes and nothing else in the fork's diff of upstream code:
+
+| File | Change |
+| --- | --- |
+| `src/sources/kind.ts` | `SourceKind.tools`, the `SourceTool` shape and the `sourceTool` helper |
+| `src/sources/registry.ts` | `register` refuses a tool whose name does not start with `orchestrator_<kind>_` |
+| `src/app/runtime.ts` | the registry's registration callback hands a kind's tools to `Sessions.addMainTools` and returns its release |
+| `src/app/sessions.ts` | `addMainTools` registers them on the main Session at once when it is decorated, else when it is, and releases them when the kind unregisters or the Session goes |
+
+The prefix keeps a kind's tools apart from the host's and each other's, and inside the `orchestrator_` names that bridges to other agent runtimes pass. The workflow Source is the one kind that uses it.
 
 `SourceRegistry` (`registry.ts`) owns registered kinds and stored instances, and implements the Engine's `SourceScope`. Registration claims health entries on `HealthBoard`; duplicate claims and reserved `sync:` names are refused. A SourceContext writes only through its registration's claimed entries, so reports after unregistration do nothing.
 
@@ -238,7 +249,7 @@ Validation inherits an omitted base from the saved override, drops removed parts
 
 Each model request binds the Session to the current prompt revision. The revisions it used are stored durably: `promptVersion` identifies the active one and `mayRead` restricts which versions a worker can inspect. Registrations are tracked in one map per agent.
 
-`status` and `promptVersion` serve prompt pages. Saves go through `Prompts.save` and notify the main Session. `modelRetry` exposes model-budget retry state.
+`status` and `promptVersion` serve prompt pages. Saves go through `Prompts.save` and notify the main Session. `modelRetry` exposes model-budget retry state. `addMainTools` gives the main Session the tools of a registered Source kind, as described under Sources.
 
 ### Glue
 
@@ -358,7 +369,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/infra/paths.ts` | The package's root, where packaged files are |
 | `src/infra/text.ts` | Word counts and the chat message limit, `fill` and `sameName` |
 | `src/infra/health.ts` | The `HealthBoard`, every part's health entry, each claimed by its one writer |
-| `src/sources/kind.ts` | The `SourceKind` protocol |
+| `src/sources/kind.ts` | The `SourceKind` protocol, with `tools`, the fork's one addition to it |
 | `src/sources/registry.ts` | `SourceRegistry` |
 | `src/sources/host.ts` | `SourceHost`, `SourceContext`, `Health`, `health` and the fixed health texts |
 | `src/sources/poll.ts` | What GitHub and Feishu polling share: `POLL_HORIZON_MS`, `polled`, `cursorAt`, and `pollThreads`, which keeps a failure on its Thread as `pollError` |
@@ -377,7 +388,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/workflow.ts` | The workflow kind and plugin entry, exported as `./workflow`: its Config, and the effect that registers the kind and starts and stops the runs |
 | `src/sources/workflow-trigger.ts` | A workflow node as a Trigger: one per attempt of each `agent()` call, on the node's own Thread, its text the prompt and the schema instruction |
 | `src/sources/workflow-store.ts` | A run's records in the kv area, and `KvJournal`, its journal one line per record |
-| `src/sources/workflow-backend.ts` | `TicketBackend`, the interpreter's Backend that raises a node's Trigger and answers with its Ticket's result; `TicketWaiter`, `settle` and `parseJsonReply` |
+| `src/sources/workflow-backend.ts` | `TicketBackend`, the interpreter's Backend that raises a node's Trigger and answers with its Ticket's result; `TicketWaiter`, `settle`, `parseJsonReply`, and `NO_ANSWER`, the summary of a unit that gave no final answer |
 | `src/sources/workflow-floor.ts` | `WorkflowFloor`: starting a run, driving and resuming it from its journal, its status node by node, and `pinnedResolver` for `workflow()` |
 | `src/sources/workflow-tools.ts` | The main Session's `orchestrator_workflow_start` and `orchestrator_workflow_status` |
 | `src/workflow/README.md` | Where `src/workflow` comes from: Substrate's interpreter at a fixed commit, vendored unchanged, every deviation with its reason, and the contract it keeps |
@@ -530,6 +541,8 @@ The main Session has 14 application tools:
 Settings saves select `policy`, `eval`, `executor`, `pause`, or `source`; the last also names its Source id. A prompt save with `preview: true` composes text without saving.
 
 The main Session also has DeepSeek Harness's `skill`, `bash`, `read`, `read_image`, `job_output`, `job_list` and `job_kill`. Avoiding code reads is a prompt rule, not a tool restriction.
+
+Beside these, the main Session has the tools of each registered Source kind that declares `tools`; the workflow Source adds `orchestrator_workflow_start` and `orchestrator_workflow_status`.
 
 ### Presets and wait limits
 
