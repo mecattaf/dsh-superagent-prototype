@@ -128,12 +128,12 @@ export class Runtime extends Service implements SourceHost {
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
-      this.executor = machine.executor === 'dshd'
-        ? new DshdExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine, masterId,
-          lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment: () => setup.hostEnvironment })
-        : new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
-          lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
-          repliedTo: trigger => repliedTo({ store, sources }, trigger) })
+      const dshd = machine.executor === 'dshd' && new DshdExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects,
+        health: board.claim('worker'), machine, masterId, lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(),
+        environment: () => setup.hostEnvironment })
+      this.executor = dshd || new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
+        lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
+        repliedTo: trigger => repliedTo({ store, sources }, trigger) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })

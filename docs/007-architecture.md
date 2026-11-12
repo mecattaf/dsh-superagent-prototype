@@ -380,6 +380,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/views/overview.ts` | The overview: Tickets that need a person, problems, the last day's flow and the Executor's load |
 | `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
 | `src/executor/port.ts` | `ExecutorPort`, what Runtime uses of its Executor, picked from `DshExecutor` |
+| `src/executor/dshd-config.ts` | The `dshd` block of the entry's Config: `DshdSchema`, `DshdConfig`, `DshdPair`, and `dshdOf`, the checks `machineOf` makes of it |
 | `src/executor/dshd.ts` | The DshdExecutor, one dshd headless unit per Assignment: `DshdBinding`, `unitName`, `composeBrief`, `verdictOf`, `eventsOf`, and `usageOf` with `addUsage`, which the workflow Source also uses to sum a node's usage |
 | `src/executor/dshd-cli.ts` | `DshdCli`, the dshd client over DSH's subprocess service, and the `DshdPort` it implements |
 | `src/executor/dshd-summary.ts` | `noAnswerSummary` and `isNoAnswer`: the summary of a unit that exited 0 without a final answer, which the DshdExecutor writes and the workflow Source reads as no result |
