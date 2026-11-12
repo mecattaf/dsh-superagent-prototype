@@ -18,6 +18,7 @@ import { WorktreeNameSchema } from '../app/assessment.ts'
 import { resultRelay } from '../app/notices.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { cancelled, collectJob, killJobs, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
+import type { WorkerEnvironment } from './port.ts'
 
 const now = (): string => new Date().toISOString()
 /** Returns the worker session ID (`worker-<ticketId>`) for a ticket. */
@@ -205,6 +206,9 @@ export class WorkerSlots {
  * Runtime, Engine, worker tools, and management routes use this class to prepare, launch, deliver to, stop, and resume ticket assignments.
  */
 export class DshExecutor implements Executor {
+  /** Workers act as the configured GitHub account through the `gh` shim, so Setup resolves one even without a repository. */
+  readonly needsAccount: boolean = true
+  readonly workerEnvironment: WorkerEnvironment = 'process'
   private readonly disposers: (() => void)[] = []
   private readonly slots: WorkerSlots
   /** Transient failure counts tried so far: keyed by `assignment.id` for worker turns and `launch:<assignment.id>` for launches. */

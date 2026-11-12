@@ -5,11 +5,14 @@ import { GithubAccountsSchema, SETUP_FIELDS, resolveDeployment, resolveFeishuBot
 import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
 import type { Settings, SettingsBlock } from '../policy.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
+import type { ExecutorPort } from '../executor/port.ts'
 
 export interface SetupHost {
   readonly context: Context
   readonly machine: Machine
   readonly lifetime: AbortSignal
+  /** The Executor, read when setup runs; whether it needs an account without a repository is its own fact. */
+  readonly executor: Pick<ExecutorPort, 'needsAccount'>
   restart(): void
 }
 
@@ -30,12 +33,19 @@ export class Setup {
   /** Environment variables pointing agent subprocesses at the isolated git config and command shims. */
   private readonly variables: Record<string, string | undefined>
   private restoreEnvironment?: () => void
+  /** The values the applied variables had before `applyEnvironment` set them; empty while none are applied. */
+  private before: Record<string, string | undefined> = {}
   constructor(private readonly host: SetupHost) {
     this.path = withoutDirectory(process.env.PATH ?? '', workerBin(host.machine.stateDir))
     this.variables = agentVariables(host.machine.stateDir)
   }
   /** Host command environment with agent git variables applied and the worker shim directory excluded from PATH. */
   get commandEnvironment(): Record<string, string | undefined> { return { ...this.variables, PATH: this.path } }
+  /** This process's environment without Setup's changes: no worker shim directory on PATH and no agent git variables, for a child that must not inherit them. */
+  get hostEnvironment(): NodeJS.ProcessEnv {
+    const path = process.env.PATH
+    return { ...process.env, ...this.before, ...(path === undefined ? {} : { PATH: withoutDirectory(path, workerBin(this.host.machine.stateDir)) }) }
+  }
   get deployment(): Deployment {
     if (!this.resolved) throw new Error(`dsh-superagent is waiting for setup: ${this.problem?.detail ?? 'setup has not run'}`)
     return this.resolved
@@ -67,14 +77,14 @@ export class Setup {
   async blockCommands(blocked: readonly string[]): Promise<void> {
     if (this.resolved) await writeEnvironment(this.resolved, blocked)
   }
-  restore(): void { this.restoreEnvironment?.(); this.restoreEnvironment = undefined }
+  restore(): void { this.restoreEnvironment?.(); this.restoreEnvironment = undefined; this.before = {} }
   /** Probes CLIs the way worker shells run them, using `stateDir` as `cwd` since it exists even before the repository clone is valid. */
   private probe() {
     const { context, machine, lifetime } = this.host
     return workerProbe(context.subprocess, machine.stateDir, machine.stateDir, lifetime)
   }
   private async resolve(settings: Settings): Promise<Deployment> {
-    if (this.host.machine.executor === 'dshd' && !GithubAccountsSchema.parse(settings.sources.github?.config ?? {}).repository) return accountless(this.host.machine)
+    if (!this.host.executor.needsAccount && !GithubAccountsSchema.parse(settings.sources.github?.config ?? {}).repository) return accountless(this.host.machine)
     const { context, machine, lifetime } = this.host
     const probe = this.probe()
     const deployment = await resolveDeployment(machine, settings.sources.github?.config, probe)
@@ -90,6 +100,7 @@ export class Setup {
       throw new SetupError('environmentFailed', { output: error instanceof Error ? error.message : String(error) })
     }
     await writeEnvironment(resolved, settings.executor.blockedCommands).catch(machineProblem)
+    this.before = Object.fromEntries(Object.keys(this.variables).map(name => [name, process.env[name]]))
     this.restoreEnvironment = applyEnvironment(this.variables, machine.stateDir, this.path)
     await verifyEnvironment(resolved, context.subprocess, lifetime).catch((error: unknown) => {
       this.restore()
@@ -98,5 +109,5 @@ export class Setup {
     return resolved
   }
 }
-/** A dshd floor with no repository: no account probe, no worker shims or git environment; dshd workers do not inherit this process's environment. */
+/** An Executor that needs no account, with no repository: no account probe, no worker shims or git environment, since its workers do not inherit this process's environment. */
 export function accountless(machine: Machine): Deployment { return { ...machine, repository: '', github: { cli: '', login: '', noreply: '' } } }

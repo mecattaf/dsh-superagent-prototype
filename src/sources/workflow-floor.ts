@@ -26,7 +26,7 @@ export interface NodeStatus { node: string; label?: string; phase?: string; trig
 export interface RunStatus {
   run_id: string; name: string; state: WorkflowRun['state']; cwd: string; started_at: string; ended_at?: string; error?: string; nodes: NodeStatus[]
 }
-/** At most this many runs, the newest, answer a status request that names none. */
+/** At most this many runs, the newest, answer a status request that names none; fixed, as it only bounds one answer and `run_id` reaches any older run. */
 const STATUS_RUNS = 20
 
 const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex')

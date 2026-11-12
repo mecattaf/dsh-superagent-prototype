@@ -1,12 +1,13 @@
 /** The dshd executor on the simulated DSH host, with its real Store, Engine and Effects and an in-memory dshd. */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { latestAssignment, runningAssignment, waitsForPerson, type Ticket, type Trigger } from '../src/core/index.ts'
 import { BINDING, DshdExecutor, verdictOf } from '../src/executor/dshd.ts'
 import { DshExecutor } from '../src/executor/dsh.ts'
 import type { DshdConfig } from '../src/deployment.ts'
+import { workerBin } from '../src/infra/environment.ts'
 import { testDshd } from './fixtures/deployment.ts'
 import { FakeDshd, runLines } from './fixtures/fake-dshd.ts'
 import { deferred, waitUntil } from './fixtures/async.ts'
@@ -94,6 +95,15 @@ describe('launch and recipe', () => {
       pairs: { ...PAIRS, local: { ...PAIRS.local, env: { CONFIG_DIR: '/srv/local-config', LOCAL_MODEL_KEY: 'none' } } } })
     await accepted(request('1', { cwd: directory(), pair: 'local' }))
     expect(fake.runs[0]!.env).toEqual({ HOME: '/srv/home', CONFIG_DIR: '/srv/local-config', LOCAL_MODEL_KEY: 'none' })
+  })
+  it('gives a unit this process\'s PATH without the worker shims Setup put on it', async () => {
+    await start({ passEnv: ['PATH'] })
+    // The fixture deployment names a repository, so Setup ran the in-process path and put its shim directory on PATH.
+    expect(process.env.PATH!.split(delimiter)).toContain(workerBin(h!.directory))
+    await accepted(request('1', { cwd: directory() }))
+    expect(fake.runs[0]!.env.PATH).toBeDefined()
+    expect(fake.runs[0]!.env.PATH!.split(delimiter)).not.toContain(workerBin(h!.directory))
+    expect(h!.runtime.executor).toMatchObject({ needsAccount: false, workerEnvironment: 'own' })
   })
   it('runs the pair the Trigger names, else the default pair, and labels the unit with it, keeping only superagent labels of the Trigger', async () => {
     await start()

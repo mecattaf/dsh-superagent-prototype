@@ -11,8 +11,17 @@ import { SetupError } from './setup.ts'
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
 const absolute = (description: string) => s.string().pattern(/^\//).description(`${description} Absolute path.`)
-// A typed `s.dict` makes the `Config` type unnameable for declaration emit (it needs cosmokit's `Dict`), so the dshd maps are
-// `s.any()` here and `machineOf` validates them.
+// An unannotated `s.dict` makes the `Config` type unnameable for declaration emit (it needs cosmokit's `Dict`), so the two dshd maps
+// are annotated with `Record` types. Schemastery declares their shape, for the settings page and `--dump-config`; `machineOf`
+// still checks them with zod, which also refuses unknown pair keys and names the profile rule.
+type PairInput = { profile?: string | null; env?: Record<string, string> | null; maxWorkers?: number | null }
+type PairOutput = { profile: string; env: Record<string, string>; maxWorkers?: number }
+const DshdPairs: s<Record<string, PairInput>, Record<string, PairOutput>> = s.dict(s.object({
+  profile: s.string().required().description('DSH profile the worker boots: a headless profile under the DSH home.'),
+  env: s.dict(s.string()).default({}).description('Environment added for this pair\'s units.'),
+  maxWorkers: s.number().min(1).max(LIMITS.maxWorkers.max).step(1).description('At most this many units of this pair at once; unset: only the overall limit.'),
+}))
+const DshdEnv: s<Record<string, string>> = s.dict(s.string())
 const DshdPairSchema = z.object({
   /** DSH profile the worker boots: a headless profile under the DSH home. */
   profile: z.string().regex(/^[A-Za-z0-9._-]+$/, 'a DSH profile name'),
@@ -38,10 +47,10 @@ export const Config = s.object({
   dshd: s.object({
     command: s.string().default('dshd').description('The dshd CLI: a command name on PATH or an absolute path.'),
     prefix: s.string().pattern(/^[a-z][a-z0-9]{0,9}$/).default('sa').description('First part of every unit name.'),
-    pairs: s.any().default({}).description('Provider-harness pairs by name, each `{profile, env, maxWorkers}`: the headless profile its workers boot, the environment added for its units and its own limit.'),
+    pairs: DshdPairs.default({}).description('Provider-harness pairs by name, each `{profile, env, maxWorkers}`: the headless profile its workers boot, the environment added for its units and its own limit.'),
     defaultPair: s.string().default('').description('The pair a Ticket runs on when its Trigger names none.'),
     cwd: s.string().default('').description('Directory of a Ticket whose Trigger names none. Absolute path; empty: a directory under the Execution directory.'),
-    env: s.any().default({}).description('Environment added for every unit, by name. Values are recorded in the unit recipe: no secrets.'),
+    env: DshdEnv.default({}).description('Environment added for every unit, by name. Values are recorded in the unit recipe: no secrets.'),
     passEnv: s.array(s.string()).default(['HOME', 'USER', 'LOGNAME', 'LANG', 'LOCALE_ARCHIVE', 'TZDIR', 'PATH', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', 'DSH_HOME'])
       .description('Names copied from this process\'s environment into every unit; LOCALE_ARCHIVE and TZDIR are where a NixOS host keeps locales and time zones.'),
     args: s.array(s.string()).default(['--approval-policy', 'never']).description('dsh headless options placed before --json and the task.'),
