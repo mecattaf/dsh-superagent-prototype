@@ -46,14 +46,15 @@ export function ticketOf(source: Tickets, trigger: string, thread: string): Tick
 }
 
 /**
- * Waits for the Tickets of nodes: one timer, every `pollMs`, reads each waiting node's Thread and its Ticket until it settles.
- * Once stopped, what still waits never settles, so a run parked at stop writes nothing more and resumes from its journal.
+ * Waits for the Tickets of nodes: one timer, every `pollMs` as it reads at each poll, reads each waiting node's Thread and its
+ * Ticket until it settles. Once stopped, what still waits never settles, so a run parked at stop writes nothing more and resumes
+ * from its journal.
  */
 export class TicketWaiter {
   private readonly waiting = new Map<string, { thread: string; structured: boolean; settled: (outcome: AgentOutcome) => void }>()
   private timer: ReturnType<typeof setTimeout> | undefined
   private stopped = false
-  constructor(private readonly source: Tickets, private readonly pollMs: number) {}
+  constructor(private readonly source: Tickets, private readonly pollMs: () => number) {}
   settled(trigger: string, thread: string, structured: boolean): Promise<AgentOutcome> {
     const now = settle(ticketOf(this.source, trigger, thread), structured)
     if (now) return Promise.resolve(now)
@@ -68,7 +69,7 @@ export class TicketWaiter {
   stop(): void { this.stopped = true; clearTimeout(this.timer); this.timer = undefined; this.waiting.clear() }
   private arm(): void {
     if (this.timer || this.stopped || !this.waiting.size) return
-    this.timer = setTimeout(() => { this.timer = undefined; this.poll() }, this.pollMs)
+    this.timer = setTimeout(() => { this.timer = undefined; this.poll() }, this.pollMs())
   }
   private poll(): void {
     for (const [trigger, { thread, structured, settled }] of [...this.waiting]) {

@@ -1,4 +1,5 @@
 /** Starts, drives, resumes and reports workflow runs: each run is the interpreter over its pinned script and a `TicketBackend`. */
+import type { Volatile } from '@deepseek-ai/cordis'
 import { createHash, randomBytes } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
@@ -10,8 +11,8 @@ import { retriedOnResume, TicketBackend, ticketOf, TicketWaiter } from './workfl
 import { KvJournal, type WorkflowRun, type WorkflowState } from './workflow-store.ts'
 import { nodeThread, nodeTriggerId, SOURCE } from './workflow-trigger.ts'
 
-/** The workflow Source's machine settings, as the plugin's Config declares them. */
-export interface FloorConfig { pollMs: number; concurrency: number; maxAttempts: number; pair: string }
+/** The workflow Source's machine settings, as the plugin's Config declares them; `pollMs` is read at each use. */
+export interface FloorConfig { pollMs: Volatile<number>; concurrency: number; maxAttempts: number; pair: string }
 export interface StartRequest { script: string; cwd: string; args?: unknown; pair?: string; trigger_id?: string }
 export interface StartResult { run_id: string; state: 'started' | 'already-started'; script_sha256: string; name: string }
 /**
@@ -82,7 +83,7 @@ export class WorkflowFloor {
   /** Waits for setup, then resumes every run that had not ended; it resolves once they are under way, not once they end. */
   async start(): Promise<void> {
     const source = this.source = sourceContext(this.host, { kind: SOURCE, health: [SOURCE] })
-    this.waiter = new TicketWaiter(source, this.config.pollMs)
+    this.waiter = new TicketWaiter(source, () => this.config.pollMs.get())
     // A stop while setup is still running ends the start at once, so the plugin's disposal never waits for setup.
     const stopped = new Promise<void>(resolve => { this.stopped.signal.addEventListener('abort', () => { resolve() }, { once: true }) })
     await Promise.race([source.ready, stopped])

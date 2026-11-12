@@ -8,10 +8,13 @@ import { workflowTools } from './workflow-tools.ts'
 import { SOURCE } from './workflow-trigger.ts'
 
 export { SOURCE } from './workflow-trigger.ts'
-/** The Source's machine settings. Changing one remounts the plugin, which resumes every run from its journal. */
+/**
+ * The Source's machine settings. `pollMs` applies without a restart, as the waiting nodes read it at each poll; changing another
+ * remounts the plugin, which resumes every run from its journal.
+ */
 export const Config = s.object({
   pollMs: s.number().min(500).max(60000).step(1).default(2000)
-    .description('How often a node that waits reads its ticket, in milliseconds.'),
+    .description('How often a node that waits reads its ticket, in milliseconds.').volatile(),
   concurrency: s.number().min(1).max(64).step(1).default(16)
     .description('agent() calls of one run in flight at once; the Executor\'s worker limit still caps the tickets that run.'),
   maxAttempts: s.number().min(1).max(3).step(1).default(1)

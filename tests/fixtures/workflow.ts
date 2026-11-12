@@ -60,7 +60,7 @@ export function workflowHost(directory: string, options: { slots?: number; confi
   const deps: SourceContextDeps = { store, engine, outbox: { send: () => {} }, commands: new Commands(() => testDeployment(), {}, new AbortController().signal),
     sources, deployment: testDeployment(), ready: Promise.resolve(), configured: () => true, receive }
   const host = { sources, context: (kind: { kind: string; health: readonly string[] }) => sourceContextOf(deps, kind) }
-  const floor = new WorkflowFloor(host, { pollMs: 5, concurrency: 16, maxAttempts: 1, pair: '', ...options.config })
+  const floor = new WorkflowFloor(host, { pollMs: { get: () => 5 }, concurrency: 16, maxAttempts: 1, pair: '', ...options.config })
   const unregister = sources.register(workflowKind(floor))
   const started = floor.start()
 

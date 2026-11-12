@@ -9,6 +9,7 @@ import { HealthBoard } from '../src/infra/health.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import * as workflowPlugin from '../src/sources/workflow.ts'
+import { TicketWaiter } from '../src/sources/workflow-backend.ts'
 import { WorkflowFloor } from '../src/sources/workflow-floor.ts'
 import { FIXTURE, newDirectory, workflowHost, type WorkflowHost } from './fixtures/workflow.ts'
 
@@ -25,6 +26,8 @@ function start(directory = newDirectory()) {
   hosts.push(host)
   return { h: host, directory }
 }
+/** Simulate the Cordis loader updating a volatile configuration reference in place. */
+const commit = (reference: unknown, value: unknown) => { (reference as Record<symbol, (value: unknown) => void>)[Symbol.for('cosmokit.volatile.write')]!(value) }
 const script = (name: string, body: string) => `export const meta = { name: '${name}', description: 'A test script' }\n${body}\n`
 
 describe('orchestrator_workflow_start', () => {
@@ -112,5 +115,20 @@ describe('the plugin entry', () => {
     expect(sources.kind('workflow')).toBeUndefined()
     start.mockRestore()
     store.close()
+  })
+  it('reads pollMs at each poll, so a value committed in place applies without a remount', () => {
+    vi.useFakeTimers()
+    const timers = vi.spyOn(globalThis, 'setTimeout')
+    try {
+      const config = workflowPlugin.Config({ pollMs: 500 })
+      const nothing = { threads: { get: () => undefined }, tickets: { get: () => undefined } }
+      const waiter = new TicketWaiter(nothing as never, () => config.pollMs.get())
+      void waiter.settled('wf:run:node-a1', 'workflow:run:node', false)
+      expect(timers.mock.calls.at(-1)?.[1]).toBe(500)
+      commit(config.pollMs, 1000)
+      vi.advanceTimersByTime(500)
+      expect(timers.mock.calls.at(-1)?.[1]).toBe(1000)
+      waiter.stop()
+    } finally { timers.mockRestore(); vi.useRealTimers() }
   })
 })
