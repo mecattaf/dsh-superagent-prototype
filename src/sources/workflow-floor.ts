@@ -2,11 +2,11 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import { key, type Thread, type Ticket } from '../core/index.ts'
+import { key, threadKey, type Thread, type Ticket } from '../core/index.ts'
 import { KV } from '../kv.ts'
 import { extractMeta, runWorkflow, type LoadedJournal, type RunResult, type WorkflowSource } from '../workflow/index.ts'
 import { health, sourceContext, type SourceContext, type SourceHost } from './host.ts'
-import { retriedOnResume, TicketBackend, TicketWaiter } from './workflow-backend.ts'
+import { retriedOnResume, TicketBackend, ticketOf, TicketWaiter } from './workflow-backend.ts'
 import { KvJournal, type WorkflowRun, type WorkflowState } from './workflow-store.ts'
 import { nodeThread, nodeTriggerId, SOURCE } from './workflow-trigger.ts'
 
@@ -17,6 +17,8 @@ export interface StartResult { run_id: string; state: 'started' | 'already-start
 /**
  * Where a node is: `waiting` before its Trigger exists, `offered` while it waits for or is in an Eval, `held` once an Eval
  * decided it without a Ticket, `ticket` while its Ticket works, and `done` or `null` once its result or failure is journaled.
+ * A node answered from the journal on a resume is `done` or `null` as its line says. Its latest Trigger and its Ticket, when
+ * the Store has them, come with every state but `waiting`.
  */
 export type NodeState = 'waiting' | 'offered' | 'held' | 'ticket' | 'done' | 'null'
 export interface NodeStatus { node: string; label?: string; phase?: string; trigger_id?: string; ticket_id?: string; state: NodeState }
@@ -53,11 +55,11 @@ export function pinnedResolver(store: WorkflowState, run: Pick<WorkflowRun, 'id'
   }
 }
 
-/** A node's Thread and the Trigger id of its latest attempt, or undefined before its first. */
-function latestAttempt(source: Pick<SourceContext, 'threads' | 'triggers'>, run: string, node: string, attempts: number) {
+/** A node's Thread key and the Trigger id of its latest attempt, or undefined before its first. */
+function latestAttempt(source: Pick<SourceContext, 'triggers'>, run: string, node: string, attempts: number) {
   for (let attempt = attempts; attempt >= 1; attempt--) {
     const trigger = nodeTriggerId(run, node, attempt)
-    if (source.triggers.get(trigger)) return { trigger, thread: source.threads.get(`${SOURCE}:${nodeThread(run, node)}`) }
+    if (source.triggers.get(trigger)) return { trigger, thread: threadKey({ source: SOURCE, id: nodeThread(run, node) }) }
   }
   return undefined
 }
@@ -183,12 +185,13 @@ export class WorkflowFloor {
       if (!match) return []
       const node = `${match[1]!}-o${match[2]!}`
       const head = { node, ...started.label !== undefined && { label: started.label }, ...started.phase !== undefined && { phase: started.phase } }
-      if (journal.results.has(started.key)) return [{ ...head, state: 'done' }]
-      if (journal.lastFailed.has(started.key)) return [{ ...head, state: 'null' }]
       const latest = latestAttempt(source, run.id, node, this.config.maxAttempts)
+      const ticket = latest && ticketOf(source, latest.trigger, latest.thread)
+      const traced = { ...head, ...latest && { trigger_id: latest.trigger }, ...ticket && { ticket_id: ticket.id } }
+      if (journal.results.has(started.key)) return [{ ...traced, state: 'done' }]
+      if (journal.lastFailed.has(started.key)) return [{ ...traced, state: 'null' }]
       if (!latest) return [{ ...head, state: 'waiting' }]
-      const ticket = latest.thread?.subscriptions.map(id => source.tickets.get(id)).find(item => item?.origin.triggerIds.includes(latest.trigger))
-      return [{ ...head, trigger_id: latest.trigger, ...ticket && { ticket_id: ticket.id }, state: nodeState(latest.thread, latest.trigger, ticket) }]
+      return [{ ...traced, state: nodeState(source.threads.get(latest.thread), latest.trigger, ticket) }]
     })
     return { run_id: run.id, name: run.name, state: run.state, cwd: run.cwd, started_at: run.startedAt,
       ...run.endedAt !== undefined && { ended_at: run.endedAt }, ...run.error !== undefined && { error: run.error }, nodes }

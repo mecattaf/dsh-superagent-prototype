@@ -16,14 +16,22 @@ export function parseJsonReply(text: string): { object?: unknown; text?: string 
   try { return { object: JSON.parse(stripFence(text)) } } catch { return { text } }
 }
 /**
- * What a node's Ticket answers once it settled, or undefined while it has not: the summary of its `ready` report once it ended
- * completed, or a failure once it ended otherwise or its worker reported failed or blocked.
+ * The whole summary of a completed Ticket whose worker gave no final answer, as the dshd Executor words it for a unit that
+ * exited 0 without one. It is not a result: the node has no answer.
+ */
+export const NO_ANSWER = /^Unit [a-z0-9][a-z0-9_-]* exited 0\.$/
+/**
+ * What a node's Ticket answers once it settled, or undefined while it has not: the summary of its `ready` report, verbatim,
+ * once it ended completed; no answer when that summary only says the unit exited 0, which the interpreter, as for any empty
+ * answer, tries again while attempts remain and otherwise journals as the node's null; or a failure once the Ticket ended
+ * otherwise or its worker reported failed or blocked.
  */
 export function settle(ticket: Ticket | undefined, structured: boolean): AgentOutcome | undefined {
   if (!ticket) return undefined
   const report = latestAssignment(ticket)?.report
   const outcome = ticket.ended?.outcome
   if (outcome === 'completed' && report?.state === 'ready') {
+    if (NO_ANSWER.test(report.summary)) return { agentId: ticket.id }
     return { ...structured ? parseJsonReply(report.summary) : { text: report.summary }, agentId: ticket.id }
   }
   const state = outcome ?? (report?.state === 'failed' || report?.state === 'blocked' ? report.state : undefined)
@@ -32,7 +40,7 @@ export function settle(ticket: Ticket | undefined, structured: boolean): AgentOu
 }
 type Tickets = Pick<SourceContext, 'threads' | 'tickets'>
 /** The Ticket accepted from `trigger`, which subscribes to the Trigger's Thread. */
-function ticketOf(source: Tickets, trigger: string, thread: string): Ticket | undefined {
+export function ticketOf(source: Tickets, trigger: string, thread: string): Ticket | undefined {
   const subscribed = source.threads.get(thread)?.subscriptions ?? []
   return subscribed.map(id => source.tickets.get(id)).find(ticket => ticket?.origin.triggerIds.includes(trigger))
 }
