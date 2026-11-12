@@ -308,6 +308,30 @@ describe('the plugin entry', () => {
       waiter.stop()
     } finally { timers.mockRestore(); vi.useRealTimers() }
   })
+  it('tells observed that a held node left that state when its Ticket ends between two polls, so the health counts it no more', async () => {
+    vi.useFakeTimers()
+    try {
+      const trigger = 'wf:run:node-a1', thread = 'workflow:run:node'
+      const decision = { id: 'd1', kind: 'ignore', reason: [{ code: 'x' }], at: '2026-11-12T01:00:00.000Z' }
+      const source = { threads: { get: () => ({ pending: [], subscriptions: [] }) }, tickets: { get: () => undefined, open: () => [] },
+        state: { get: () => undefined, set: () => {} }, triggers: { decision: () => decision } }
+      const observed = vi.fn()
+      const waiter = new TicketWaiter(source as never, () => 5, observed)
+      const answer = waiter.settled(trigger, thread, false)
+      vi.advanceTimersByTime(5)
+      expect(observed).toHaveBeenLastCalledWith({ trigger, state: 'held', decision })
+      expect(waiter.count('held')).toBe(1)
+      // A requeue, an accept and the Ticket's end all came before the next poll, which would have seen the Ticket.
+      const ticket = { id: 't1', origin: { triggerId: trigger, triggerIds: [trigger] }, ended: { outcome: 'completed' },
+        assignments: [{ report: { state: 'ready', summary: 'DONE' } }] }
+      waiter.ended(ticket as never)
+      expect(await answer).toEqual({ text: 'DONE', agentId: 't1' })
+      expect(observed).toHaveBeenCalledTimes(2)
+      expect(observed).toHaveBeenLastCalledWith({ trigger })
+      expect(waiter.count('held')).toBe(0)
+      waiter.stop()
+    } finally { vi.useRealTimers() }
+  })
   it('refuses configuration keys it does not use before registering anything, so a misspelt key never runs on the default', () => {
     const start = vi.spyOn(WorkflowFloor.prototype, 'start')
     const ctx = new Context()

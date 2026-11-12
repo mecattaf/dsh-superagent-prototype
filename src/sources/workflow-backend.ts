@@ -103,13 +103,20 @@ export class TicketWaiter {
       this.arm()
     })
   }
-  /** Settles each node that waits for `ticket`, the Ticket accepted from its Trigger, which has just ended. */
+  /**
+   * Settles each node that waits for `ticket`, the Ticket accepted from its Trigger, which has just ended. A node the latest poll
+   * found held, unavailable or offered too long is told as leaving that state, as a poll would have told it.
+   */
   ended(ticket: Ticket): void {
-    for (const [trigger, { structured, settled }] of [...this.waiting]) {
+    const left: Waited[] = []
+    for (const [trigger, item] of [...this.waiting]) {
       if (!ticket.origin.triggerIds.includes(trigger)) continue
-      const outcome = settle(ticket, structured)
-      if (outcome) { this.waiting.delete(trigger); settled(outcome) }
+      const outcome = settle(ticket, item.structured)
+      if (!outcome) continue
+      this.waiting.delete(trigger); item.settled(outcome)
+      if (item.state) left.push({ trigger })
     }
+    for (const node of left) this.observed(node)
   }
   /** How many nodes wait. */
   get size(): number { return this.waiting.size }
