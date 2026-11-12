@@ -78,6 +78,16 @@ const SLEEP = /(?:^|[;&|({!`\n]|\b(?:do|then|else|elif|if|while|until|time|exec|
  * a command 60 seconds and a job wait lasts 30 seconds by default, so a command needs a timeout or the background, and a
  * job wait its timeout; the router preset ends both after 5 seconds.
  */
+/**
+ * `schema` as the plain JSON a DSH tool definition's `parameters` must be. `z.toJSONSchema` (zod 4.4) adds a non-enumerable
+ * `~standard` property to its result, and the tool registry's `schemas()` projection refuses any value that does not survive a
+ * JSON round trip ("parameters must be lossless JSON"); a provider adapter that lists the tools through it, such as a Claude
+ * Code bridge, would then fail every turn of the Session.
+ */
+function toolParameters(schema: z.ZodType): ReturnType<typeof z.toJSONSchema> {
+  return JSON.parse(JSON.stringify(z.toJSONSchema(schema))) as ReturnType<typeof z.toJSONSchema>
+}
+
 function noWait({ name, arguments: input }: { name: string; arguments: unknown }, routed: () => boolean): string | undefined {
   const args = (input ?? {}) as { command?: unknown; timeoutMs?: unknown; run_in_background?: unknown; wait?: unknown; timeout_ms?: unknown }
   if (name === 'bash') {
@@ -234,7 +244,7 @@ export class Sessions {
   /** Returns a tool registrar for `agent` that renders tool output as JSON text and attaches `output.image` as an image when present. */
   private registerTool(agent: Agent, disposers: (() => void)[]): RegisterTool {
     return (name, description, schema, execute) => {
-      disposers.push(agent.ctx.tools.register({ name, description, parameters: z.toJSONSchema(schema),
+      disposers.push(agent.ctx.tools.register({ name, description, parameters: toolParameters(schema),
         output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => {
           const text = { type: 'text' as const, text: JSON.stringify(value) }
           const image = value && typeof value === 'object' && 'image' in value ? (value as { image: never }).image : undefined
