@@ -11,7 +11,18 @@ import { SetupError } from './setup.ts'
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
 const absolute = (description: string) => s.string().pattern(/^\//).description(`${description} Absolute path.`)
-/** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir` or `engine` remounts the plugin. */
+// A typed `s.dict` makes the `Config` type unnameable for declaration emit (it needs cosmokit's `Dict`), so the dshd maps are
+// `s.any()` here and `machineOf` validates them.
+const DshdPairSchema = z.object({
+  /** DSH profile the worker boots: a headless profile under the DSH home. */
+  profile: z.string().regex(/^[A-Za-z0-9._-]+$/, 'a DSH profile name'),
+  /** Environment added for this pair's units. */
+  env: z.record(z.string(), z.string()).default({}),
+  /** At most this many units of this pair at once; unset: only the overall limit. */
+  maxWorkers: z.number().int().min(1).max(LIMITS.maxWorkers.max).optional(),
+}).strict()
+const DshdMapsSchema = z.object({ pairs: z.record(z.string(), DshdPairSchema), env: z.record(z.string(), z.string()) })
+/** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir`, `engine`, `executor` or `dshd` remounts the plugin. */
 export const Config = s.object({
   stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
   engine: s.boolean().default(true)
@@ -22,13 +33,47 @@ export const Config = s.object({
     .description('Pages of thread context one assessment may read.').volatile(),
   admissionContextTimeoutMs: s.number().min(LIMITS.admissionContextTimeoutMs.min).max(LIMITS.admissionContextTimeoutMs.max).step(1)
     .default(15000).description('Time limit of one context read during an assessment, in milliseconds.').volatile(),
+  executor: s.union(['dsh', 'dshd']).default('dsh')
+    .description('How Assignments run: dsh, one DSH Session per Ticket in this process; dshd, one dshd headless unit per Assignment.'),
+  dshd: s.object({
+    command: s.string().default('dshd').description('The dshd CLI: a command name on PATH or an absolute path.'),
+    prefix: s.string().pattern(/^[a-z][a-z0-9]{0,9}$/).default('sa').description('First part of every unit name.'),
+    pairs: s.any().default({}).description('Provider-harness pairs by name, each `{profile, env, maxWorkers}`: the headless profile its workers boot, the environment added for its units and its own limit.'),
+    defaultPair: s.string().default('').description('The pair a Ticket runs on when its Trigger names none.'),
+    cwd: s.string().default('').description('Directory of a Ticket whose Trigger names none. Absolute path; empty: a directory under the Execution directory.'),
+    env: s.any().default({}).description('Environment added for every unit, by name. Values are recorded in the unit recipe: no secrets.'),
+    passEnv: s.array(s.string()).default(['HOME', 'USER', 'LOGNAME', 'LANG', 'LOCALE_ARCHIVE', 'TZDIR', 'PATH', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', 'DSH_HOME'])
+      .description('Names copied from this process\'s environment into every unit.'),
+    args: s.array(s.string()).default(['--approval-policy', 'never']).description('dsh headless options placed before --json and the task.'),
+    watchSeconds: s.number().min(5).max(600).step(1).default(30).description('How long one dshd wait follows a unit before looking again.'),
+    briefArgvMaxChars: s.number().min(1000).max(120000).step(1).default(64000)
+      .description('Longest brief passed as the task argument; a longer one is written to a file under stateDir.'),
+  }).default({}).description('The dshd executor; read only when executor is dshd.'),
 })
 export type DeploymentConfig = ReturnType<typeof Config>
+/** One provider-harness pair of the dshd executor: the headless profile its units boot, their added environment and their own limit. */
+export interface DshdPair { profile: string; env: Record<string, string>; maxWorkers?: number }
+/** Configuration of the dshd executor (`executor: dshd`). */
+export interface DshdConfig {
+  command: string
+  prefix: string
+  pairs: Record<string, DshdPair>
+  defaultPair: string
+  cwd: string
+  env: Record<string, string>
+  passEnv: string[]
+  args: string[]
+  watchSeconds: number
+  briefArgvMaxChars: number
+}
 export interface Machine {
   stateDir: string
   promptMaxChars: Volatile<number>
   admissionContextMaxPages: Volatile<number>
   admissionContextTimeoutMs: Volatile<number>
+  engine: boolean
+  executor: 'dsh' | 'dshd'
+  dshd: DshdConfig
 }
 const MOVED: Record<string, string> = {
   repository: 'on the GitHub Source', branchPrefix: 'in the prepare command of the Execution settings', github: 'on the GitHub Source',
@@ -40,8 +85,16 @@ const MOVED: Record<string, string> = {
 export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
-  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
-  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
+  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, engine, executor, dshd } = config
+  const wrong = (what: string): never => { throw new Error(`dsh-superagent dshd configuration: ${what}; docs/006-deployment.md lists the keys`) }
+  const maps = DshdMapsSchema.safeParse({ pairs: dshd.pairs, env: dshd.env })
+  if (!maps.success) wrong(maps.error.issues.map(issue => `${['dshd', ...issue.path].join('.')}: ${issue.message}`).join('; '))
+  const machine: Machine = { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, engine, executor, dshd: { ...dshd, ...maps.data! } }
+  if (executor === 'dshd') {
+    if (!Object.hasOwn(dshd.pairs, dshd.defaultPair)) wrong(`the default pair ${JSON.stringify(dshd.defaultPair)} is not among the pairs (${Object.keys(dshd.pairs).join(', ') || 'none'})`)
+    if (dshd.cwd && !isAbsolute(dshd.cwd)) wrong(`cwd ${dshd.cwd} is not an absolute path`)
+  }
+  return machine
 }
 
 export const GithubAccountsSchema = z.object({

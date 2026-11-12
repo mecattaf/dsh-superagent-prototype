@@ -6,6 +6,7 @@ import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Config, executable, machineOf, resolveDeployment, resolveFeishuBot, type Machine, type Probe } from '../src/deployment.ts'
 import { gitEnv } from './fixtures/git.ts'
+import { testDshd } from './fixtures/deployment.ts'
 
 const exec = promisify(execFile)
 let dir: string
@@ -46,9 +47,27 @@ describe('configuration schema', () => {
     // Limits are volatile references that the loader updates in place and callers read when used.
     expect({ ...read, promptMaxChars: read.promptMaxChars.get(), admissionContextMaxPages: read.admissionContextMaxPages.get(),
       admissionContextTimeoutMs: read.admissionContextTimeoutMs.get() })
-      .toEqual({ stateDir: join(dir, 'state'), promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 })
+      .toEqual({ stateDir: join(dir, 'state'), promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000,
+        engine: true, executor: 'dsh', dshd: testDshd() })
     expect(() => Config(minimal({ stateDir: 'relative/dir' }))).toThrow()
     expect(() => Config(minimal({ stateDir: '~/dir' }))).toThrow()
+  })
+  it('defaults engine to true and executor to dsh and reads the dshd block', () => {
+    const pairs = { opus: { profile: 'work-opus' }, local: { profile: 'work-local', env: { MODEL_KEY: 'none' }, maxWorkers: 1 } }
+    const read = machineOf(Config(minimal({ executor: 'dshd', dshd: { pairs, defaultPair: 'opus', cwd: '/srv/work', env: { A: '1' }, watchSeconds: 10 } })))
+    expect(read).toMatchObject({ engine: true, executor: 'dshd', dshd: testDshd({ defaultPair: 'opus', cwd: '/srv/work', env: { A: '1' }, watchSeconds: 10,
+      pairs: { opus: { profile: 'work-opus', env: {} }, local: { profile: 'work-local', env: { MODEL_KEY: 'none' }, maxWorkers: 1 } } }) })
+    expect(() => Config(minimal({ executor: 'tmux' }))).toThrow()
+    expect(() => Config(minimal({ dshd: { prefix: 'Not-A-Prefix' } }))).toThrow()
+    expect(() => machineOf(Config(minimal({ dshd: { pairs: { opus: { profile: 'work opus' } } } })))).toThrow('dsh-superagent dshd configuration: dshd.pairs.opus.profile')
+  })
+  it('rejects executor dshd whose default pair is not among its pairs, or whose directory is not absolute', () => {
+    const pairs = { opus: { profile: 'work-opus' } }
+    expect(() => machineOf(Config(minimal({ executor: 'dshd', dshd: { pairs, defaultPair: 'gufo' } }))))
+      .toThrow('dsh-superagent dshd configuration: the default pair "gufo" is not among the pairs (opus); docs/006-deployment.md lists the keys')
+    expect(() => machineOf(Config(minimal({ executor: 'dshd', dshd: { pairs, defaultPair: 'opus', cwd: 'work' } })))).toThrow('cwd work is not an absolute path')
+    // The dsh executor does not read the block.
+    expect(machineOf(Config(minimal({ dshd: { pairs, defaultPair: 'gufo' } }))).executor).toBe('dsh')
   })
   it('names keys the configuration does not define, and where the values of older keys live now', () => {
     const raw = minimal({ repository: 'acme/widgets', repositoryPath: '/srv/widgets', blockedCommands: [], author: { name: 'Alice' }, extra: 1 })

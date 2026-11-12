@@ -10,9 +10,10 @@ import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { Runtime } from '../src/app/runtime.ts'
 import { jobRegistry } from './fixtures/host.ts'
 import { evalsHealth } from '../src/app/views/overview.ts'
-import { mandateInstructions } from '../src/executor/dsh.ts'
+import { DshExecutor, mandateInstructions } from '../src/executor/dsh.ts'
+import { DshdExecutor } from '../src/executor/dshd.ts'
 import { masterPrompt } from '../src/app/context.ts'
-import { reference, testMachine } from './fixtures/deployment.ts'
+import { reference, testDshd, testMachine } from './fixtures/deployment.ts'
 import type { Machine } from '../src/deployment.ts'
 import { SCHEMA_VERSION, Store } from '../src/app/store.ts'
 import { TextCache } from '../src/app/cache.ts'
@@ -1793,4 +1794,35 @@ it('keeps the Policy the main Session judges by in its prompt, after admission a
   await runtime.settings.save('policy', { ...saved.policy, rules: rules.map(rule => ({ ...rule, enabled: false })) }, runtime.store.blockRevision('policy'), 'panel')
   expect(policy()).toContain('No rule is enabled: a proactive candidate can only be ignored.')
   expect(policy()).toContain('The accept mode and the rules decide proactive candidates only')
+})
+
+describe('the executor', () => {
+  const dshd = testDshd({ pairs: { opus: { profile: 'work-opus', env: {} } }, defaultPair: 'opus' })
+  it('builds DshExecutor by default and DshdExecutor with executor dshd', async () => {
+    expect(runtime.executor).toBeInstanceOf(DshExecutor)
+    const next = await restart({ executor: 'dshd', dshd })
+    await next.ready
+    expect(next.executor).toBeInstanceOf(DshdExecutor)
+  })
+  it('completes setup without a GitHub repository under executor dshd and changes no process environment', async () => {
+    await runtime.stop()
+    const environment = { ...process.env }
+    subprocess.spawn.mockClear()
+    const next = await restart({ executor: 'dshd', dshd }, { github: { repository: '' } })
+    await next.ready
+    expect(next.configured()).toBe(true)
+    expect(next.deployment).toMatchObject({ repository: '', github: { cli: '', login: '', noreply: '' } })
+    expect(next.health.runtime?.state).toBe('ready')
+    expect(process.env).toEqual(environment)
+    // No account probe ran.
+    expect(subprocess.spawn).not.toHaveBeenCalled()
+  })
+  it('resolves the GitHub account as upstream does under executor dshd once a repository is set', async () => {
+    subprocess.spawn.mockClear()
+    const next = await restart({ executor: 'dshd', dshd })
+    await next.ready
+    expect(next.configured()).toBe(true)
+    expect(next.deployment).toMatchObject({ repository: 'acme/widgets', github: { cli: AGENT(), login: 'agent-bot' } })
+    expect(subprocess.spawn.mock.calls.map(([spec]) => spec.argv)).toContainEqual(expect.arrayContaining([AGENT(), 'api', 'user']))
+  })
 })
