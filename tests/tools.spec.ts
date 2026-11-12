@@ -126,6 +126,16 @@ it('registers every tool\'s parameters as lossless JSON, which the tool registry
   }
 })
 
+it('lists an argument with a default as optional, since parsing supplies it', async () => {
+  await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  type Listed = { parameters: { required?: string[]; properties: Record<string, { default?: unknown }> } }
+  for (const name of ['orchestrator_read', 'orchestrator_eval_read']) {
+    const { parameters } = h.tools.get(h.runtime.masterId)!.get(name) as unknown as Listed
+    expect(parameters.properties.offset?.default, name).toBe(0)
+    expect(parameters.required ?? [], name).not.toContain('offset')
+  }
+})
+
 it('answers every routing tool in one shape: the decision it recorded, why, and the ticket card', async () => {
   const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
   const card = expect.objectContaining({ ticket_id: ticket.id })
