@@ -84,7 +84,7 @@ describe('orchestrator_workflow_start', () => {
         startedAt: new Date(Date.UTC(2026, 10, 12, 0, n)).toISOString(), seq: 0 })
     }
     expect(h.floor.status().map(run => run.run_id)).toEqual(Array.from({ length: 20 }, (_, n) => `wf-${String(20 - n).padStart(2, '0')}`))
-    expect(() => h.floor.status('wf-missing')).toThrow('no workflow run wf-missing')
+    expect(() => h.floor.status('wf-missing')).toThrow('Unknown workflow run wf-missing')
   })
   it('a resumed run uses the pinned script, not the edited file', async () => {
     const { h: h1, directory } = start()
