@@ -327,6 +327,9 @@ describe('scheduled Source', () => {
     // Strict: every field the fixture holds is one the schema knows, and parsing drops none.
     expect(parsed).toEqual(records)
     expect(scheduledTrigger(parsed[1]!, 'run', { missed: 0 }).id).toBe(key('scheduled', '/srv/work/widgets', 'nightly-digest', `run:${parsed[1]!.run!}`))
+    // `name` is optional: the manual record leaves it out, and its header names the item instead.
+    expect(parsed[1]).not.toHaveProperty('name')
+    expect(scheduledTrigger(parsed[1]!, 'run', { missed: 0 }).text.split('\n')[0]).toBe('[Scheduled item, run now] team/widgets:nightly-digest — nightly-digest')
   })
 })
 

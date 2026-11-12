@@ -19,7 +19,6 @@
     "kind": "manual",
     "namespace": "team/widgets",
     "item": "nightly-digest",
-    "name": "Nightly digest",
     "cwd": "/srv/work/widgets",
     "file": "/srv/work/widgets/schedule/nightly-digest.json",
     "due": "2026-11-12T09:15:30.000Z",
