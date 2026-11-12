@@ -16,7 +16,7 @@ import { acceptCandidate, later as pass, runArgv, startFloor, type FloorOptions 
 import { FakeDshd, runLines } from './fixtures/fake-dshd.ts'
 import type { Host } from './fixtures/host.ts'
 
-/** The rule a deployment seeds for scheduled occurrences, as scheduled-source §10 words its first sentence. */
+/** The rule a deployment seeds for scheduled occurrences (docs/006-deployment.md, Scheduled occurrences, Admission). */
 const RULE = { id: 'scheduled', name: 'Scheduled items', enabled: true,
   instruction: 'A Trigger of the scheduled Source whose first line starts with [Scheduled occurrence] or [Scheduled item, run now] is an implementation request by the owner of the working directory it names.' }
 const TEXT = 'Summarize the pull requests merged yesterday into notes/digest.md, then commit it.'
@@ -101,7 +101,7 @@ describe('scheduled occurrences on the dshd executor', () => {
     expect(h!.runtime.store.tickets.list()).toHaveLength(1)
     expect(ticket.mandate).toMatchObject({ strength: 'inferred', basis: expect.objectContaining({ rules: ['scheduled'] }) })
 
-    // One unit, run exactly as executor.md §5 builds it.
+    // One unit, run exactly as `DshdCli.run` builds it.
     expect(fake.runs).toHaveLength(1)
     const assignment = stored(ticket).assignments[0]!
     const name = `sa-nightly-digest-${ticket.id.slice(0, 12)}-a1`
