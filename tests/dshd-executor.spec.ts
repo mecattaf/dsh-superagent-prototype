@@ -180,6 +180,33 @@ describe('idempotency', () => {
     expect(fake.runs).toHaveLength(3)
     expect(latestAssignment(stored(ticket))!.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('systemd-unavailable') })
   })
+  it('adopts the unit a dshd run that never answered started: the retry re-runs the frozen recipe and dshd reports already-running', async () => {
+    await start()
+    fake.answerNothingNext('run')
+    const { ticket } = await accepted(request('1', { cwd: directory() }))
+    await later()
+    expect(fake.runs).toHaveLength(2)
+    expect(fake.runs[1]).toEqual(fake.runs[0])
+    expect(fake.instances.size).toBe(1)
+    expect(latestAssignment(stored(ticket))!.report).toBeUndefined()
+    expect(runningAssignment(stored(ticket))?.id).toBe(stored(ticket).assignments[0]!.id)
+    expect(binding(ticket)).toMatchObject({ state: 'running', invocationId: 'invocation-1' })
+    fake.end(nameOf(ticket), { lines: runLines('session-8', 'Done.') }); await later()
+    expect(stored(ticket).ended?.outcome).toBe('completed')
+  })
+  it('records failed after three dshd runs that never answered, and stops the unit the first one started, found by its name and labels', async () => {
+    await start()
+    for (let i = 0; i < 3; i++) fake.answerNothingNext('run')
+    const { ticket } = await accepted(request('1', { cwd: directory() }))
+    await later(); await later(); await later()
+    expect(fake.runs).toHaveLength(3)
+    expect(latestAssignment(stored(ticket))!.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('was stopped before it finished') })
+    // No unit runs outside the orchestrator's view: a person's retry starts -a2 alone.
+    expect(fake.stops).toEqual([fake.runs[0]!.name])
+    expect(binding(ticket)).toMatchObject({ state: 'ended', ended: { verdict: 'stopped' } })
+    h!.runtime.engine.retryTicket(ticket.id); await later()
+    expect([...fake.instances.values()].filter(unit => unit.state === 'running').map(unit => unit.recipe.name)).toEqual([nameOf(ticket, 2)])
+  })
 })
 
 describe('slots', () => {

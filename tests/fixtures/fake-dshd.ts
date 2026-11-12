@@ -11,7 +11,7 @@ type Verb = 'run' | 'get' | 'wait' | 'read' | 'stop'
 export const runLines = (sessionId: string, final?: string): string[] => ['dshd-run: run started', JSON.stringify({ type: 'session', sessionId, cwd: '/' }),
   JSON.stringify({ type: 'text', text: 'Working.' }), ...final === undefined ? [] : [JSON.stringify({ type: 'final', text: final })], 'dshd-run: run ended']
 
-/** In-memory `DshdPort` with helpers that end, cut, rerun or remove an instance, and fail the next call of a verb. */
+/** In-memory `DshdPort` with helpers that end, cut, rerun or remove an instance, and fail or lose the answer of the next call of a verb. */
 export class FakeDshd implements DshdPort {
   readonly instances = new Map<string, Instance>()
   /** Every recipe `run` was asked for, in order. */
@@ -22,6 +22,7 @@ export class FakeDshd implements DshdPort {
   hold?: Promise<void>
   private invocations = 0
   private readonly failures: { verb: Verb; exit: number; kind: string }[] = []
+  private readonly unanswered: Verb[] = []
   async run(recipe: DshdRecipe): Promise<DshdRunResult> {
     this.runs.push(recipe)
     this.fail('run')
@@ -85,6 +86,8 @@ export class FakeDshd implements DshdPort {
   remove(name: string): void { this.instances.delete(name) }
   /** The next call of `verb` fails with dshd's error `kind` and exit code `exit`. */
   failNext(verb: Verb, exit: number, kind: string): void { this.failures.push({ verb, exit, kind }) }
+  /** The next CLI call of `verb` does what it asks, then its answer is lost, as when the call's timeout or a signal ends dshd. */
+  answerNothingNext(verb: Verb): void { this.unanswered.push(verb) }
   /** DSH's subprocess service as `DshdCli` uses it: answers the dshd argv, or returns undefined for any other command. */
   spawn(spec: { argv: readonly string[]; signal?: AbortSignal }) {
     const argv = [...spec.argv]
@@ -107,12 +110,13 @@ export class FakeDshd implements DshdPort {
           const labels = Object.fromEntries(flags.flatMap((flag, at) => flag === '--label' ? [flags[at + 1]!.split(/=(.*)/s).slice(0, 2)] : []))
           const result = await this.run({ name: value('--name'), cwd: value('--cwd'), labels, profile: after[0]!, args: after.slice(1, -2), task: after.at(-1)!, env })
           if (this.hold) await Promise.race([this.hold, new Promise(resolve => { spec.signal?.addEventListener('abort', resolve, { once: true }) })])
-          if (spec.signal?.aborted) return null
+          if (spec.signal?.aborted || this.answersNothing('run')) return null
           if ('refused' in result) { stderr = JSON.stringify({ error: { kind: result.refused, message: result.message, hint: null } }); return result.exit }
           stdout = JSON.stringify({ ...result, warnings: [] })
           return 0
         }
         const result = verb === 'get' ? await this.get(name) : verb === 'wait' ? await this.wait(name) : verb === 'read' ? await this.read(name) : await this.stop(name)
+        if (this.answersNothing(verb)) return null
         if (result === 'not-found') { stderr = JSON.stringify({ error: { kind: 'not-found', message: `no instance ${name}`, hint: null } }); return 3 }
         stdout = JSON.stringify(verb === 'read' ? { name, streams: ['stdout', 'stderr'], ...result } : result)
         return 0
@@ -131,6 +135,11 @@ export class FakeDshd implements DshdPort {
   private status(instance: Instance): DshdStatus {
     return structuredClone({ name: instance.recipe.name, id: instance.id, state: instance.state, invocationId: instance.invocationId,
       labels: instance.recipe.labels, lastRun: instance.lastRun })
+  }
+  private answersNothing(verb: Verb): boolean {
+    const at = this.unanswered.indexOf(verb)
+    if (at >= 0) this.unanswered.splice(at, 1)
+    return at >= 0
   }
   private fail(verb: Verb): void {
     const at = this.failures.findIndex(failure => failure.verb === verb)
