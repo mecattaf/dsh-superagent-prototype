@@ -625,7 +625,7 @@ node --experimental-transform-types src/workflow/cli.ts release-notes.workflow.j
 
 ### 4. Start and follow the run
 
-Ask the main Session to run the script, naming it and the directory, for example "Run release-notes.workflow.js in /srv/work/widgets". It calls `orchestrator_workflow_start`, and each node then arrives as an inferred candidate. `orchestrator_workflow_status` shows each node `waiting`, `offered`, `held`, `ticket`, `done` or `null`. The panel labels each node's Thread `<name> · <label>`, and shows its Ticket as any other. A restart resumes every unfinished run from its journal; no finished node runs again.
+Ask the main Session to run the script, naming it and the directory, for example "Run release-notes.workflow.js in /srv/work/widgets". It calls `orchestrator_workflow_start`, and each node then arrives as an inferred candidate. `orchestrator_workflow_status` shows each node `waiting`, `offered`, `held`, `unavailable`, `ticket`, `done` or `null`. A `held` node was decided without a Ticket, and an `unavailable` one was never assessed, as when the main Session did not answer in time; each also gives `decided_at` and `reason`, and waits until its Trigger is requeued with `orchestrator_trigger_requeue`. The panel labels each node's Thread `<name> · <label>`, and shows its Ticket as any other. A restart resumes every unfinished run from its journal; no finished node runs again.
 
 ### Checklist
 
