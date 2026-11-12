@@ -112,6 +112,9 @@ describe('scheduled occurrences on the dshd executor', () => {
       '--label', `superagent.assignment=${assignment.id}`, '--label', `superagent.orchestrator=${h!.runtime.masterId}`, '--label', 'superagent.pair=alpha',
       '--label', `superagent.ticket=${ticket.id}`, '--', 'p-alpha', '--approval-policy', 'never', '--json', fake.runs[0]!.task])
     expect(argv[0]!.filter(arg => arg.startsWith('--patch'))).toEqual([])
+    // The unit's environment is the passed and configured names only: the Source's DSH_SUPERAGENT_SCHEDULED_* variables stay
+    // in this process, and the brief carries the occurrence instead.
+    expect(Object.keys(fake.runs[0]!.env).sort()).toEqual(['CONFIG_DIR', 'DSH_E2E_PASSED'])
     // The brief: the framing first, the occurrence's whole text, header and frozen task, last.
     const brief = JSON.parse(fake.runs[0]!.task) as Record<string, unknown>
     expect(Object.keys(brief)).toEqual(['note', 'ticket_id', 'title', 'attempt', 'assignment', 'trigger'])
