@@ -97,8 +97,9 @@ export class TicketBackend implements Backend {
       return { error: `${NODE_FAILURE}filtered: the workflow Source did not take the node in; it is off or uninstalled` }
     }
     const label = call.opts.label === undefined ? node : String(call.opts.label)
-    source.threads.describe(thread, { label: `${run.name} · ${label}`, facts: { run: { label: { zh: '工作流运行', en: 'Workflow run' }, value: run.id } } })
+    // The Source may have stopped while the Trigger was received; a stopped Source writes nothing more for its runs.
     if (signal.aborted) return new Promise(() => {})
+    source.threads.describe(thread, { label: `${run.name} · ${label}`, facts: { run: { label: { zh: '工作流运行', en: 'Workflow run' }, value: run.id } } })
     return waiter.settled(trigger.id, thread, call.opts.schema !== undefined)
   }
 }

@@ -63,11 +63,14 @@ const RUNNING = new Set(['running', 'starting', 'stopping'])
 const UNCERTAIN = new Set(['masked', 'orphaned', 'inconsistent', 'unknown'])
 /** Tries of a launch while dshd is unavailable (exit 7) before the Assignment is recorded failed. */
 const UNAVAILABLE_TRIES = 3
-/** Longest worker answer the summary of a unit that did not complete carries; a completed unit's answer is its whole result. */
+/**
+ * Longest worker answer the summary of a unit that did not complete carries; a completed unit's answer is its whole result. Fixed:
+ * such a summary only points at the failure, and the unit's Session log keeps the whole answer.
+ */
 const FINAL_CHARS = 3800
 /**
  * Lines of the longer `dshd read` for a run whose newest 200 lines name no Session: a whole run at 256 bytes a line fills
- * `DshdCli`'s 16 MiB read cap. journalctl takes no more than a signed int.
+ * `DshdCli`'s 16 MiB read cap. journalctl takes no more than a signed int. Fixed, as it follows from that cap.
  */
 const READ_RUN_LINES = 1 << 16
 const RETRIED = 'A person retried this ticket. Continue the assignment from the current directory and what it holds now.'
@@ -196,6 +199,7 @@ export class DshdExecutor implements ExecutorPort {
     // A headless unit takes no Input after its brief; rows an in-process Executor queued before a switch are drained.
     host.effects.handle('delivery', async () => {}, { quiet: true })
     host.effects.handle('dshd-watch', payload => this.watch(payload), { limit: () => LIMITS.maxWorkers.max, retry: [2000, 60_000] })
+    // Fixed: a bound on `dshd stop` calls in flight at once, which are short, not a deployment tunable.
     host.effects.handle('dshd-stop', payload => this.stopQueued(payload), { limit: () => 4, retry: [2000, 60_000] })
   }
   /** The Ticket's execution attributes, with the directory its unit runs in (see `cwdOf`). */

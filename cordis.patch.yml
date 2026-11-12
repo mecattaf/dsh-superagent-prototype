@@ -10,7 +10,8 @@
     - id: dsh-superagent-feishu
       name: dsh-superagent/feishu-watch
       disabled: true
-    # Optional scheduled Source: reads occurrence records from a directory a scheduler drops them into; set its inbox in the profile.
+    # Optional scheduled Source: reads occurrence records from a directory a scheduler drops them into, <stateDir>/inbox/scheduled
+    # unless the profile sets its inbox.
     - id: dsh-superagent-scheduled
       name: dsh-superagent/scheduled-watch
       disabled: true

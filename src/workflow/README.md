@@ -6,7 +6,7 @@ This directory is Substrate's workflow interpreter, copied into this repository 
 
 | | |
 | --- | --- |
-| Origin | Substrate (`agency-agency/substrate`), `packages/interpreter` |
+| Origin | Substrate, `packages/interpreter`; the origin repository is not public |
 | Commit | `6e6a72269ef7fa478f53c9b379bcff1c2561802a` (`6e6a722`) |
 | Vendored | 2026-11-12 |
 | Source | `src/*.ts`, 10 files, 2,376 lines, here as `src/workflow/*.ts` |
@@ -25,11 +25,17 @@ The code is unchanged. These are all the differences from that commit:
 5. **Dependencies.** `effect` `4.0.0-rc.112`, a peer dependency in Substrate, and `ajv` `8.20.0`, the version Substrate's lockfile resolves, are exact `dependencies` here. `tsdown.config.ts` keeps them out of the bundle, as it does `zod`.
 6. **Repository checks.** `tests/class-docs.spec.ts` skips this directory, so its classes keep Substrate's comment style. `docs/007-architecture.md` lists its modules and tests.
 
-To check the source against Substrate (only the two comment lines should differ):
+Known costs of carrying it, none of them a difference from that commit:
+
+- **An unbounded cache.** `jsonschema.ts` keeps a module-level `Map` with one compiled validator per distinct schema text. Nothing bounds it, and it outlives a remount of the workflow Source. A later change may hang it on the run instead.
+- **Dependencies of the whole package.** `effect` is a release candidate, and it and `ajv` are runtime dependencies even of a deployment that never enables the workflow Source. An upgrade of TypeScript, `zod` or `tsdown` is likeliest to break this directory first.
+- **A plain install.** The root `pnpm-workspace.yaml` leaves out `msgpackr-extract`, the optional native speed-up of `effect`'s `msgpackr`, and the lockfile records that. Install with a plain `pnpm install`: `--ignore-workspace` reads the lockfile without that setting and fails.
+
+To check the source against a checkout of the origin repository (only the two comment lines should differ):
 
 ```sh
 for f in backend cli index interpreter journal jsonschema key meta replay sandbox; do
-  git -C <substrate checkout> show 6e6a722:packages/interpreter/src/$f.ts | diff - src/workflow/$f.ts
+  git -C <checkout of the origin> show 6e6a722:packages/interpreter/src/$f.ts | diff - src/workflow/$f.ts
 done
 ```
 

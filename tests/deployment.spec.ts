@@ -66,6 +66,8 @@ describe('configuration schema', () => {
     expect(() => machineOf(Config(minimal({ executor: 'dshd', dshd: { pairs, defaultPair: 'gufo' } }))))
       .toThrow('dsh-superagent dshd configuration: the default pair "gufo" is not among the pairs (opus); docs/006-deployment.md lists the keys')
     expect(() => machineOf(Config(minimal({ executor: 'dshd', dshd: { pairs, defaultPair: 'opus', cwd: 'work' } })))).toThrow('cwd work is not an absolute path')
+    expect(() => machineOf(Config(minimal({ executor: 'dshd', dshd: { pairs, defaultPair: 'opus', passEnv: ['HOME', 'GH_TOKEN', 'Api_Key'] } }))))
+      .toThrow('passEnv names credential-shaped variables, which dshd would record: GH_TOKEN, Api_Key')
     // The dsh executor does not read the block.
     expect(machineOf(Config(minimal({ dshd: { pairs, defaultPair: 'gufo' } }))).executor).toBe('dsh')
   })

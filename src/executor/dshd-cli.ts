@@ -43,9 +43,9 @@ const Refusal = z.object({ error: z.object({ kind: z.string(), message: z.string
 
 /** One finished dshd call: its exit code (null when a signal or our abort ended it), stdout and stderr. */
 interface Exit { exitCode: number | null; stdout: string; stderr: string }
-/** Calls that may end before dshd answers, such as one cut by the host's stop; `wait` gets its own timeout on top. */
+/** Calls that may end before dshd answers, such as one cut by the host's stop; `wait` gets its own timeout on top. Fixed: a bound on a local call, not a tunable. */
 const CALL_TIMEOUT_MS = 60_000
-/** `read --json` may carry a long stretch of a run's journal, so it may be large. */
+/** `read --json` may carry a long stretch of a run's journal, so it may be large. Fixed: a memory bound on one reply, not a tunable. */
 const READ_MAX_BYTES = 1 << 24
 const lastLine = (text: string): string => text.trim().split('\n').at(-1) ?? ''
 function json(text: string): unknown {

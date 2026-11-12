@@ -62,3 +62,9 @@ The main Session assesses node candidates as it assesses any inferred candidate.
 | A call's `model` and `effort` | Recorded in the Trigger's `meta`; nodes run on their pair |
 | Nesting deeper than one `workflow()` | The interpreter's limit |
 | A run started by a Scheduled item's own key | A Scheduled nudge asks the main Session, which starts the run with the tool |
+
+## Where it differs from the other Sources
+
+- **Its export is `dsh-superagent/workflow`.** The other Sources export `<kind>-watch`, as each watches something outside DSH: a repository, a chat, an inbox. This one watches nothing; it runs scripts. Profiles name the export in the row `dsh-superagent-workflow`, so it keeps its name.
+- **Its refusals are plain errors.** A request the main Session gets wrong, such as a relative `cwd` or a script whose `meta` is invalid, fails `orchestrator_workflow_start` with an error whose message starts `orchestrator_workflow_start:`, not with a `UserError` code: the codes live in `src/core`, which the fork leaves as it is.
+- **Unknown configuration keys fail the load**, as they do for `dsh-superagent` and `dsh-superagent-scheduled`, so a misspelt `pollMs` never runs on the default.

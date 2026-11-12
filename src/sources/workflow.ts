@@ -38,7 +38,14 @@ export const workflowKind = (floor: Pick<WorkflowFloor, 'startRun' | 'status'>):
 
 export const name = 'dsh-superagent-workflow'
 export const inject = ['orchestrator']
+/** Refuses configuration keys the entry does not use, so a misspelt `pollMs` fails the load instead of running on the default. */
+function checked(config: WorkflowConfig): WorkflowConfig {
+  const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
+  if (unknown.length) throw new Error(`dsh-superagent-workflow configuration has keys it does not use: ${unknown.join(', ')}; docs/009-workflows.md lists the keys`)
+  return config
+}
 export function apply(ctx: Context, config: WorkflowConfig): void {
+  checked(config)
   ctx.effect(() => {
     const floor = new WorkflowFloor(ctx.orchestrator, config)
     const unregister = ctx.orchestrator.sources.register(workflowKind(floor))

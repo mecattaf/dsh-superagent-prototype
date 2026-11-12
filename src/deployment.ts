@@ -93,6 +93,10 @@ export function machineOf(config: DeploymentConfig): Machine {
   if (executor === 'dshd') {
     if (!Object.hasOwn(dshd.pairs, dshd.defaultPair)) wrong(`the default pair ${JSON.stringify(dshd.defaultPair)} is not among the pairs (${Object.keys(dshd.pairs).join(', ') || 'none'})`)
     if (dshd.cwd && !isAbsolute(dshd.cwd)) wrong(`cwd ${dshd.cwd} is not an absolute path`)
+    // A unit's environment travels as `dshd run` arguments, past the credential stripping of DSH's subprocess runtime, and dshd
+    // records it, so a name copied from this process's environment may not be credential-shaped (DSH's SENSITIVE_ENV_PATTERN).
+    const secret = dshd.passEnv.filter(name => /KEY|PASSWORD|SECRET|TOKEN/i.test(name))
+    if (secret.length) wrong(`passEnv names credential-shaped variables, which dshd would record: ${secret.join(', ')}`)
   }
   return machine
 }

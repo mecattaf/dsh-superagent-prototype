@@ -263,4 +263,11 @@ describe('the plugin entry', () => {
       waiter.stop()
     } finally { timers.mockRestore(); vi.useRealTimers() }
   })
+  it('refuses configuration keys it does not use before registering anything, so a misspelt key never runs on the default', () => {
+    const start = vi.spyOn(WorkflowFloor.prototype, 'start')
+    const ctx = new Context()
+    expect(() => workflowPlugin.apply(ctx, workflowPlugin.Config({ pollMS: 500, maxAttempt: 2 } as never))).toThrow('keys it does not use: pollMS, maxAttempt')
+    expect(start).not.toHaveBeenCalled()
+    start.mockRestore()
+  })
 })
