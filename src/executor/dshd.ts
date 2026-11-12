@@ -262,7 +262,11 @@ export class DshdExecutor implements ExecutorPort {
   private async launchQueued({ ticketId, assignmentId }: { ticketId: string; assignmentId: string }): Promise<void> {
     const ticket = this.host.store.tickets.get(ticketId)
     const assignment = ticket && latestAssignment(ticket)
-    if (!ticket || !liveTicket(ticket) || assignment?.id !== assignmentId || assignment.state !== 'pending') return
+    if (!ticket || !liveTicket(ticket) || assignment?.id !== assignmentId || assignment.state !== 'pending') {
+      // An earlier try that ended before dshd answered, as a restart cuts one, may have started the unit of this ended Assignment.
+      if (this.host.store.get(BINDING(assignmentId))?.state === 'launching') this.stopUnanswered(ticketId, assignmentId)
+      return
+    }
     if (this.host.closing()) throw new Error('dsh-superagent is stopping')
     if (this.host.paused()) throw new Later('Processing is paused')
     const stored = this.host.store.get(BINDING(assignmentId))
@@ -287,9 +291,13 @@ export class DshdExecutor implements ExecutorPort {
       }
       this.unavailable.delete(assignmentId)
       this.launchFailed(ticketId, assignmentId, error)
-      // No later try binds a unit that run may have started, so its stop looks for it under the frozen name and labels.
-      if (unanswered) this.host.effects.enqueue('dshd-stop', assignmentId, { ticketId, assignmentId, reason: 'dshd did not answer its launch' })
+      // No later try binds a unit that run may have started.
+      if (unanswered) this.stopUnanswered(ticketId, assignmentId)
     } finally { this.launching.delete(assignmentId); this.slots.free(ticketId) }
+  }
+  /** Queues the stop of a unit a launch that dshd did not answer may have started; it looks for the unit under the frozen name and labels. */
+  private stopUnanswered(ticketId: string, assignmentId: string): void {
+    this.host.effects.enqueue('dshd-stop', assignmentId, { ticketId, assignmentId, reason: 'dshd did not answer its launch' })
   }
   /** Whether the Assignment is still the live Ticket's pending one, which a launch may start. */
   private stillPending(ticketId: string, assignmentId: string): boolean {
