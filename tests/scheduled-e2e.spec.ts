@@ -281,6 +281,30 @@ describe('scheduled occurrences on the dshd executor', () => {
     expect(await h!.api('GET', `tickets/${ticket.id}`)).toMatchObject({ status: 200, body: { environment: [] } })
   })
 
+  it('an occurrence the main Session never decides, as when its orchestrator tools fail, is offered three times, then recorded unavailable (timeout) and offered no more; the same record read again starts no Eval', async () => {
+    await start()
+    const cwd = agency()
+    const [id] = drop(record(cwd))
+    await round()
+    const thread = threadKey(h!.runtime.store.triggers.get(id!)!.threads[0]!)
+    expect(h!.candidates()).toEqual([id])
+    // Each look comes past the Eval's deadline: the first two expiries queue the Trigger again, the third records it.
+    for (let look = 0; look < 6; look++) await later()
+    expect(h!.candidates()).toEqual([id, id, id])
+    expect(h!.runtime.store.decisions.byThread(thread)).toEqual([expect.objectContaining({ kind: 'unavailable', reason: [{ code: 'timeout' }] })])
+    expect(h!.runtime.engine.candidate(id!)).toBeUndefined()
+    expect(h!.runtime.store.threads.get(thread)).toMatchObject({ pending: [] })
+    // The producer drops the same record again, as a crash between its write and the move to .done leaves it: equal records
+    // give equal Trigger ids, so the Source receives a duplicate and the main Session is not offered it a fourth time.
+    expect(drop(record(cwd))).toEqual([id])
+    await round()
+    await later()
+    expect(h!.candidates()).toEqual([id, id, id])
+    expect(h!.runtime.store.decisions.byThread(thread)).toHaveLength(1)
+    expect(h!.runtime.store.tickets.list()).toEqual([])
+    expect(fake.runs).toEqual([])
+  })
+
   it('an undelivered machine Input does not keep an ended unit\'s Ticket from completing', async () => {
     await start()
     const cwd = agency()
