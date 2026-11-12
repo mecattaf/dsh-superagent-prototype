@@ -272,6 +272,24 @@ describe('scheduled Source', () => {
     expect(h.store.triggers.get(idOf(record(h.work)))).toBeDefined()
   })
 
+  it('keeps superseded records until their item\'s live record is committed, so a cut round still counts them as missed', async () => {
+    const h = host()
+    const at = (hour: string) => record(h.work, { due: `2026-11-12T${hour}:00:00.000Z` })
+    drop(h.inbox, 'a.json', at('00')); drop(h.inbox, 'b.json', at('01')); drop(h.inbox, 'c.json', at('02'))
+    // The live record's receive fails after both superseded ones were committed: all three wait for the next round.
+    const real = h.receive.getMockImplementation()!
+    let fail = true
+    h.receive.mockImplementation(async trigger => {
+      if (trigger.meta.occurrence === 'c' && fail) { fail = false; throw new Error('database is locked') }
+      return real(trigger)
+    })
+    await expect(readInbox(h.ctx, h.inbox)).rejects.toThrow('database is locked')
+    expect(h.waiting()).toEqual(['a.json', 'b.json', 'c.json'])
+    expect(await readInbox(h.ctx, h.inbox)).toEqual({ read: 1, superseded: 2, invalid: 0, unreadable: 0 })
+    expect(h.store.triggers.get(idOf(at('02')))?.meta).toMatchObject({ missed: 2 })
+    expect(h.done()).toEqual(['a.json', 'b.json', 'c.json'])
+  })
+
   it('admits an occurrence as an inferred candidate only with the occurrence cell set to inferred, and accepts it only in auto mode with an enabled matched rule', async () => {
     // The default admission table ignores a sender off the list who does not address the agent.
     const ignored = host({ settings: { policy: {} } })
@@ -418,6 +436,45 @@ describe('scheduled plugin entry', () => {
     } finally { release() }
     expect(h.waiting()).toEqual(['a.json'])
     expect(h.receive).not.toHaveBeenCalled()
+  })
+
+  it('takes the inbox lock once the other process releases it, and reads what waited', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const h = host({ registered: false })
+      drop(h.inbox, 'a.json', record(h.work))
+      const release = lockSync(h.inbox, { stale: 30_000 })
+      const stop = mount(h)
+      await vi.waitFor(() => { expect(h.board.all.scheduled).toMatchObject({ state: 'error', detail: expect.stringContaining('already being held') }) })
+      release()
+      expect(h.waiting()).toEqual(['a.json'])
+      await vi.advanceTimersByTimeAsync(scheduled.INBOX_LOCK_STALE_MS)
+      await vi.waitFor(() => { expect(h.done()).toEqual(['a.json']) })
+      expect(h.board.all.scheduled).toMatchObject({ state: 'ready' })
+      await stop()
+      expect(existsSync(`${h.inbox}.lock`)).toBe(false)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('reports a lost inbox lock, stops reading, and reads again once it takes the lock back', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const h = host({ registered: false })
+      const stop = mount(h)
+      await vi.waitFor(() => { expect(h.board.all.scheduled).toMatchObject({ state: 'ready' }) })
+      // proper-lockfile finds its lock directory gone on its next refresh, half the stale time later, and calls it compromised.
+      rmSync(`${h.inbox}.lock`, { recursive: true })
+      await vi.advanceTimersByTimeAsync(scheduled.INBOX_LOCK_STALE_MS / 2)
+      await vi.waitFor(() => { expect(h.board.all.scheduled).toMatchObject({ state: 'error', detail: expect.stringContaining('The inbox lock was lost') }) })
+      drop(h.inbox, 'a.json', record(h.work))
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(h.waiting()).toEqual(['a.json'])
+      await vi.advanceTimersByTimeAsync(scheduled.INBOX_LOCK_STALE_MS)
+      await vi.waitFor(() => { expect(h.done()).toEqual(['a.json']) })
+      expect(existsSync(`${h.inbox}.lock`)).toBe(true)
+      await stop()
+      expect(existsSync(`${h.inbox}.lock`)).toBe(false)
+    } finally { vi.useRealTimers() }
   })
 
   it('reports a round that fails as an error at once, and ready again after the next round succeeds', async () => {
