@@ -16,7 +16,7 @@ const absolute = (description: string) => s.string().pattern(/^\//).description(
 const DshdPairSchema = z.object({
   /** DSH profile the worker boots: a headless profile under the DSH home. */
   profile: z.string().regex(/^[A-Za-z0-9._-]+$/, 'a DSH profile name'),
-  /** Environment added for this pair's units. */
+  /** Environment added for this pair's units. Values are recorded in the unit recipe and the Assignment binding and pass in argv: no secrets. */
   env: z.record(z.string(), z.string()).default({}),
   /** At most this many units of this pair at once; unset: only the overall limit. */
   maxWorkers: z.number().int().min(1).max(LIMITS.maxWorkers.max).optional(),
@@ -38,16 +38,16 @@ export const Config = s.object({
   dshd: s.object({
     command: s.string().default('dshd').description('The dshd CLI: a command name on PATH or an absolute path.'),
     prefix: s.string().pattern(/^[a-z][a-z0-9]{0,9}$/).default('sa').description('First part of every unit name.'),
-    pairs: s.any().default({}).description('Provider-harness pairs by name, each `{profile, env, maxWorkers}`: the headless profile its workers boot, the environment added for its units and its own limit.'),
+    pairs: s.any().default({}).description('Provider-harness pairs by name, each `{profile, env, maxWorkers}`: the headless profile its workers boot, the environment added for its units (recorded in the unit recipe and the Assignment binding and passed in argv: no secrets) and its own limit.'),
     defaultPair: s.string().default('').description('The pair a Ticket runs on when its Trigger names none.'),
     cwd: s.string().default('').description('Directory of a Ticket whose Trigger names none. Absolute path; empty: a directory under the Execution directory.'),
-    env: s.any().default({}).description('Environment added for every unit, by name. Values are recorded in the unit recipe: no secrets.'),
+    env: s.any().default({}).description('Environment added for every unit, by name. Values are recorded in the unit recipe and the Assignment binding and pass in argv: no secrets.'),
     passEnv: s.array(s.string()).default(['HOME', 'USER', 'LOGNAME', 'LANG', 'LOCALE_ARCHIVE', 'TZDIR', 'PATH', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', 'DSH_HOME'])
       .description('Names copied from this process\'s environment into every unit.'),
     args: s.array(s.string()).default(['--approval-policy', 'never']).description('dsh headless options placed before --json and the task.'),
     watchSeconds: s.number().min(5).max(600).step(1).default(30).description('How long one dshd wait follows a unit before looking again.'),
     briefArgvMaxChars: s.number().min(1000).max(120000).step(1).default(64000)
-      .description('Longest brief passed as the task argument; a longer one is written to a file under stateDir.'),
+      .description('Longest brief passed as the task argument, which local users can read in the process list while the unit runs; a longer one is written to a file under stateDir.'),
   }).default({}).description('The dshd executor; read only when executor is dshd.'),
 })
 export type DeploymentConfig = ReturnType<typeof Config>
