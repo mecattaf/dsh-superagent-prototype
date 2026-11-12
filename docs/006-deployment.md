@@ -18,6 +18,8 @@ Opening a blank managed Session in the Web UI can select the profile's default p
 
 Both presets run with `danger-full-access` as the operator's OS user and read messages from subscribed Threads. Account wrappers choose the agent's credentials by default; they do not isolate the process. A worker can execute programs by path and read the operator's home directory. For isolation, use a dedicated OS account containing only the agent's credentials.
 
+With `executor: dshd`, the values of `dshd.env` and of a pair's `env` pass in the `dshd run` command line, dshd records them in the unit recipe and dsh-superagent in the Assignment's binding, so none may be a secret: a key belongs in the worker profile's DSH credentials. A brief of up to `dshd.briefArgvMaxChars` is the unit's task argument, so it is in the recipe and, while the unit runs, in the process list; a low value (1000 at least) sends longer briefs through `<stateDir>/briefs/`, which only the operator can read.
+
 ## Prerequisites
 
 - Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+ and tmux
@@ -98,7 +100,7 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 | `dshd.*` | with `executor: dshd` | `pairs` (name → headless `profile`, `env`, `maxWorkers`), `defaultPair`, `cwd`, `env`, `passEnv`, `args`, `prefix`, `command`, `watchSeconds`, `briefArgvMaxChars` |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
 
-With `executor: dshd`, a unit starts from an empty environment holding the `passEnv` names of this process, then `dshd.env`, then its pair's `env`. The values pass in the `dshd run` command line, dshd records them in the unit recipe, and dsh-superagent records them in the Assignment's binding, so none may be a secret: a key belongs in the worker profile's DSH credentials. A brief of up to `briefArgvMaxChars` is the unit's task argument, also in its recipe and, while the unit runs, in the process list other local users can read; a lower value (1000 at least) sends longer briefs through a file only the owner can read, `<stateDir>/briefs/<assignment>.json`. Without a repository on the GitHub Source, setup then checks no account, writes no command shims and changes no process environment.
+With `executor: dshd`, a unit starts from an empty environment holding the `passEnv` names of this process, then `dshd.env`, then its pair's `env`; dshd records the values, so none may be a secret. Without a repository on the GitHub Source, setup then checks no account, writes no command shims and changes no process environment.
 
 After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
 
