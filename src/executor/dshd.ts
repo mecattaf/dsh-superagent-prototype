@@ -370,13 +370,8 @@ export class DshdExecutor implements ExecutorPort {
   private watchLater(ticketId: string, assignmentId: string): void {
     this.host.effects.enqueue('dshd-watch', assignmentId, { ticketId, assignmentId })
   }
-  /** Follows a bound unit until it ends and settles it, then sweeps the briefs of the Tickets that have ended. */
-  private async watch(payload: { ticketId: string; assignmentId: string }): Promise<void> {
-    await this.follow(payload)
-    await this.sweepBriefs()
-  }
   /** Follows a bound unit with `dshd wait` until it ends, then settles its Assignment from `dshd get` and its events. */
-  private async follow({ ticketId, assignmentId }: { ticketId: string; assignmentId: string }): Promise<void> {
+  private async watch({ ticketId, assignmentId }: { ticketId: string; assignmentId: string }): Promise<void> {
     let binding = this.host.store.get(BINDING(assignmentId))
     if (!binding || binding.state !== 'running') return
     const { name } = binding
@@ -447,7 +442,10 @@ export class DshdExecutor implements ExecutorPort {
       if (relay) this.host.sessions.relay(relay.id, JSON.stringify({ ...JSON.parse(relay.text) as object, unit: binding.name, session: sessionId ?? null }))
     })
   }
-  /** Stops the unit of an Assignment the domain ended (see `stopUnit`), then sweeps the briefs of the Tickets that have ended. */
+  /**
+   * Stops the unit of an Assignment the domain ended (see `stopUnit`), then sweeps the briefs of the Tickets that have ended: a
+   * Ticket's end stops every Assignment it has not ended, so each Ticket that wrote a brief passes here once it ends.
+   */
   private async stopQueued(payload: { ticketId: string; assignmentId: string; reason: string }): Promise<void> {
     await this.stopUnit(payload)
     await this.sweepBriefs()

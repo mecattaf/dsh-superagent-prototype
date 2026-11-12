@@ -61,7 +61,7 @@ describe('briefs', () => {
     expect(stored(ticket).ended).toBeDefined()
     expect(existsSync(briefOf(ticket))).toBe(false)
   })
-  it('sweeps the briefs no open Ticket holds when a unit ends, and leaves the other open Tickets\' briefs and other files alone', async () => {
+  it('sweeps the briefs no open Ticket holds when a Ticket ends, and leaves the other open Tickets\' briefs and other files alone', async () => {
     await start()
     const briefs = join(h!.directory, 'briefs')
     mkdirSync(briefs, { recursive: true })
