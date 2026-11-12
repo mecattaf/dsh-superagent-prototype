@@ -95,4 +95,27 @@ describe('the window of a workflow run', () => {
     await finishRun(h, run)
     expect(h.run(run)).toMatchObject({ state: 'completed', result: { a1: 'DONE', a2: 'DONE' } })
   })
+  it('W2c an unavailable node raises no other attempt: with maxAttempts 3 its one Trigger is offered three times, then no more', async () => {
+    let clock = Date.parse('2026-11-12T01:00:00Z')
+    const { h, directory } = start({ now: () => new Date(clock).toISOString(), config: { maxAttempts: 3 } })
+    await h.started
+    const { run_id: run } = h.floor.startRun({ script: FIXTURE, cwd: directory, args: { tag: 't' } })
+    await until(() => h.offered().length === 2)
+    h.accept('a2')
+    // The main Session never decides a1, as when its orchestrator tools fail: each look comes past the Eval's deadline.
+    for (let look = 0; look < 6; look++) {
+      const candidate = h.offered().find(item => h.label(item.triggers[0]!.id) === 'a1')
+      if (candidate) h.engine.candidateDelivered(candidate.evalId)
+      clock += 121_000
+      h.engine.evaluateDue()
+      await new Promise(resolve => setTimeout(resolve, 15))
+    }
+    const a1 = h.floor.status(run)[0]!.nodes.find(node => node.label === 'a1')!
+    // An attempt follows only a Ticket that settled, which an unavailable Decision never gives.
+    expect(a1).toMatchObject({ state: 'held', trigger_id: expect.stringMatching(/-a1$/) })
+    expect(h.candidates.filter(item => h.label(item.triggers[0]!.id) === 'a1').map(item => item.triggers[0]!.id))
+      .toEqual([a1.trigger_id, a1.trigger_id, a1.trigger_id])
+    expect(h.journal(run)).not.toContain('"type":"failed"')
+    expect(h.run(run)?.state).toBe('running')
+  })
 })
