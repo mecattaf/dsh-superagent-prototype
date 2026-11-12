@@ -11,7 +11,7 @@ import { SettingsSchema } from '../src/policy.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import * as workflowPlugin from '../src/sources/workflow.ts'
 import { TicketWaiter } from '../src/sources/workflow-backend.ts'
-import { WorkflowFloor } from '../src/sources/workflow-floor.ts'
+import { WorkflowRuns } from '../src/sources/workflow-runs.ts'
 import { workflowTools } from '../src/sources/workflow-tools.ts'
 import { FIXTURE, newDirectory, workflowHost, type WorkflowHost } from './fixtures/workflow.ts'
 
@@ -256,7 +256,7 @@ describe('the workflow tools\' refusals', () => {
 
 describe('the plugin entry', () => {
   it('waits without the orchestrator service, as where the engine is off, and registers its kind once the service exists, until disposed', async () => {
-    const start = vi.spyOn(WorkflowFloor.prototype, 'start')
+    const start = vi.spyOn(WorkflowRuns.prototype, 'start')
     const directory = newDirectory(); directories.push(directory)
     const store = new Store(join(directory, 'orchestrator.sqlite'))
     const sources = new SourceRegistry(() => SettingsSchema.parse({}), new HealthBoard())
@@ -274,7 +274,7 @@ describe('the plugin entry', () => {
     store.close()
   })
   it('a start that fails becomes the Source\'s health, not an unhandled rejection', async () => {
-    const start = vi.spyOn(WorkflowFloor.prototype, 'start').mockRejectedValue(new Error('setup broke'))
+    const start = vi.spyOn(WorkflowRuns.prototype, 'start').mockRejectedValue(new Error('setup broke'))
     const directory = newDirectory(); directories.push(directory)
     const store = new Store(join(directory, 'orchestrator.sqlite'))
     const board = new HealthBoard()
@@ -333,7 +333,7 @@ describe('the plugin entry', () => {
     } finally { vi.useRealTimers() }
   })
   it('refuses configuration keys it does not use before registering anything, so a misspelt key never runs on the default', () => {
-    const start = vi.spyOn(WorkflowFloor.prototype, 'start')
+    const start = vi.spyOn(WorkflowRuns.prototype, 'start')
     const ctx = new Context()
     expect(() => workflowPlugin.apply(ctx, workflowPlugin.Config({ pollMS: 500, maxAttempt: 2 } as never))).toThrow('keys it does not use: pollMS, maxAttempt')
     expect(start).not.toHaveBeenCalled()

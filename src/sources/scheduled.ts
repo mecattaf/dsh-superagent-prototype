@@ -336,7 +336,7 @@ async function watch(ctx: SourceContext, config: ScheduledConfig, signal: AbortS
         if (!lost.signal.aborted) throw error
       }
     }
-    // A lost lock, as after a stall past its stale time, would otherwise end the Source for the life of the process while the floor
+    // A lost lock, as after a stall past its stale time, would otherwise end the Source for the life of the process while the host
     // runs: wait the stale time, then take the lock back as at the start.
     if (lost.signal.aborted) await pause(LOCK_STALE_MS, signal)
   }

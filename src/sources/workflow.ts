@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import s from '@deepseek-ai/schemastery'
 import { z } from 'zod'
 import type { SourceKind } from './kind.ts'
-import { WorkflowFloor } from './workflow-floor.ts'
+import { WorkflowRuns } from './workflow-runs.ts'
 import { workflowTools } from './workflow-tools.ts'
 import { MAX_ATTEMPTS, SOURCE } from './workflow-trigger.ts'
 
@@ -27,7 +27,7 @@ export const Config = s.object({
 export type WorkflowConfig = ReturnType<typeof Config>
 
 /** The workflow kind: its nodes are senderless, so the Policy's admission row `workflow` decides whether they become candidates. */
-export const workflowKind = (floor: Pick<WorkflowFloor, 'startRun' | 'status' | 'ticketEnded'>): SourceKind<Record<string, never>> => ({
+export const workflowKind = (runs: Pick<WorkflowRuns, 'startRun' | 'status' | 'ticketEnded'>): SourceKind<Record<string, never>> => ({
   kind: SOURCE,
   title: { zh: '工作流', en: 'Workflows' },
   description: { zh: '运行工作流脚本；脚本的每个 agent() 调用成为一个候选，接受后成为一张工单。', en: 'Runs workflow scripts; each agent() call of a script becomes a candidate, and a ticket once accepted.' },
@@ -35,8 +35,8 @@ export const workflowKind = (floor: Pick<WorkflowFloor, 'startRun' | 'status' | 
   fields: [],
   health: [SOURCE],
   scope: () => ({ listened: true, observed: true, row: SOURCE }),
-  tools: workflowTools(floor),
-  ticketEnded: ticket => { floor.ticketEnded(ticket) },
+  tools: workflowTools(runs),
+  ticketEnded: ticket => { runs.ticketEnded(ticket) },
 })
 
 export const name = 'dsh-superagent-workflow'
@@ -50,11 +50,11 @@ function checked(config: WorkflowConfig): WorkflowConfig {
 export function apply(ctx: Context, config: WorkflowConfig): void {
   checked(config)
   ctx.effect(() => {
-    const floor = new WorkflowFloor(ctx.orchestrator, config, ctx.logger)
-    const unregister = ctx.orchestrator.sources.register(workflowKind(floor))
+    const runs = new WorkflowRuns(ctx.orchestrator, config, ctx.logger)
+    const unregister = ctx.orchestrator.sources.register(workflowKind(runs))
     // DSH ends its process on an unhandled rejection, so a failure that escapes the start becomes the Source's health.
-    const running = floor.start().catch((error: unknown) => { ctx.orchestrator.context({ kind: SOURCE, health: [SOURCE] }).report(SOURCE, { state: 'error', detail: String(error) }) })
+    const running = runs.start().catch((error: unknown) => { ctx.orchestrator.context({ kind: SOURCE, health: [SOURCE] }).report(SOURCE, { state: 'error', detail: String(error) }) })
     // Stop the runs first, so nothing reports to the kind's entries after they are released.
-    return async () => { floor.stop(); await running; unregister() }
+    return async () => { runs.stop(); await running; unregister() }
   }, 'workflow: source kind and runs')
 }

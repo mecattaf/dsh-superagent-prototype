@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { hostname as osHostname } from 'node:os'
-import { isAbsolute, join } from 'node:path'
+import { delimiter, isAbsolute, join } from 'node:path'
 import { key, latestAssignment, liveTicket, runningAssignment, waitsForPerson } from '../core/index.ts'
 import type { AssessmentOutcome, Assignment, EngineForExecutor, Ticket, TicketInput, Trigger } from '../core/index.ts'
 import type { DshdPair, Machine } from '../deployment.ts'
@@ -10,7 +10,6 @@ import type { Store } from '../app/store.ts'
 import { Later, type Effects } from '../app/effects.ts'
 import type { Sessions } from '../app/sessions.ts'
 import { reportRelay } from '../app/notices.ts'
-import { inherited } from '../infra/environment.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { KV } from '../kv.ts'
 import { LIMITS } from '../limits.ts'
@@ -71,7 +70,7 @@ const EXTRA_LABEL = /^superagent\.[a-z0-9._-]+$/
 const UNIT_NAME = /^[a-z0-9]([a-z0-9_-]{0,61}[a-z0-9])?$/
 const RUNNING = new Set(['running', 'starting', 'stopping'])
 const UNCERTAIN = new Set(['masked', 'orphaned', 'inconsistent', 'unknown'])
-/** Tries of a launch while dshd is unavailable (exit 7) or does not answer before the Assignment is recorded failed. */
+/** Tries of a launch while dshd is unavailable (exit 7) or does not answer before the Assignment is recorded failed; fixed, as the effect's own retry spaces them. */
 const UNAVAILABLE_TRIES = 3
 /**
  * Longest worker answer the summary of a unit that did not complete carries; a completed unit's answer is its whole result. Fixed:
@@ -85,6 +84,24 @@ const FINAL_CHARS = 3800
 const READ_RUN_LINES = 1 << 16
 /** Most `dshd-rm` effects one start queues for Tickets that ended before `dshd.removeEnded` reached them; later starts take the rest. */
 const SWEEP_UNITS = 64
+/** Whether a PATH entry lies in the Nix store, where each path holds one build that a garbage collection may delete. */
+const inStore = (entry: string): boolean => entry === '/nix/store' || entry.startsWith('/nix/store/')
+/**
+ * The values of `names` in this process's environment, for a unit that starts from an empty one; names that are not set are
+ * left out. `PATH` keeps only its entries outside the Nix store, and none at all when every entry is in it: a dshd unit replays
+ * its recipe on every later start, long after a garbage collection may have deleted a store path, while a profile link follows
+ * each switch. `dropped` hears of the entries left out.
+ */
+export function inherited(names: readonly string[], env: NodeJS.ProcessEnv = process.env, dropped: (entries: string[]) => void = () => {}): Record<string, string> {
+  return Object.fromEntries(names.flatMap(name => {
+    const value = env[name]
+    if (value === undefined) return []
+    if (name !== 'PATH') return [[name, value]]
+    const entries = value.split(delimiter), kept = entries.filter(entry => !inStore(entry))
+    if (kept.length < entries.length) dropped(entries.filter(inStore))
+    return kept.length ? [[name, kept.join(delimiter)]] : []
+  }))
+}
 const RETRIED = 'A person retried this ticket. Continue the assignment from the current directory and what it holds now.'
 const DSHD_WORKER_NOTE = 'You are one headless task that dsh-superagent started. Work in the current directory. Nothing reaches you after this '
   + 'message and there is no report tool: when the work is done, end with a short final answer. Your session log is the record. '

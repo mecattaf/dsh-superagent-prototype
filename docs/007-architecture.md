@@ -380,6 +380,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/views/overview.ts` | The overview: Tickets that need a person, problems, the last day's flow and the Executor's load |
 | `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
 | `src/executor/port.ts` | `ExecutorPort`, what Runtime uses of its Executor, picked from `DshExecutor` |
+| `src/executor/dshd-config.ts` | The `dshd` block of the entry's Config: `DshdSchema`, `DshdConfig`, `DshdPair`, and `dshdOf`, the checks `machineOf` makes of it |
 | `src/executor/dshd.ts` | The DshdExecutor, one dshd headless unit per Assignment: `DshdBinding`, `unitName`, `composeBrief`, `verdictOf`, `eventsOf`, and `usageOf` with `addUsage`, which the workflow Source also uses to sum a node's usage |
 | `src/executor/dshd-cli.ts` | `DshdCli`, the dshd client over DSH's subprocess service, and the `DshdPort` it implements |
 | `src/executor/dshd-summary.ts` | `noAnswerSummary` and `isNoAnswer`: the summary of a unit that exited 0 without a final answer, which the DshdExecutor writes and the workflow Source reads as no result |
@@ -411,7 +412,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/workflow-trigger.ts` | A workflow node as a Trigger: one per attempt of each `agent()` call, on the node's own Thread, its text the prompt and the schema instruction |
 | `src/sources/workflow-store.ts` | A run's records in the kv area, and `KvJournal`, its journal one line per record |
 | `src/sources/workflow-backend.ts` | `TicketBackend`, the interpreter's Backend that raises a node's Trigger and answers with its Ticket's result; `TicketWaiter`, `settle` and `parseJsonReply` |
-| `src/sources/workflow-floor.ts` | `WorkflowFloor`: starting a run, driving and resuming it from its journal, its status node by node, and `pinnedResolver` for `workflow()` |
+| `src/sources/workflow-runs.ts` | `WorkflowRuns`: starting a run, driving and resuming it from its journal, its status node by node, and `pinnedResolver` for `workflow()` |
 | `src/sources/workflow-tools.ts` | The main Session's `orchestrator_workflow_start` and `orchestrator_workflow_status` |
 | `src/workflow/README.md` | Where `src/workflow` comes from: Substrate's interpreter at a fixed commit, vendored unchanged, every deviation with its reason, and the contract it keeps |
 | `src/workflow/index.ts` | The interpreter's exports |
@@ -513,7 +514,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/class-docs.spec.ts` | Every class in `src`, apart from the vendored `src/workflow`, has a JSDoc block before it |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, every document that lists the node states of `orchestrator_workflow_status` lists those of `NodeState`, and this document's tables list every module and every test |
 
-`tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `fake-dshd.ts`, an in-memory dshd; `dshd-0.1.0.ts`, lines dshd 0.1.0 printed; `dshd-floor.ts`, the simulated host as a floor on the dshd executor, seeded through the management API, with the main Session as a scripted assessor; `git.ts`, the environment of every git the tests start, which names no repository; `workflow.ts`, the workflow Source on a real Store and Engine with a stand-in Executor, and `fixture-3.workflow.js`, the three-node workflow its tests and the live check run; `async.ts`; and `scheduled-occurrence-v1.json`, the occurrence record format a scheduler writes. `tests/workflow/helpers.ts` is the interpreter tests' own helper.
+`tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `fake-dshd.ts`, an in-memory dshd; `dshd-0.1.0.ts`, lines dshd 0.1.0 printed; `dshd-host.ts`, the simulated host on the dshd executor, seeded through the management API, with the main Session as a scripted assessor; `git.ts`, the environment of every git the tests start, which names no repository; `workflow.ts`, the workflow Source on a real Store and Engine with a stand-in Executor, and `fixture-3.workflow.js`, the three-node workflow its tests and the live check run; `async.ts`; and `scheduled-occurrence-v1.json`, the occurrence record format a scheduler writes. `tests/workflow/helpers.ts` is the interpreter tests' own helper.
 
 ## Persistence
 

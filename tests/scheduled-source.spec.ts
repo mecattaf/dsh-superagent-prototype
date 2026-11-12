@@ -29,7 +29,7 @@ afterEach(() => {
 })
 const temp = (prefix: string): string => { const directory = mkdtempSync(join(tmpdir(), prefix)); directories.push(directory); return directory }
 
-/** Settings of a floor that admits occurrences as inferred candidates and accepts them in auto mode. */
+/** Settings of a deployment that admits occurrences as inferred candidates and accepts them in auto mode. */
 const ADMITTED = { eval: { mode: 'auto' }, policy: { sources: { scheduled: { admission: { occurrence: { unlistedUnaddressed: 'inferred' } } } } } }
 /**
  * A real Store and SourceRegistry, an Engine with stand-in ports, and a state directory whose inbox exists. `registered: false`

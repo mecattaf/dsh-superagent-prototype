@@ -1,9 +1,9 @@
 /** The main Session's workflow tools: `orchestrator_workflow_start` starts a run of a script, `orchestrator_workflow_status` reads runs. */
 import { z } from 'zod'
 import { sourceTool, type SourceTool } from './kind.ts'
-import type { WorkflowFloor } from './workflow-floor.ts'
+import type { WorkflowRuns } from './workflow-runs.ts'
 
-export function workflowTools(floor: Pick<WorkflowFloor, 'startRun' | 'status'>): SourceTool[] {
+export function workflowTools(runs: Pick<WorkflowRuns, 'startRun' | 'status'>): SourceTool[] {
   return [
     sourceTool({
       name: 'orchestrator_workflow_start',
@@ -15,13 +15,13 @@ export function workflowTools(floor: Pick<WorkflowFloor, 'startRun' | 'status'>)
         pair: z.string().min(1).optional().describe('Compute pair of all nodes; else the Source\'s, else the Executor\'s default.'),
         trigger_id: z.string().min(1).optional().describe('The request\'s trigger; repeating it with the same script, cwd and args returns its run.'),
       }).strict(),
-      execute: async args => floor.startRun(args),
+      execute: async args => runs.startRun(args),
     }),
     sourceTool({
       name: 'orchestrator_workflow_status',
       description: 'Read a workflow run and where each of its nodes is: waiting, offered, held, unavailable, ticket, done or null; without run_id, the newest runs. A held or unavailable (never assessed) node waits until its trigger is requeued.',
       schema: z.object({ run_id: z.string().min(1).optional() }).strict(),
-      execute: async args => ({ runs: floor.status(args.run_id) }),
+      execute: async args => ({ runs: runs.status(args.run_id) }),
     }),
   ]
 }

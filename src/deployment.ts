@@ -8,87 +8,30 @@ import { z } from 'zod'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { runAsWorker, sameDirectory, withoutDirectory, workerBin } from './infra/environment.ts'
 import { SetupError } from './setup.ts'
+import { DshdSchema, dshdOf, type DshdConfig } from './executor/dshd-config.ts'
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
 const absolute = (description: string) => s.string().pattern(/^\//).description(`${description} Absolute path.`)
-// An unannotated `s.dict` makes the `Config` type unnameable for declaration emit (it needs cosmokit's `Dict`), so the two dshd maps
-// are annotated with `Record` types. Schemastery declares their shape, for the settings page and `--dump-config`; `machineOf`
-// still checks them with zod, which also refuses unknown pair keys and names the profile rule.
-type PairInput = { profile?: string | null; env?: Record<string, string> | null; maxWorkers?: number | null }
-type PairOutput = { profile: string; env: Record<string, string>; maxWorkers?: number }
-const DshdPairs: s<Record<string, PairInput>, Record<string, PairOutput>> = s.dict(s.object({
-  profile: s.string().required().description('DSH profile the worker boots: a headless profile under the DSH home.'),
-  env: s.dict(s.string()).default({}).description('Environment added for this pair\'s units. Values are recorded in the unit recipe: no secrets.'),
-  maxWorkers: s.number().min(1).max(LIMITS.maxWorkers.max).step(1).description('At most this many units of this pair at once; unset: only the overall limit.'),
-}))
-const DshdEnv: s<Record<string, string>> = s.dict(s.string())
-const DshdPairSchema = z.object({
-  /** DSH profile the worker boots: a headless profile under the DSH home. */
-  profile: z.string().regex(/^[A-Za-z0-9._-]+$/, 'a DSH profile name'),
-  /** Environment added for this pair's units. Values are recorded in the unit recipe: no secrets. */
-  env: z.record(z.string(), z.string()).default({}),
-  /** At most this many units of this pair at once; unset: only the overall limit. */
-  maxWorkers: z.number().int().min(1).max(LIMITS.maxWorkers.max).optional(),
-}).strict()
-const DshdMapsSchema = z.object({ pairs: z.record(z.string(), DshdPairSchema), env: z.record(z.string(), z.string()) })
-/** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir`, `engine`, `lockWaitMs`, `executor` or `dshd` remounts the plugin. */
+/** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir` remounts the plugin. */
 export const Config = s.object({
   stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
-  engine: s.boolean().default(true)
-    .description('Whether this process runs dsh-superagent. Off, the entry loads but takes no lock, opens no database, changes no process environment, registers no route or tool and starts no Session, so a process that loads the bundle only for its agent presets stays inert.'),
-  lockWaitMs: s.number().min(0).max(300_000).step(1).default(35_000)
-    .description('How long a start waits for the state directory lock, and the scheduled Source for its inbox lock, while another process holds it, in milliseconds. The lock of a process that died goes stale within 30 s and is taken over; a live holder is refused once the time is up. 0: refuse at once.'),
   promptMaxChars: s.number().min(LIMITS.promptMaxChars.min).max(LIMITS.promptMaxChars.max).step(1).default(100000)
     .description('Largest saved prompt configuration, in characters.').volatile(),
   admissionContextMaxPages: s.number().min(LIMITS.admissionContextMaxPages.min).max(LIMITS.admissionContextMaxPages.max).step(1).default(10)
     .description('Pages of thread context one assessment may read.').volatile(),
   admissionContextTimeoutMs: s.number().min(LIMITS.admissionContextTimeoutMs.min).max(LIMITS.admissionContextTimeoutMs.max).step(1)
     .default(15000).description('Time limit of one context read during an assessment, in milliseconds.').volatile(),
+  // Changing `engine`, `lockWaitMs`, `executor` or `dshd` remounts the plugin too.
+  engine: s.boolean().default(true)
+    .description('Whether this process runs dsh-superagent. Off, the entry loads but takes no lock, opens no database, changes no process environment, registers no route or tool and starts no Session, so a process that loads the bundle only for its agent presets stays inert.'),
+  lockWaitMs: s.number().min(0).max(300_000).step(1).default(35_000)
+    .description('How long a start waits for the state directory lock, and the scheduled Source for its inbox lock, while another process holds it, in milliseconds. The lock of a process that died goes stale within 30 s and is taken over; a live holder is refused once the time is up. 0: refuse at once.'),
   executor: s.union(['dsh', 'dshd']).default('dsh')
     .description('How Assignments run: dsh, one DSH Session per Ticket in this process; dshd, one dshd headless unit per Assignment.'),
-  dshd: s.object({
-    command: s.string().default('dshd').description('The dshd CLI: a command name on PATH or an absolute path.'),
-    prefix: s.string().pattern(/^[a-z][a-z0-9]{0,9}$/).default('sa').description('First part of every unit name.'),
-    pairs: DshdPairs.default({}).description('Provider-harness pairs by name, each `{profile, env, maxWorkers}`: the headless profile its workers boot, the environment added for its units and its own limit. Values of `env` are recorded in the unit recipe: no secrets.'),
-    defaultPair: s.string().default('').description('The pair a Ticket runs on when its Trigger names none.'),
-    cwd: s.string().default('').description('Directory of a Ticket whose Trigger names none. Absolute path; empty: a directory under the Execution directory.'),
-    env: DshdEnv.default({}).description('Environment added for every unit, by name. Values are recorded in the unit recipe: no secrets.'),
-    passEnv: s.array(s.string()).default(['HOME', 'USER', 'LOGNAME', 'LANG', 'LOCALE_ARCHIVE', 'TZDIR', 'PATH', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', 'DSH_HOME'])
-      .description('Names copied from this process\'s environment into every unit; LOCALE_ARCHIVE and TZDIR are where a NixOS host keeps locales and time zones. PATH entries under /nix/store are left out.'),
-    args: s.array(s.string()).default(['--approval-policy', 'never']).description('dsh headless options placed before --json and the task.'),
-    watchSeconds: s.number().min(5).max(600).step(1).default(30).description('How long one dshd wait follows a unit before looking again.'),
-    briefArgvMaxChars: s.number().min(1000).max(120000).step(1).default(64000)
-      .description('Longest brief passed as the task argument, in bytes of UTF-8 (Linux takes at most 131072 in one argument); a longer one is written to a file under stateDir.'),
-    removeEnded: s.boolean().default(false)
-      .description('Whether a unit is removed with dshd rm once its Ticket has ended and its binding records how it ended and its Session. DSH keeps the Session. Off: ended units stay until someone removes them.'),
-    resumeDelaySeconds: s.number().min(0).max(86_400).step(1).default(300)
-      .description('How long after a start the work that waited from before it waits to launch, in seconds, so a person can look at it first; work created after the start launches at once. 0: it launches at once.'),
-    resumeMaxAgeHours: s.number().min(0).max(8760).step(1).default(24)
-      .description('Work that waited from before a start and is older than this many hours is not launched: it is recorded failed, and its Ticket waits for a person to retry it. 0: no age limit.'),
-    uncertainWatchLimit: s.number().min(0).max(1000).step(1).default(10)
-      .description('How many looks in a row may find a unit masked, inconsistent or in a state dshd cannot tell before its Assignment settles as lost; an orphaned unit settles at once. 0: wait until dshd can tell.'),
-  }).default({}).description('The dshd executor; read only when executor is dshd.'),
+  dshd: DshdSchema,
 })
 export type DeploymentConfig = ReturnType<typeof Config>
-/** One provider-harness pair of the dshd executor: the headless profile its units boot, their added environment and their own limit. */
-export interface DshdPair { profile: string; env: Record<string, string>; maxWorkers?: number }
-/** Configuration of the dshd executor (`executor: dshd`). */
-export interface DshdConfig {
-  command: string
-  prefix: string
-  pairs: Record<string, DshdPair>
-  defaultPair: string
-  cwd: string
-  env: Record<string, string>
-  passEnv: string[]
-  args: string[]
-  watchSeconds: number
-  briefArgvMaxChars: number
-  removeEnded: boolean
-  resumeDelaySeconds: number
-  resumeMaxAgeHours: number
-  uncertainWatchLimit: number
-}
+export type { DshdConfig, DshdPair } from './executor/dshd-config.ts'
 export interface Machine {
   stateDir: string
   lockWaitMs: number
@@ -109,20 +52,9 @@ const MOVED: Record<string, string> = {
 export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
-  const { stateDir, lockWaitMs, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, engine, executor, dshd } = config
-  const wrong = (what: string): never => { throw new Error(`dsh-superagent dshd configuration: ${what}; docs/006-deployment.md lists the keys`) }
-  const maps = DshdMapsSchema.safeParse({ pairs: dshd.pairs, env: dshd.env })
-  if (!maps.success) wrong(maps.error.issues.map(issue => `${['dshd', ...issue.path].join('.')}: ${issue.message}`).join('; '))
-  const machine: Machine = { stateDir, lockWaitMs, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, engine, executor, dshd: { ...dshd, ...maps.data! } }
-  if (executor === 'dshd') {
-    if (!Object.hasOwn(dshd.pairs, dshd.defaultPair)) wrong(`the default pair ${JSON.stringify(dshd.defaultPair)} is not among the pairs (${Object.keys(dshd.pairs).join(', ') || 'none'})`)
-    if (dshd.cwd && !isAbsolute(dshd.cwd)) wrong(`cwd ${dshd.cwd} is not an absolute path`)
-    // A unit's environment travels as `dshd run` arguments, past the credential stripping of DSH's subprocess runtime, and dshd
-    // records it, so a name copied from this process's environment may not be credential-shaped (DSH's SENSITIVE_ENV_PATTERN).
-    const secret = dshd.passEnv.filter(name => /KEY|PASSWORD|SECRET|TOKEN/i.test(name))
-    if (secret.length) wrong(`passEnv names credential-shaped variables, which dshd would record: ${secret.join(', ')}`)
-  }
-  return machine
+  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
+  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, lockWaitMs: config.lockWaitMs, engine: config.engine,
+    executor: config.executor, dshd: dshdOf(config.executor, config.dshd) }
 }
 
 export const GithubAccountsSchema = z.object({
