@@ -36,7 +36,7 @@ export const OccurrenceRecordSchema = z.object({
   revision: z.string().regex(/^[0-9a-f]{12}$/),
   /** The work, frozen when the record was written. */
   text: z.string().min(1).max(32_768),
-  /** Names the compute pair the work runs on; absent means the floor's default. */
+  /** Names the compute pair the work runs on; absent means the Executor's default pair. */
   pair: z.string().regex(/^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/).optional(),
   by: z.string().min(1).max(64),
   at: Instant,

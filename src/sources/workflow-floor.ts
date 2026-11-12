@@ -47,7 +47,7 @@ export function pinnedResolver(store: WorkflowState, run: Pick<WorkflowRun, 'id'
       : [join(base, `${ref}.js`), join(run.cwd, '.claude', 'workflows', `${ref}.js`)]
     for (const path of candidates) {
       let source: string
-      try { source = readFileSync(path, 'utf8') } catch { continue }
+      try { source = readFileSync(path, 'utf8') } catch { continue /* Not readable at this candidate path; try the next. */ }
       const digest = sha256(source)
       store.atomic(() => { store.state.set(KV.workflow.script(digest), source); store.state.set(pin, { path, sha256: digest }) })
       return { source, path }
