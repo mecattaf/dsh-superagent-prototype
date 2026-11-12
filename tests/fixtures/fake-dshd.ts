@@ -7,9 +7,10 @@ import { DshdUnavailable, type DshdLastRun, type DshdPort, type DshdRead, type D
 
 interface Instance { recipe: DshdRecipe; id: string; state: string; invocationId: string | null; lastRun: DshdLastRun; lines: string[] }
 type Verb = 'run' | 'get' | 'wait' | 'read' | 'stop'
-/** The lines a headless `--json` run prints: its Session, then its answer, around dshd-run's own lines. */
+/** The lines a headless `--json` run prints: its Session, then its answer, around dshd-run's own lines (as `READ_JSON_RUN` in dshd-0.1.0.ts). */
 export const runLines = (sessionId: string, final?: string): string[] => ['dshd-run: run started', JSON.stringify({ type: 'session', sessionId, cwd: '/' }),
-  JSON.stringify({ type: 'text', text: 'Working.' }), ...final === undefined ? [] : [JSON.stringify({ type: 'final', text: final })], 'dshd-run: run ended']
+  JSON.stringify({ type: 'text', text: 'Working.' }),
+  ...final === undefined ? [] : [JSON.stringify({ type: 'final', sessionId, reason: { kind: 'completed' }, text: final })], 'dshd-run: run ended']
 
 /** In-memory `DshdPort` with helpers that end, cut, rerun or remove an instance, and fail the next call of a verb. */
 export class FakeDshd implements DshdPort {
@@ -73,8 +74,9 @@ export class FakeDshd implements DshdPort {
       : signal !== undefined ? { signal } : { exitCode }
     instance.lines = how.lines ?? runLines(`session-${name}`, 'Done.')
     instance.state = ending === 'exited' || ending === 'stopped' ? 'stopped' : ending === 'interrupted' ? 'interrupted' : 'failed'
-    // As dshd does once a headless run ended, the top-level invocation is gone and only the last run names it.
-    instance.invocationId = null
+    // As dshd does once a headless run ended, the top-level invocation is gone and only the last run names it; a failed unit keeps it
+    // (`WAIT_ENDED_FAILED` in dshd-0.1.0.ts).
+    if (instance.state !== 'failed') instance.invocationId = null
     instance.lastRun = { ...instance.lastRun, ending, endedAt: 1, child }
   }
   /** A reboot cut the run off. */
@@ -112,9 +114,12 @@ export class FakeDshd implements DshdPort {
           stdout = JSON.stringify({ ...result, warnings: [] })
           return 0
         }
+        // dshd's stop answers stopped, or already-stopped for a unit that was not running.
+        const running = this.instances.get(name)?.state === 'running'
         const result = verb === 'get' ? await this.get(name) : verb === 'wait' ? await this.wait(name) : verb === 'read' ? await this.read(name) : await this.stop(name)
         if (result === 'not-found') { stderr = JSON.stringify({ error: { kind: 'not-found', message: `no instance ${name}`, hint: null } }); return 3 }
-        stdout = JSON.stringify(verb === 'read' ? { name, streams: ['stdout', 'stderr'], ...result } : result)
+        stdout = JSON.stringify(verb === 'read' ? { name, streams: ['stdout', 'stderr'], ...result }
+          : verb === 'stop' ? { outcome: running ? 'stopped' : 'already-stopped', ...result } : result)
         return 0
       } catch (error) {
         const kind = error instanceof DshdUnavailable ? 'systemd-unavailable' : (error as { kind?: string }).kind ?? 'io'
