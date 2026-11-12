@@ -197,6 +197,23 @@ describe('the dshd executor on these outcomes', () => {
       expect(latestAssignment(stored(ticket))!.report).toMatchObject({ state: 'failed', summary: `Unit ${name} ended task-failed (exit 1).\n\nUnit ${name}; session unknown.` })
       expect(reported()).toEqual([expect.objectContaining({ unit: name, session: null })])
     })
+    it('takes no Session from a longer read that answers for another run under the unit\'s name', async () => {
+      const other = JSON.stringify({ name: 'probe-20261112-c1', invocationId: '0123456789abcdef0123456789abcdef', complete: true, streams: ['stdout', 'stderr'], lines: all })
+      const ticket = await accepted(failing({ stdout: other, exit: 0 }))
+      expect(binding(ticket)).toMatchObject({ state: 'ended', ended: { verdict: 'task-failed', exitCode: 1 } })
+      expect(binding(ticket)!.sessionId).toBeUndefined()
+      expect(reported()).toEqual([expect.objectContaining({ session: null })])
+    })
+    it('keeps the answer of the newest lines when only the longer read names the Session', async () => {
+      // A final event that does not repeat the Session, as dsh before 0.2.2 printed it.
+      const answered = [...all.slice(0, -3), JSON.stringify({ type: 'final', reason: { kind: 'error' }, text: 'Stopped: the model went away.' }), ...all.slice(-3)]
+      const dshd = replay({ run: [{ stdout: RUN_CREATED, exit: 0 }], get: [{ stdout: RUN_CREATED, exit: 0 }, { stdout: WAIT_ENDED_FAILED, exit: 0 }],
+        wait: [{ stdout: WAIT_ENDED_FAILED, exit: 0 }], read: [{ stdout: envelope(answered.slice(-200), false), exit: 0 }, { stdout: envelope(answered, true), exit: 0 }] })
+      const ticket = await accepted(dshd)
+      expect(dshd.verbs.filter(verb => verb === 'read')).toHaveLength(2)
+      expect(binding(ticket)).toMatchObject({ state: 'ended', sessionId: 'session-long' })
+      expect(latestAssignment(stored(ticket))!.report!.summary).toContain('Stopped: the model went away.')
+    })
     it('reads it once when its final event names the Session', async () => {
       const lines = [...all.slice(-198, -3), JSON.stringify({ type: 'final', sessionId: 'session-long', reason: { kind: 'completed' }, text: 'Done.' }),
         'dshd-run: dsh exited with status 0; exiting 0', 'dshd-run: run ended: success']

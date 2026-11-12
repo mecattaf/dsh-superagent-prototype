@@ -196,6 +196,22 @@ describe('idempotency', () => {
     expect(fake.instances.size).toBe(1)
     expect(binding(ticket!)).toMatchObject({ state: 'running', invocationId: 'invocation-1' })
   })
+  it('re-runs a launch a crash cut off on its stored pair even when that pair left the configuration before the restart', async () => {
+    await start()
+    fake.hold = deferred().promise
+    const trigger = request('1', { cwd: directory(), pair: 'local' })
+    h!.runtime.receive(trigger); await h!.runtime.idle()
+    await h!.route({ kind: 'accept', trigger_id: trigger.id, title: 'Fix', worktree_name: 'fix-regression', acknowledgement: '收到。' })
+    await waitUntil(() => fake.runs.length === 1)
+    await h!.restart({ executor: 'dshd', dshd: testDshd({ pairs: { opus: PAIRS.opus }, defaultPair: 'opus' }) })
+    fake.hold = undefined
+    await h!.runtime.idle()
+    const [ticket] = h!.runtime.store.tickets.list()
+    // The binding was recorded before dshd run, so its pair and frozen recipe stand; looking the pair up again would refuse it.
+    expect(fake.runs).toHaveLength(2)
+    expect(fake.runs[1]).toEqual(fake.runs[0])
+    expect(binding(ticket!)).toMatchObject({ state: 'running', pair: 'local' })
+  })
   it('binds a unit that ran to its end before the crash (task-already-ran) and settles it from its last run', async () => {
     await start()
     fake.hold = deferred().promise
@@ -640,6 +656,16 @@ describe('stop', () => {
     h!.runtime.engine.stopTicket(ticket.id); await h!.runtime.idle()
     expect(fake.stops).toEqual([])
     expect(binding(ticket)).toMatchObject({ state: 'ended', ended: { verdict: 'completed' } })
+  })
+  it('records a unit dshd cannot tell about as lost when its Ticket is stopped, and stops nothing', async () => {
+    await start()
+    const { ticket } = await accepted(request('1', { cwd: directory() }))
+    fake.instances.get(nameOf(ticket))!.state = 'inconsistent'
+    h!.runtime.engine.stopTicket(ticket.id)
+    await waitUntil(() => binding(ticket)!.state === 'ended')
+    expect(fake.stops).toEqual([])
+    // An ended binding holds a final verdict: 'unknown' is what keeps a running Assignment, never how a unit ended.
+    expect(binding(ticket)!.ended?.verdict).toBe('lost')
   })
   it('keeps the end a watch recorded while dshd stop had not answered yet', async () => {
     await start()
