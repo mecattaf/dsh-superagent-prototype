@@ -184,7 +184,7 @@ Each kind has a health entry under its name. It reports an error once one of its
 
 Sources extend the host through `SourceKind`, defined in `src/sources/kind.ts`. A kind declares its identity, title, description, configuration `schema` and `fields`, derived `facts`, and `health` entries. Optional behavior includes `scope`, a `channel` (`allowed`, `send`, `link`), `threadContext`, `find`, `policy`, `environment`, `refreshLabels` and `tools`.
 
-`tools` is this fork's one addition to upstream's Source protocol: main-Session tools that a kind adds while it is registered, each typed with `sourceTool` and named `orchestrator_<kind>_…`. It exists because the main Session receives tools only from `mainTools` when it is decorated, and then restricts what it inherits, while a Source plugin registers its kind only once dsh-superagent is ready, after that decoration. The hook is four small changes and nothing else in the fork's diff of upstream code:
+`tools` is this fork's one addition to upstream's Source protocol: main-Session tools that a kind adds while it is registered, each typed with `sourceTool` and named `orchestrator_<kind>_…`. It exists because the main Session receives tools only from `mainTools` when it is decorated, and then restricts what it inherits, while a Source plugin registers its kind only once dsh-superagent is ready, after that decoration. The hook is these four changes to upstream files, and touches nothing under `src/core`:
 
 | File | Change |
 | --- | --- |
