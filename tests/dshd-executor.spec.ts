@@ -526,6 +526,9 @@ describe('stop', () => {
     await waitUntil(() => fake.runs.length === 1)
     const ticketId = (result.ticket as { ticket_id: string }).ticket_id
     h!.runtime.engine.stopTicket(ticketId)
+    // The stop has run and left the unit to the launch under way.
+    await h!.runtime.effects.idle('dshd-stop')
+    expect(h!.runtime.effects.pending('dshd-stop')).toBe(false)
     await h!.restart()
     fake.hold = undefined
     await h!.runtime.idle()
