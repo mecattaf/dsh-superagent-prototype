@@ -2,70 +2,7 @@ import { Volatile } from "@deepseek-ai/cordis";
 import { z } from "zod";
 import s from "@deepseek-ai/schemastery";
 import "@deepseek-ai/dsh-subprocess";
-//#region src/deployment.d.ts
-/** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir`, `engine`, `executor` or `dshd` remounts the plugin. */
-declare const Config: s<Schemastery.ObjectS<NoInfer<{
-  stateDir: s<string, string, "defined">;
-  engine: s<boolean, boolean, "defined">;
-  promptMaxChars: s<number, number, "volatile-defined">;
-  admissionContextMaxPages: s<number, number, "volatile-defined">;
-  admissionContextTimeoutMs: s<number, number, "volatile-defined">;
-  executor: s<"dsh" | "dshd", "dsh" | "dshd", "defined">;
-  dshd: s<Schemastery.ObjectS<NoInfer<{
-    command: s<string, string, "defined">;
-    prefix: s<string, string, "defined">;
-    pairs: s<any, any, "defined">;
-    defaultPair: s<string, string, "defined">;
-    cwd: s<string, string, "defined">;
-    env: s<any, any, "defined">;
-    passEnv: s<string[], string[], "defined">;
-    args: s<string[], string[], "defined">;
-    watchSeconds: s<number, number, "defined">;
-    briefArgvMaxChars: s<number, number, "defined">;
-  }>>, Schemastery.ObjectT<NoInfer<{
-    command: s<string, string, "defined">;
-    prefix: s<string, string, "defined">;
-    pairs: s<any, any, "defined">;
-    defaultPair: s<string, string, "defined">;
-    cwd: s<string, string, "defined">;
-    env: s<any, any, "defined">;
-    passEnv: s<string[], string[], "defined">;
-    args: s<string[], string[], "defined">;
-    watchSeconds: s<number, number, "defined">;
-    briefArgvMaxChars: s<number, number, "defined">;
-  }>>, "defined">;
-}>>, Schemastery.ObjectT<NoInfer<{
-  stateDir: s<string, string, "defined">;
-  engine: s<boolean, boolean, "defined">;
-  promptMaxChars: s<number, number, "volatile-defined">;
-  admissionContextMaxPages: s<number, number, "volatile-defined">;
-  admissionContextTimeoutMs: s<number, number, "volatile-defined">;
-  executor: s<"dsh" | "dshd", "dsh" | "dshd", "defined">;
-  dshd: s<Schemastery.ObjectS<NoInfer<{
-    command: s<string, string, "defined">;
-    prefix: s<string, string, "defined">;
-    pairs: s<any, any, "defined">;
-    defaultPair: s<string, string, "defined">;
-    cwd: s<string, string, "defined">;
-    env: s<any, any, "defined">;
-    passEnv: s<string[], string[], "defined">;
-    args: s<string[], string[], "defined">;
-    watchSeconds: s<number, number, "defined">;
-    briefArgvMaxChars: s<number, number, "defined">;
-  }>>, Schemastery.ObjectT<NoInfer<{
-    command: s<string, string, "defined">;
-    prefix: s<string, string, "defined">;
-    pairs: s<any, any, "defined">;
-    defaultPair: s<string, string, "defined">;
-    cwd: s<string, string, "defined">;
-    env: s<any, any, "defined">;
-    passEnv: s<string[], string[], "defined">;
-    args: s<string[], string[], "defined">;
-    watchSeconds: s<number, number, "defined">;
-    briefArgvMaxChars: s<number, number, "defined">;
-  }>>, "defined">;
-}>>, "plain">;
-type DeploymentConfig = ReturnType<typeof Config>;
+//#region src/executor/dshd-config.d.ts
 /** One provider-harness pair of the dshd executor: the headless profile its units boot, their added environment and their own limit. */
 interface DshdPair {
   profile: string;
@@ -84,9 +21,129 @@ interface DshdConfig {
   args: string[];
   watchSeconds: number;
   briefArgvMaxChars: number;
+  removeEnded: boolean;
+  resumeDelaySeconds: number;
+  resumeMaxAgeHours: number;
+  uncertainWatchLimit: number;
 }
+//#endregion
+//#region src/deployment.d.ts
+/** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir` remounts the plugin. */
+declare const Config: s<Schemastery.ObjectS<NoInfer<{
+  stateDir: s<string, string, "defined">;
+  promptMaxChars: s<number, number, "volatile-defined">;
+  admissionContextMaxPages: s<number, number, "volatile-defined">;
+  admissionContextTimeoutMs: s<number, number, "volatile-defined">;
+  engine: s<boolean, boolean, "defined">;
+  lockWaitMs: s<number, number, "defined">;
+  executor: s<"dsh" | "dshd", "dsh" | "dshd", "defined">;
+  dshd: s<Schemastery.ObjectS<NoInfer<{
+    command: s<string, string, "defined">;
+    prefix: s<string, string, "defined">;
+    pairs: s<Record<string, {
+      profile?: string | null;
+      env?: Record<string, string> | null;
+      maxWorkers?: number | null;
+    }>, Record<string, {
+      profile: string;
+      env: Record<string, string>;
+      maxWorkers?: number;
+    }>, "defined">;
+    defaultPair: s<string, string, "defined">;
+    cwd: s<string, string, "defined">;
+    env: s<Record<string, string>, Record<string, string>, "defined">;
+    passEnv: s<string[], string[], "defined">;
+    args: s<string[], string[], "defined">;
+    watchSeconds: s<number, number, "defined">;
+    briefArgvMaxChars: s<number, number, "defined">;
+    removeEnded: s<boolean, boolean, "defined">;
+    resumeDelaySeconds: s<number, number, "defined">;
+    resumeMaxAgeHours: s<number, number, "defined">;
+    uncertainWatchLimit: s<number, number, "defined">;
+  }>>, Schemastery.ObjectT<NoInfer<{
+    command: s<string, string, "defined">;
+    prefix: s<string, string, "defined">;
+    pairs: s<Record<string, {
+      profile?: string | null;
+      env?: Record<string, string> | null;
+      maxWorkers?: number | null;
+    }>, Record<string, {
+      profile: string;
+      env: Record<string, string>;
+      maxWorkers?: number;
+    }>, "defined">;
+    defaultPair: s<string, string, "defined">;
+    cwd: s<string, string, "defined">;
+    env: s<Record<string, string>, Record<string, string>, "defined">;
+    passEnv: s<string[], string[], "defined">;
+    args: s<string[], string[], "defined">;
+    watchSeconds: s<number, number, "defined">;
+    briefArgvMaxChars: s<number, number, "defined">;
+    removeEnded: s<boolean, boolean, "defined">;
+    resumeDelaySeconds: s<number, number, "defined">;
+    resumeMaxAgeHours: s<number, number, "defined">;
+    uncertainWatchLimit: s<number, number, "defined">;
+  }>>, "defined">;
+}>>, Schemastery.ObjectT<NoInfer<{
+  stateDir: s<string, string, "defined">;
+  promptMaxChars: s<number, number, "volatile-defined">;
+  admissionContextMaxPages: s<number, number, "volatile-defined">;
+  admissionContextTimeoutMs: s<number, number, "volatile-defined">;
+  engine: s<boolean, boolean, "defined">;
+  lockWaitMs: s<number, number, "defined">;
+  executor: s<"dsh" | "dshd", "dsh" | "dshd", "defined">;
+  dshd: s<Schemastery.ObjectS<NoInfer<{
+    command: s<string, string, "defined">;
+    prefix: s<string, string, "defined">;
+    pairs: s<Record<string, {
+      profile?: string | null;
+      env?: Record<string, string> | null;
+      maxWorkers?: number | null;
+    }>, Record<string, {
+      profile: string;
+      env: Record<string, string>;
+      maxWorkers?: number;
+    }>, "defined">;
+    defaultPair: s<string, string, "defined">;
+    cwd: s<string, string, "defined">;
+    env: s<Record<string, string>, Record<string, string>, "defined">;
+    passEnv: s<string[], string[], "defined">;
+    args: s<string[], string[], "defined">;
+    watchSeconds: s<number, number, "defined">;
+    briefArgvMaxChars: s<number, number, "defined">;
+    removeEnded: s<boolean, boolean, "defined">;
+    resumeDelaySeconds: s<number, number, "defined">;
+    resumeMaxAgeHours: s<number, number, "defined">;
+    uncertainWatchLimit: s<number, number, "defined">;
+  }>>, Schemastery.ObjectT<NoInfer<{
+    command: s<string, string, "defined">;
+    prefix: s<string, string, "defined">;
+    pairs: s<Record<string, {
+      profile?: string | null;
+      env?: Record<string, string> | null;
+      maxWorkers?: number | null;
+    }>, Record<string, {
+      profile: string;
+      env: Record<string, string>;
+      maxWorkers?: number;
+    }>, "defined">;
+    defaultPair: s<string, string, "defined">;
+    cwd: s<string, string, "defined">;
+    env: s<Record<string, string>, Record<string, string>, "defined">;
+    passEnv: s<string[], string[], "defined">;
+    args: s<string[], string[], "defined">;
+    watchSeconds: s<number, number, "defined">;
+    briefArgvMaxChars: s<number, number, "defined">;
+    removeEnded: s<boolean, boolean, "defined">;
+    resumeDelaySeconds: s<number, number, "defined">;
+    resumeMaxAgeHours: s<number, number, "defined">;
+    uncertainWatchLimit: s<number, number, "defined">;
+  }>>, "defined">;
+}>>, "plain">;
+type DeploymentConfig = ReturnType<typeof Config>;
 interface Machine {
   stateDir: string;
+  lockWaitMs: number;
   promptMaxChars: Volatile<number>;
   admissionContextMaxPages: Volatile<number>;
   admissionContextTimeoutMs: Volatile<number>;

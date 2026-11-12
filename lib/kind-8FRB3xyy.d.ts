@@ -1,4 +1,4 @@
-import { F as Thread, I as ThreadFact, R as ThreadRef, S as ChannelRef, U as Trigger, h as SourceScope, l as OutboundMessage, lt as Deployment, m as ScopeResult, t as ReceiveResult, v as AdmissionCell, z as Ticket } from "./intake-CgErUeMw.js";
+import { C as Decision, F as Thread, I as ThreadFact, R as ThreadRef, S as ChannelRef, U as Trigger, h as SourceScope, l as OutboundMessage, lt as Deployment, m as ScopeResult, t as ReceiveResult, v as AdmissionCell, z as Ticket } from "./intake-YOZzjx_b.js";
 import { Context } from "@deepseek-ai/cordis";
 import { z } from "zod";
 import { DatabaseSync } from "node:sqlite";
@@ -407,6 +407,8 @@ declare class SourceRegistry implements SourceScope {
     terms: string[];
   };
   repliesTo(trigger: Trigger): string | undefined;
+  /** Tells each registered kind that hears of ended Tickets that `ticket` ended. */
+  ticketEnded(ticket: Ticket): void;
   threadContext(trigger: Trigger, settings?: {
     paused: boolean;
     sources: Record<string, {
@@ -673,7 +675,24 @@ declare module '../app/effects.ts' {
       assignmentId: string;
       reason: string;
     };
+    /** Remove the dshd record of an ended unit whose Ticket ended (`dshd.removeEnded`); the key is the Assignment ID. */
+    'dshd-rm': {
+      ticketId: string;
+      assignmentId: string;
+    };
   }
+}
+/**
+ * Tokens a worker's model calls used, in DSH's own usage names. `inputTokens` and `outputTokens` are always there; a provider
+ * reports the other buckets or not.
+ */
+interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
 }
 //#endregion
 //#region src/sources/workflow-store.d.ts
@@ -776,8 +795,11 @@ interface SourceContext {
     threadClosed(thread: ThreadRef, outcome: 'merged' | 'closed', at: string): void;
   };
   triggers: {
-    get(id: string): Trigger | undefined; /** The newest Trigger on a Thread. */
+    get(id: string): Trigger | undefined;
+    /** The newest Trigger on a Thread. */
     latest(thread: string): Trigger | undefined;
+    /** The Decision that last decided a Trigger, such as an `unavailable` Eval it was in, or undefined while none has. */
+    decision(id: string): Decision | undefined;
   };
   notify(message: OutboundMessage): void;
   /** Reports the state of one of this kind's declared health entries; throws for undeclared entry names. */
@@ -840,9 +862,11 @@ type FieldSpec = FieldBase & {
     }[];
   })[];
 };
+/** A `ticket` variable describes the ticket a Session works on, so it is listed only where there is one, as the Executor's are. */
 interface VariableSpec {
   key: string;
   description: Localized;
+  ticket?: true;
 }
 interface EnvironmentInput<C> {
   deployment: Deployment;
@@ -988,6 +1012,8 @@ interface SourceKind<C extends Record<string, unknown> = Record<string, unknown>
   };
   /** Main-Session tools the kind adds while it is registered; each name starts with `orchestrator_<kind>_`. */
   tools?: readonly SourceTool[];
+  /** Hears that a Ticket ended, once the transaction that ended it commits; an end that a rollback undid is never heard. */
+  ticketEnded?(ticket: Ticket): void;
 }
 /** A main-Session tool of a Source kind: its arguments are parsed with `schema` before `execute` runs. */
 interface SourceTool {
@@ -1003,4 +1029,4 @@ interface SourceInstance<C extends Record<string, unknown> = Record<string, unkn
   config: C;
 }
 //#endregion
-export { SourceRegistry as _, GithubConfig as a, githubKind as c, pollFailure as d, pollRound as f, commentTrigger as g, GithubComment as h, WorkflowRun as i, inject as l, pollTicketPulls as m, SourceContext as n, Retry as o, pollThreads as p, SourceHost as r, apply as s, SourceKind as t, name as u, Tally as v };
+export { commentTrigger as _, TokenUsage as a, apply as c, name as d, pollFailure as f, GithubComment as g, pollTicketPulls as h, WorkflowRun as i, githubKind as l, pollThreads as m, SourceContext as n, GithubConfig as o, pollRound as p, SourceHost as r, Retry as s, SourceKind as t, inject as u, SourceRegistry as v, Tally as y };
