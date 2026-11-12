@@ -1,7 +1,7 @@
 /** Probes repository and account CLIs, configures the worker execution environment and command shims, and tracks setup readiness. */
 import type { Context } from '@deepseek-ai/cordis'
 import { UserError } from '../core/index.ts'
-import { SETUP_FIELDS, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
+import { GithubAccountsSchema, SETUP_FIELDS, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
 import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
 import type { Settings, SettingsBlock } from '../policy.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
@@ -74,6 +74,7 @@ export class Setup {
     return workerProbe(context.subprocess, machine.stateDir, machine.stateDir, lifetime)
   }
   private async resolve(settings: Settings): Promise<Deployment> {
+    if (this.host.machine.executor === 'dshd' && !GithubAccountsSchema.parse(settings.sources.github?.config ?? {}).repository) return accountless(this.host.machine)
     const { context, machine, lifetime } = this.host
     const probe = this.probe()
     const deployment = await resolveDeployment(machine, settings.sources.github?.config, probe)
@@ -97,3 +98,5 @@ export class Setup {
     return resolved
   }
 }
+/** A dshd floor with no repository: no account probe, no worker shims or git environment; dshd workers do not inherit this process's environment. */
+export function accountless(machine: Machine): Deployment { return { ...machine, repository: '', github: { cli: '', login: '', noreply: '' } } }

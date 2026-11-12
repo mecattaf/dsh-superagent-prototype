@@ -17,6 +17,7 @@ import { Commands } from '../../src/infra/commands.ts'
 import { credentialHelper, workerGitConfig } from '../../src/infra/environment.ts'
 import type { Trigger } from '../../src/core/index.ts'
 import { testMachine } from './deployment.ts'
+import type { Machine } from '../../src/deployment.ts'
 
 export const MEMBER = 'ou_alice'
 export const CHAT = 'oc_team'
@@ -131,8 +132,10 @@ export function subagentRuntime(agents: Map<string, FakeAgent>) {
   return { service, settle, spawn, live: (id: string) => !!children.get(id)?.live }
 }
 
+/** Options of `startRuntime`: machine configuration, and commands a test answers itself, such as a fake dshd's (undefined: not one of them). */
+export interface HostOptions { machine?: Partial<Machine>; spawn?: (spec: { argv: readonly string[]; signal?: AbortSignal }) => unknown }
 /** @param seed - writes to the database before the Runtime opens it, such as records an earlier version stored. */
-export async function startRuntime(seed?: (store: Store) => void) {
+export async function startRuntime(seed?: (store: Store) => void, options: HostOptions = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'orchestrator-host-'))
   const AGENT = join(directory, 'agent-gh'), BOT = join(directory, 'lark-bot')
   const repository = { default_branch: 'master', permissions: { push: true } }
@@ -152,7 +155,9 @@ export async function startRuntime(seed?: (store: Store) => void) {
   }
   /** A prepare command (`sh -c`) waits for this while it is set. */
   const hooks: { prepare?: Promise<void> } = {}
-  const subprocess = { spawn: vi.fn((spec: { argv: readonly string[] }) => {
+  const subprocess = { spawn: vi.fn((spec: { argv: readonly string[]; signal?: AbortSignal }) => {
+    const answered = options.spawn?.(spec)
+    if (answered) return answered as never
     const argv = [...spec.argv]
     while (argv[0] === 'env' || /^[A-Z_]+=/.test(argv[0] ?? '')) argv.shift()
     const reader = (text: string) => ({ readFrom: () => ({ text, nextOffset: text.length, lossy: false }) })
@@ -249,7 +254,7 @@ export async function startRuntime(seed?: (store: Store) => void) {
   seeded.saveSettings(SettingsSchema.parse({ ...seeded.settings(), sources }))
   seed?.(seeded)
   seeded.close()
-  const runtime = new Runtime(ctx, testMachine({ stateDir: directory }), vi.fn())
+  let runtime = new Runtime(ctx, testMachine({ stateDir: directory, ...options.machine }), vi.fn())
   await runtime.ready
   runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
   const settings = runtime.store.settings()
@@ -289,11 +294,20 @@ export async function startRuntime(seed?: (store: Store) => void) {
     return { status, body: JSON.parse(text) as Record<string, unknown> }
   }
   async function stop() { await runtime.stop(); vi.restoreAllMocks(); rmSync(directory, { recursive: true, force: true }) }
+  /** The host restarts: the Runtime stops, and a new one opens the same state directory with the same DSH services. */
+  async function restart(machine: Partial<Machine> = options.machine ?? {}) {
+    await runtime.stop()
+    const next = new Context()
+    for (const [name, service] of Object.entries(services)) next.reflect.provide(name, service)
+    runtime = new Runtime(next, testMachine({ stateDir: directory, ...machine }), vi.fn())
+    await runtime.ready
+    runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
+  }
   /** The Session's model takes its next step, which takes the messages steered in since its last. */
   const step = (sessionId: string) => { steps.get(sessionId)!() }
   /** A step of the worker claims what waits for it, and is cut off before the Session took it. */
   const claim = (sessionId: string) => { claims.get(sessionId)!() }
-  return { runtime, ctx, directory, agents, tools, deliveries, relays, candidates, runTool, route, acceptedTicket, api, controller, subprocess, hooks, resolveDefault, stop,
-    jobs, subagents, step, claim }
+  return { get runtime() { return runtime }, ctx, directory, agents, tools, deliveries, relays, candidates, runTool, route, acceptedTicket, api, controller,
+    subprocess, hooks, resolveDefault, stop, restart, jobs, subagents, step, claim }
 }
 export type Host = Awaited<ReturnType<typeof startRuntime>>
