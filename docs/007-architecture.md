@@ -489,7 +489,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/model-surface.spec.ts` | Everything models read: tools, prompts, skills and inputs, checked against the tool schemas, the execution environment and the glossary, within a size budget per role |
 | `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts`, `tests/engine.spec.ts` | The plugin configuration and setup, the agent's process environment, the plugin entry, and the entry on a Cordis context with its engine off and on |
 | `tests/dshd-briefs.spec.ts` | The dshd executor's long briefs under `stateDir/briefs`: kept while their Ticket is open, removed by the stop its end queues, other files left alone |
-| `tests/dshd-cleanup.spec.ts` | The dshd executor's opt-in `dshd.removeEnded`: which ended units it removes with `dshd rm`, when, and which it keeps |
+| `tests/dshd-cleanup.spec.ts` | The dshd executor's opt-in `dshd.removeEnded`: which ended units it removes with `dshd rm`, when (including the sweep at a start), and which it keeps |
 | `tests/dshd-cli.spec.ts` | The dshd client's argv and the JSON and error objects of dshd it reads |
 | `tests/dshd-executor.spec.ts` | The dshd executor on the simulated host with an in-memory dshd: recipe, idempotent launches, slots, settlement, restart and stop |
 | `tests/dshd-names.spec.ts` | Unit names stay inside dshd's name rule and apart for distinct Assignments |
