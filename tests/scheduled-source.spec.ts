@@ -133,7 +133,8 @@ describe('scheduled Source', () => {
     const earlier = record(h.work, { namespace: 'team/gadgets', due: '2026-11-12T01:00:00.000Z' })
     drop(h.inbox, 'a.json', ours); drop(h.inbox, 'b.json', theirs); drop(h.inbox, 'c.json', earlier)
     expect(await readInbox(h.ctx, h.inbox)).toEqual({ read: 2, superseded: 1, invalid: 0, unreadable: 0 })
-    expect(await Promise.all(h.receive.mock.results.map(result => result.value))).toEqual(['stored', 'stored', 'stored'])
+    // The superseded record is received first, and is stored as filtered.
+    expect(await Promise.all(h.receive.mock.results.map(result => result.value))).toEqual(['filtered', 'stored', 'stored'])
     expect(idOf(ours)).not.toBe(idOf(theirs))
     expect(h.store.triggers.get(idOf(ours))?.meta).toMatchObject({ namespace: 'team/widgets', occurrence: 'a', missed: 0 })
     expect(h.store.triggers.get(idOf(ours))?.meta).not.toHaveProperty('superseded')
