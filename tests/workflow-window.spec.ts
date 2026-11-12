@@ -128,5 +128,10 @@ describe('the window of a workflow run', () => {
     await until(() => !String(h.board.all.workflow?.detail).includes('not assessed'))
     expect(h.board.all.workflow?.detail).toBe('1 runs under way, 2 nodes waiting for their tickets: 1 held')
     expect(h.logger.warn).toHaveBeenCalledTimes(1)
+    // Held again after a requeue that no poll saw is a new Decision, which the log tells again.
+    clock += 1000
+    requeue(h, a2); h.hold('a2')
+    await until(() => h.logger.info.mock.calls.length === 2)
+    expect(node('a2')).toMatchObject({ state: 'held', decided_at: new Date(clock).toISOString() })
   })
 })
