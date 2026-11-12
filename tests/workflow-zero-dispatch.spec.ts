@@ -17,7 +17,7 @@ function start() {
   return { h: host, directory }
 }
 
-it('the exported journal of a finished run replays with no dispatch', async () => {
+it('the exported fixture journal replays with zero dispatch', async () => {
   const { h, directory } = start()
   await h.started
   const { run_id: run } = h.floor.startRun({ script: FIXTURE, cwd: directory, args: { tag: 't' } })
@@ -32,5 +32,19 @@ it('the exported journal of a finished run replays with no dispatch', async () =
   expect(replayed.status).toBe('completed')
   expect(replayed.result).toEqual(h.run(run)!.result)
   expect(replayed.calls.map(call => call.state)).toEqual(['cached', 'cached', 'cached'])
+  expect(dispatched).not.toHaveBeenCalled()
+})
+/**
+ * A journal exported from a live run, one JSON line per record: `REPLAY_JOURNAL` names its file, `REPLAY_SCRIPT` the script it
+ * ran (the fixture unless set) and `REPLAY_ARGS` the run's arguments as JSON, which the content identity of each call depends on.
+ */
+const live = process.env.REPLAY_JOURNAL
+it.skipIf(!live)('an exported live journal replays with zero dispatch', async () => {
+  const dispatched = vi.fn(async () => { throw new Error('dispatched') })
+  const args: unknown = process.env.REPLAY_ARGS ? JSON.parse(process.env.REPLAY_ARGS) : undefined
+  const replayed = await runWorkflow(readFileSync(process.env.REPLAY_SCRIPT || FIXTURE, 'utf8'), { backend: { name: 'refusing', run: dispatched },
+    ...args !== undefined && { args }, resumeFrom: parseJournal(readFileSync(live!, 'utf8')), cacheIdentity: 'content', resumeFailures: 'replay' })
+  expect(replayed.status).toBe('completed')
+  expect(replayed.calls.map(call => call.state).filter(state => state !== 'cached')).toEqual([])
   expect(dispatched).not.toHaveBeenCalled()
 })
