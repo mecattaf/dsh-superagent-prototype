@@ -1,7 +1,7 @@
 /** Scheduled source kind and Cordis plugin entry: one Trigger per occurrence record a scheduler drops into an inbox directory. */
 import type { Context } from '@deepseek-ai/cordis'
 import s from '@deepseek-ai/schemastery'
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
 import { z } from 'zod'
@@ -80,13 +80,16 @@ export interface ScheduledMeta {
  */
 export const occurrenceThread = (occurrence: string): ThreadRef => ({ source: SOURCE, id: occurrence })
 
+/** A record field on one line: a line break in a name, a path or `by` would otherwise move where the frozen text starts. */
+const line = (value: string): string => value.replace(/[\r\n\u2028\u2029]+/g, ' ')
+/** `namespace:item — name`, the label of an item's occurrences. */
+const title = (record: OccurrenceRecord): string => `${record.namespace}:${record.item} — ${line(record.name ?? record.item)}`
 /** The two header lines a worker and the assessment read before the frozen text. */
 function header(record: OccurrenceRecord, due: string, missed: number): string {
-  const title = `${record.namespace}:${record.item} — ${record.name ?? record.item}`
-  const facts = `Working directory: ${record.cwd}. Item file: ${record.file ?? 'not given'}. Revision ${record.revision}. Pair: ${record.pair ?? 'default'}.`
-  if (record.kind === 'manual') return `[Scheduled item, run now] ${title}\nRequested ${due} by ${record.by}. ${facts}`
+  const facts = `Working directory: ${line(record.cwd)}. Item file: ${record.file === undefined ? 'not given' : line(record.file)}. Revision ${record.revision}. Pair: ${record.pair ?? 'default'}.`
+  if (record.kind === 'manual') return `[Scheduled item, run now] ${title(record)}\nRequested ${due} by ${line(record.by)}. ${facts}`
   const earlier = missed === 0 ? 'no earlier due occurrence was missed' : `${missed} earlier due occurrence(s) did not run`
-  return `[Scheduled occurrence] ${title}\nDue ${due}; ${earlier}. ${facts}`
+  return `[Scheduled occurrence] ${title(record)}\nDue ${due}; ${earlier}. ${facts}`
 }
 /** Builds the Trigger of one record; equal records give equal Trigger ids. */
 export function scheduledTrigger(record: OccurrenceRecord, occurrence: string, extra: { missed: number; superseded?: true }): Trigger {
@@ -114,8 +117,12 @@ const code = (error: unknown): string | undefined => (error as NodeJS.ErrnoExcep
 /** One line naming what makes a record invalid. */
 const issues = (error: z.ZodError): string =>
   error.issues.map(issue => `${issue.path.length ? `${issue.path.join('.')}: ` : ''}${issue.message}`).join('; ')
-const directory = (path: string): boolean => {
-  try { return statSync(path).isDirectory() } catch { return false /* Missing or unreachable: not a directory the work can run in. */ }
+/** Whether `path` is a directory; undefined when stat fails for a reason other than a missing path, which may pass. */
+const directory = (path: string): boolean | undefined => {
+  try { return statSync(path).isDirectory() } catch (error) {
+    // Missing: not a directory the work can run in. EACCES, EIO or ESTALE may be transient, so the record waits.
+    return code(error) === 'ENOENT' || code(error) === 'ENOTDIR' ? false : undefined
+  }
 }
 /** Moves `file` into `dir` under its own name; a name already taken there gets a numeric suffix, so nothing is overwritten. */
 function moveInto(file: string, dir: string): string {
@@ -137,25 +144,33 @@ function quarantine(file: string, bad: string, reason: string): boolean {
 }
 /** The valid record a file holds, or the reason it is not one; undefined when the file is gone or cannot be read. */
 function readRecord(file: string, tally: InboxTally): OccurrenceRecord | string | undefined {
-  let text: string
-  try { text = readFileSync(file, 'utf8') } catch (error) {
+  let text: string, owner: number
+  try {
+    const fd = openSync(file, 'r')
+    try { owner = fstatSync(fd).uid; text = readFileSync(fd, 'utf8') } finally { closeSync(fd) }
+  } catch (error) {
     // Withdrawn by its producer between the listing and the read: nothing to do. Any other error leaves it for the next round.
     if (code(error) !== 'ENOENT') tally.unreadable += 1
     return undefined
   }
+  // The work runs with this process's permissions, so only this user's records are read.
+  const uid = process.getuid?.()
+  if (uid !== undefined && owner !== uid) return `owned by uid ${owner}, not by this user`
   let value: unknown
   try { value = JSON.parse(text) } catch (error) { return `not JSON: ${error instanceof Error ? error.message : String(error)}` }
   const parsed = OccurrenceRecordSchema.safeParse(value)
   if (!parsed.success) return issues(parsed.error)
-  return directory(parsed.data.cwd) ? parsed.data : `cwd is not a directory: ${parsed.data.cwd}`
+  const found = directory(parsed.data.cwd)
+  if (found === undefined) { tally.unreadable += 1; return undefined }
+  return found ? parsed.data : `cwd is not a directory: ${parsed.data.cwd}`
 }
 /**
  * Reads every waiting record of `inbox` once, oldest name first, and moves each one it received out of the way. Older
- * schedule records of an item are received first as superseded, and their count goes into the item's latest record.
- * `read` counts the live and manual records received, `superseded` the older ones. A throw from `receive` ends the round
- * and leaves its record, and the ones after it, for the next.
+ * schedule records of an item are received first as superseded, and the ones that did not run go into the item's latest
+ * record's count. `read` counts the live and manual records received, `superseded` the older ones. A throw from `receive`
+ * ends the round and leaves its record, and the ones after it, for the next.
  */
-export async function readInbox(ctx: Pick<SourceContext, 'receive' | 'threads'>, inbox: string, signal?: AbortSignal): Promise<InboxTally> {
+export async function readInbox(ctx: Pick<SourceContext, 'receive' | 'threads' | 'triggers'>, inbox: string, signal?: AbortSignal): Promise<InboxTally> {
   const done = join(inbox, '.done'), bad = join(inbox, '.bad')
   mkdirSync(done, { recursive: true, mode: 0o700 })
   mkdirSync(bad, { recursive: true, mode: 0o700 })
@@ -176,29 +191,38 @@ export async function readInbox(ctx: Pick<SourceContext, 'receive' | 'threads'>,
   }
   const older = (record: OccurrenceRecord) => record.kind === 'schedule' && Date.parse(record.due) < latest.get(itemOf(record))!
   const superseded = entries.filter(entry => older(entry.record)), live = entries.filter(entry => !older(entry.record))
-  const missed = new Map<string, number>()
-  for (const { record } of superseded) missed.set(itemOf(record), (missed.get(itemOf(record)) ?? 0) + 1 + record.missed)
-  const received = [
-    ...superseded.map(entry => ({ entry, trigger: scheduledTrigger(entry.record, entry.name.slice(0, -5), { missed: entry.record.missed, superseded: true }) })),
-    ...live.map(entry => ({ entry, trigger: scheduledTrigger(entry.record, entry.name.slice(0, -5),
-      { missed: entry.record.missed + (entry.record.kind === 'schedule' ? missed.get(itemOf(entry.record)) ?? 0 : 0) }) })),
-  ]
-  for (const { entry, trigger } of received) {
-    if (signal?.aborted) break
+  /** Receives one record's Trigger, labels its Thread, then moves the file; the receive's answer, or undefined once aborted. */
+  const take = async (entry: Entry, trigger: Trigger) => {
+    if (signal?.aborted) return undefined
     // The file moves only after the Trigger is committed, so a crash between the two re-reads it and answers duplicate.
     const result = await ctx.receive(trigger)
+    // The occurrence's own Thread is labelled with its item, which is how people find an item's occurrences together. A
+    // duplicate is labelled too, in case a crash came before; a Thread that does not exist, as for a filtered one, is left alone.
+    if (result !== 'filtered') {
+      const { record } = entry
+      const due = record.kind === 'manual' ? { zh: '请求时间', en: 'Requested' } : { zh: '到期', en: 'Due' }
+      ctx.threads.describe(threadKey(trigger.threads[0]!), { label: title(record),
+        facts: { due: { label: due, value: String(trigger.meta.due) }, revision: { label: { zh: '版本', en: 'Revision' }, value: record.revision } } })
+    }
     try { moveInto(entry.file, done) } catch (error) {
       if (code(error) !== 'ENOENT') throw error
       // Withdrawn by its producer after the read; the Trigger is stored all the same.
     }
-    if (trigger.meta.superseded) { tally.superseded += 1; continue }
+    return result
+  }
+  // An older record counts as missed only when it is kept as superseded: one a crash left after it was stored as live ran.
+  const missed = new Map<string, number>()
+  for (const entry of superseded) {
+    const trigger = scheduledTrigger(entry.record, entry.name.slice(0, -5), { missed: entry.record.missed, superseded: true })
+    if (await take(entry, trigger) === undefined) return tally
+    tally.superseded += 1
+    if (ctx.triggers.get(trigger.id)?.meta.superseded === true) missed.set(itemOf(entry.record), (missed.get(itemOf(entry.record)) ?? 0) + 1 + entry.record.missed)
+  }
+  for (const entry of live) {
+    const trigger = scheduledTrigger(entry.record, entry.name.slice(0, -5),
+      { missed: entry.record.missed + (entry.record.kind === 'schedule' ? missed.get(itemOf(entry.record)) ?? 0 : 0) })
+    if (await take(entry, trigger) === undefined) return tally
     tally.read += 1
-    if (result !== 'stored') continue
-    // The occurrence's own Thread is labelled with its item, which is how people find an item's occurrences together.
-    const { record } = entry
-    const due = record.kind === 'manual' ? { zh: '请求时间', en: 'Requested' } : { zh: '到期', en: 'Due' }
-    ctx.threads.describe(threadKey(trigger.threads[0]!), { label: `${record.namespace}:${record.item} — ${record.name ?? record.item}`,
-      facts: { due: { label: due, value: String(trigger.meta.due) }, revision: { label: { zh: '版本', en: 'Revision' }, value: record.revision } } })
   }
   return tally
 }
@@ -208,9 +232,16 @@ function readyDetail(total: Omit<InboxTally, 'unreadable'>, unreadable: number):
   return `Read ${total.read}; superseded ${total.superseded}; invalid ${total.invalid}${total.lastInvalid ? `, last: ${total.lastInvalid}` : ''}`
     + (unreadable ? `; unreadable ${unreadable}` : '')
 }
-/** Creates the inbox (0700) and takes its proper-lockfile lock, so one process reads it; throws while another holds it. */
+/**
+ * Creates the inbox (0700) and takes its proper-lockfile lock, so one process reads it; throws while another holds it, and
+ * for an inbox another user owns or that group or others can write, since a record in it runs with this process's permissions.
+ */
 function lockInbox(inbox: string, compromised: (error: Error) => void): () => void {
   mkdirSync(inbox, { recursive: true, mode: 0o700 })
+  const stat = statSync(inbox), uid = process.getuid?.()
+  if ((uid !== undefined && stat.uid !== uid) || stat.mode & 0o022) {
+    throw new Error(`The inbox ${inbox} must be owned by this user and not writable by group or others (mode ${(stat.mode & 0o777).toString(8)}, uid ${stat.uid})`)
+  }
   return lockSync(inbox, { stale: 30_000, onCompromised: compromised })
 }
 async function watch(ctx: SourceContext, config: ScheduledConfig, signal: AbortSignal): Promise<void> {
