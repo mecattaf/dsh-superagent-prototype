@@ -32,8 +32,10 @@ export const newDirectory = (): string => mkdtempSync(join(tmpdir(), 'workflow-'
 /**
  * One process's worth of the workflow Source on the Store in `directory`, with `slots` workers. `settings` replaces the seeded
  * settings of a new Store, and `config` the Source's machine settings, polling every 5 ms unless it names its own `pollMs`.
+ * `ready` and `configured` stand for setup, which has ended and resolved the accounts unless they say otherwise.
  */
-export function workflowHost(directory: string, options: { slots?: number; config?: Partial<FloorConfig>; now?: () => string; settings?: unknown } = {}) {
+export function workflowHost(directory: string, options: { slots?: number; config?: Partial<FloorConfig>; now?: () => string; settings?: unknown
+  ready?: Promise<void>; configured?: () => boolean } = {}) {
   const store = new Store(join(directory, 'orchestrator.sqlite'))
   if (store.get(KV.settings.revision) === undefined) store.saveSettings(SettingsSchema.parse(options.settings ?? WORKFLOW_SETTINGS))
   const sources = new SourceRegistry(() => store.settings(), new HealthBoard())
@@ -61,7 +63,7 @@ export function workflowHost(directory: string, options: { slots?: number; confi
   }
   const receive = vi.fn<(trigger: Trigger) => ReceiveResult | Promise<ReceiveResult>>(trigger => { const result = engine.receive(trigger); engine.evaluateDue(); return result })
   const deps: SourceContextDeps = { store, engine, outbox: { send: () => {} }, commands: new Commands(() => testDeployment(), {}, new AbortController().signal),
-    sources, deployment: testDeployment(), ready: Promise.resolve(), configured: () => true, receive }
+    sources, deployment: testDeployment(), ready: options.ready ?? Promise.resolve(), configured: options.configured ?? (() => true), receive }
   const host = { sources, context: (kind: { kind: string; health: readonly string[] }) => sourceContextOf(deps, kind) }
   const floor = new WorkflowFloor(host, { pollMs: { get: () => 5 }, concurrency: 16, maxAttempts: 1, pair: '', ...options.config })
   const unregister = sources.register(workflowKind(floor))

@@ -95,4 +95,16 @@ describe('the window of a workflow run', () => {
     await finishRun(h, run)
     expect(h.run(run)).toMatchObject({ state: 'completed', result: { a1: 'DONE', a2: 'DONE' } })
   })
+  it('status says waiting before a node\'s Trigger reaches the Engine and offered while it is queued for an Eval', async () => {
+    const { h, directory } = start()
+    await h.started
+    // a1 is on its way to the Engine and never arrives; a2 arrives, and no Eval has started for it yet.
+    h.receive.mockImplementation(trigger => trigger.meta.label === 'a1' ? new Promise<never>(() => {}) : h.engine.receive(trigger))
+    const { run_id: run } = h.floor.startRun({ script: FIXTURE, cwd: directory, args: { tag: 't' } })
+    await until(() => h.receive.mock.calls.length === 2)
+    const nodes = h.floor.status(run)[0]!.nodes
+    expect(nodes.map(node => [node.label, node.state])).toEqual([['a1', 'waiting'], ['a2', 'offered']])
+    expect(nodes[0]).not.toHaveProperty('trigger_id')
+    expect(h.store.threads.get(`workflow:${String(h.store.triggers.get(nodes[1]!.trigger_id!)!.threads[0]!.id)}`)?.evaluating).toBeUndefined()
+  })
 })

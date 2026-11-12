@@ -40,6 +40,16 @@ it('KvJournal lines read back after reopening the Store parse equal to a MemoryJ
   expect(KvJournal.text(context(store), 'wf-10')).toBe('')
   store.close()
 })
+it('KvJournal reads no line of another run whose id begins with the same characters', () => {
+  const directory = newDirectory(); directories.push(directory)
+  const store = new Store(join(directory, 'orchestrator.sqlite'))
+  for (const id of ['wf-1', 'wf-10']) {
+    context(store).state.set(KV.workflow.run(id), { id, name: 'n', scriptPath: '/s.js', scriptSha256: '', cwd: directory, state: 'running', startedAt: '', seq: 0 })
+    new KvJournal(context(store), id).append({ type: 'launched' })
+  }
+  expect(KvJournal.text(context(store), 'wf-1')).toBe('{"type":"launched"}\n')
+  store.close()
+})
 it('KvJournal writes nothing once its signal aborted', () => {
   const directory = newDirectory(); directories.push(directory)
   const store = new Store(join(directory, 'orchestrator.sqlite'))
