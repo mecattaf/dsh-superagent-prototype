@@ -89,13 +89,23 @@ describe('launch and recipe', () => {
     const argv = h!.subprocess.spawn.mock.calls.map(([spec]) => spec.argv).find(item => item.includes('run'))!
     expect(argv.slice(0, 2)).toEqual(['env', '-i'])
   })
+  it('lets the configured environment override a passed name, and the pair\'s environment override both', async () => {
+    await start({ passEnv: ['HOME'], env: { HOME: '/srv/home', CONFIG_DIR: '/srv/config' },
+      pairs: { ...PAIRS, local: { ...PAIRS.local, env: { CONFIG_DIR: '/srv/local-config', LOCAL_MODEL_KEY: 'none' } } } })
+    await accepted(request('1', { cwd: directory(), pair: 'local' }))
+    expect(fake.runs[0]!.env).toEqual({ HOME: '/srv/home', CONFIG_DIR: '/srv/local-config', LOCAL_MODEL_KEY: 'none' })
+  })
   it('runs the pair the Trigger names, else the default pair, and labels the unit with it, keeping only superagent labels of the Trigger', async () => {
     await start()
-    await accepted(request('1', { cwd: directory(), pair: 'local', labels: { 'superagent.run': 'r1', 'superagent.node': 'n2', other: 'x', 'superagent.ticket': 'forged' } }))
+    await accepted(request('1', { cwd: directory(), pair: 'local', labels: { 'superagent.run': 'r1', 'superagent.node': 'n2', other: 'x', 'superagent.ticket': 'forged',
+      'superagent.edge': 'v'.repeat(256), 'superagent.long': 'v'.repeat(257), 'superagent.lines': 'one\ntwo' } }))
     await accepted(request('5', { cwd: directory() }))
     expect(fake.runs.map(recipe => [recipe.profile, recipe.labels['superagent.pair']])).toEqual([['work-local', 'local'], ['work-opus', 'opus']])
-    expect(fake.runs[0]!.labels).toMatchObject({ 'superagent.run': 'r1', 'superagent.node': 'n2' })
+    expect(fake.runs[0]!.labels).toMatchObject({ 'superagent.run': 'r1', 'superagent.node': 'n2', 'superagent.edge': 'v'.repeat(256) })
     expect(fake.runs[0]!.labels).not.toHaveProperty('other')
+    // A value dshd could not carry as one --label argument, longer than 256 characters or over two lines, is left out.
+    expect(fake.runs[0]!.labels).not.toHaveProperty('superagent.long')
+    expect(fake.runs[0]!.labels).not.toHaveProperty('superagent.lines')
     expect(fake.runs[0]!.labels['superagent.ticket']).not.toBe('forged')
   })
   it('runs the default pair for a Trigger whose meta.pair is empty, as for one that names none', async () => {
@@ -114,6 +124,26 @@ describe('launch and recipe', () => {
     expect(latestAssignment(stored(unknown.ticket))!.report).toMatchObject({ state: 'failed', summary: 'unknown pair gpu' })
     expect(latestAssignment(stored(missing.ticket))!.report!.summary).toMatch(/^cwd .*gone does not exist$/)
     expect(waitsForPerson(stored(missing.ticket))).toBe(true)
+  })
+  it('runs a Ticket whose Trigger names a relative directory in the configured cwd, and finds no pair on an object\'s prototype', async () => {
+    const configured = directory()
+    await start({ cwd: configured })
+    await accepted(request('1', { cwd: 'relative/agency' }))
+    expect(fake.runs[0]!.cwd).toBe(configured)
+    const inherited = await accepted(request('5', { cwd: directory(), pair: 'constructor' }))
+    await later()
+    expect(fake.runs).toHaveLength(1)
+    expect(latestAssignment(stored(inherited.ticket))!.report).toMatchObject({ state: 'failed', summary: 'unknown pair constructor' })
+  })
+  it('ignores a launch row of an Assignment that already runs, so its unit is neither run again nor stopped', async () => {
+    await start()
+    const { ticket } = await accepted(request('1', { cwd: directory() }))
+    const id = stored(ticket).assignments[0]!.id
+    h!.runtime.effects.enqueue('launch', id, { ticketId: ticket.id, assignmentId: id })
+    await later()
+    expect(fake.runs).toHaveLength(1)
+    expect(fake.stops).toEqual([])
+    expect(binding(ticket)).toMatchObject({ state: 'running', invocationId: 'invocation-1' })
   })
   it('records the binding before dshd run, and the started Assignment, delivered and read Inputs and the watch in one transaction', async () => {
     await start()
@@ -169,6 +199,24 @@ describe('idempotency', () => {
     expect(binding(ticket!)).toMatchObject({ state: 'running', invocationId: 'invocation-1' })
     expect(runningAssignment(stored(ticket!))?.id).toBe(stored(ticket!).assignments[0]!.id)
     gate.resolve()
+  })
+  it('re-runs a launch a crash cut off with its frozen recipe even when the configuration changed before the restart', async () => {
+    await start()
+    fake.hold = deferred().promise
+    const trigger = request('1', { cwd: directory() })
+    h!.runtime.receive(trigger); await h!.runtime.idle()
+    await h!.route({ kind: 'accept', trigger_id: trigger.id, title: 'Fix', worktree_name: 'fix-regression', acknowledgement: '收到。' })
+    await waitUntil(() => fake.runs.length === 1)
+    await h!.restart({ executor: 'dshd', dshd: testDshd({ pairs: { opus: { profile: 'work-opus-next', env: { ADDED: '1' } } }, defaultPair: 'opus',
+      args: ['--approval-policy', 'on-request'] }) })
+    fake.hold = undefined
+    await h!.runtime.idle()
+    const [ticket] = h!.runtime.store.tickets.list()
+    // The new profile, arguments and environment apply to the next Assignment; this one keeps the recipe dshd already holds.
+    expect(fake.runs).toHaveLength(2)
+    expect(fake.runs[1]).toEqual(fake.runs[0])
+    expect(fake.instances.size).toBe(1)
+    expect(binding(ticket!)).toMatchObject({ state: 'running', invocationId: 'invocation-1' })
   })
   it('binds a unit that ran to its end before the crash (task-already-ran) and settles it from its last run', async () => {
     await start()
@@ -251,6 +299,27 @@ describe('slots', () => {
     await later()
     expect(fake.runs.map(recipe => recipe.labels['superagent.pair'])).toEqual(['local', 'opus'])
     expect(latestAssignment(stored(second.ticket))).toMatchObject({ state: 'pending' })
+    // A full pair puts the launch off without counting a failure, so its backoff and health stay those of a waiting launch.
+    expect(h!.runtime.store.db.prepare("SELECT attempts FROM effect WHERE kind = 'launch' AND key = ?").get(stored(second.ticket).assignments[0]!.id))
+      .toEqual({ attempts: 0 })
+  })
+  it('counts a launch dshd has not answered yet against its pair\'s maxWorkers', async () => {
+    await start()
+    const gate = deferred()
+    fake.hold = gate.promise
+    const first = request('1', { cwd: directory(), pair: 'local' }), second = request('5', { cwd: directory(), pair: 'local' })
+    for (const trigger of [first, second]) { h!.runtime.receive(trigger); await h!.runtime.idle() }
+    await h!.route({ kind: 'accept', trigger_id: first.id, title: 'One', worktree_name: 'one', acknowledgement: '收到。' })
+    await waitUntil(() => fake.runs.length === 1)
+    const result = await h!.route({ kind: 'accept', trigger_id: second.id, title: 'Two', worktree_name: 'two', acknowledgement: '收到。' })
+    const id = h!.runtime.store.tickets.get((result.ticket as { ticket_id: string }).ticket_id)!.assignments[0]!.id
+    const due = () => (h!.runtime.store.db.prepare("SELECT due FROM effect WHERE kind = 'launch' AND key = ?").get(id) as { due: number } | undefined)?.due ?? 0
+    // The second launch is put off while the first one waits for dshd's answer.
+    await waitUntil(() => fake.runs.length > 1 || due() > Date.now() + 1000)
+    expect(fake.runs).toHaveLength(1)
+    fake.hold = undefined; gate.resolve()
+    await h!.runtime.idle()
+    expect(fake.runs).toHaveLength(1)
   })
   it('holds launches while processing is paused', async () => {
     await start()
@@ -343,6 +412,15 @@ describe('settlement', () => {
     await later()
     expect(runningAssignment(stored(ticket))?.id).toBe(stored(ticket).assignments[1]!.id)
     expect(stored(ticket).assignments[1]!.report).toBeUndefined()
+    // Even a watch that still finds the older unit's binding running leaves the newer Assignment alone: the Engine hears of an
+    // end only for the Assignment that runs the Ticket.
+    const older = stored(ticket).assignments[0]!.id
+    h!.runtime.store.set(BINDING(older), { ...h!.runtime.store.get(BINDING(older))!, state: 'running' })
+    h!.runtime.effects.enqueue('dshd-watch', older, { ticketId: ticket.id, assignmentId: older })
+    await later()
+    expect(runningAssignment(stored(ticket))?.id).toBe(stored(ticket).assignments[1]!.id)
+    expect(stored(ticket).assignments[1]!.report).toBeUndefined()
+    expect(h!.runtime.store.get(BINDING(older))!.state).toBe('ended')
   })
   it('relays a worker_report to the main Session for each settled unit', async () => {
     await start()
@@ -384,11 +462,89 @@ describe('settlement', () => {
     const settled = binding(ticket)
     expect(settled).toMatchObject({ state: 'ended', sessionId: 'session-5' })
     // The queue runs the watch again, as after a crash between the settlement's commit and the row's removal.
+    const dshdCalls = () => h!.subprocess.spawn.mock.calls.filter(([spec]) => spec.argv.includes('dshd')).length
+    const calls = dshdCalls()
     h!.runtime.effects.enqueue('dshd-watch', id, { ticketId: ticket.id, assignmentId: id })
     await later()
+    expect(dshdCalls()).toBe(calls)
     expect(reports()).toHaveLength(1)
     expect(binding(ticket)).toEqual(settled)
     expect(latestAssignment(stored(ticket))!.report).toMatchObject({ state: 'ready', summary: 'Done.' })
+  })
+  it('keeps the unit\'s binding running when its settlement fails, and settles it once on the next try', async () => {
+    await start()
+    const { ticket } = await accepted(request('1', { cwd: directory() }))
+    vi.spyOn(h!.runtime.engine, 'report').mockImplementationOnce(() => { throw new Error('database is busy') })
+    fake.end(nameOf(ticket), { lines: runLines('session-8', 'Done.') })
+    await later()
+    // The end, the report and the relay commit together or not at all: the watch tries again.
+    expect(binding(ticket)!.state).toBe('running')
+    expect(latestAssignment(stored(ticket))!.report).toBeUndefined()
+    expect(h!.runtime.effects.pending('dshd-watch', stored(ticket).assignments[0]!.id)).toBe(true)
+    await later()
+    expect(stored(ticket).ended?.outcome).toBe('completed')
+    expect(binding(ticket)).toMatchObject({ state: 'ended', sessionId: 'session-8' })
+    expect(reports()).toHaveLength(1)
+  })
+  it('caps the answer of a unit that did not complete in its summary, and keeps a completed unit\'s answer whole', async () => {
+    await start()
+    const failed = await accepted(request('1', { cwd: directory() }))
+    const done = await accepted(request('5', { cwd: directory() }))
+    const long = 'x'.repeat(5000)
+    fake.end(nameOf(failed.ticket), { exitCode: 1, lines: runLines('session-1', long) })
+    fake.end(nameOf(done.ticket), { lines: runLines('session-2', long) })
+    await later()
+    const name = nameOf(failed.ticket)
+    expect(latestAssignment(stored(failed.ticket))!.report!.summary).toBe(`Unit ${name} ended task-failed (exit 1).\n\n${'x'.repeat(3800)}…\n\nUnit ${name}; session session-1.`)
+    expect(latestAssignment(stored(done.ticket))!.report!.summary).toBe(long)
+  })
+  it('settles a unit whose launch answer named no invocation on the invocation dshd get reports', async () => {
+    await start()
+    const run = fake.run.bind(fake)
+    // dshd may answer run --bg before systemd has named the unit's invocation.
+    fake.run = async recipe => { const result = await run(recipe); return 'refused' in result ? result : { ...result, invocationId: null, lastRun: null } }
+    const { ticket } = await accepted(request('1', { cwd: directory() }))
+    expect(binding(ticket)).toMatchObject({ state: 'running', invocationId: 'invocation-1' })
+    fake.end(nameOf(ticket), { lines: runLines('session-1', 'Done.') }); await later()
+    expect(stored(ticket).ended?.outcome).toBe('completed')
+    expect(latestAssignment(stored(ticket))!.report!.summary).toBe('Done.')
+  })
+  it('takes neither the end nor the answer of a run someone started under the unit\'s name while it was watched', async () => {
+    await start()
+    const waited = await accepted(request('1', { cwd: directory() }))
+    const read = await accepted(request('5', { cwd: directory() }))
+    const wait = fake.wait.bind(fake), journal = fake.read.bind(fake)
+    // While the watch waits on the first unit, its run ends and someone reruns it to an end of its own.
+    fake.wait = async name => {
+      if (name === nameOf(waited.ticket)) { fake.end(name); fake.rerun(name); fake.end(name, { lines: runLines('session-x', 'Someone else\'s answer.') }) }
+      return wait(name)
+    }
+    // Between the second unit's end and the read of its journal, someone reruns it.
+    fake.read = async name => {
+      if (name === nameOf(read.ticket) && fake.instances.get(name)!.lastRun.invocationId === binding(read.ticket)!.invocationId) {
+        fake.rerun(name); fake.end(name, { lines: runLines('session-y', 'Someone else\'s answer.') })
+      }
+      return journal(name)
+    }
+    fake.end(nameOf(read.ticket), { lines: runLines('session-2', 'Mine.') })
+    await later()
+    expect(stored(waited.ticket).ended).toBeUndefined()
+    expect(latestAssignment(stored(waited.ticket))!.report!.summary).toContain('ended superseded.')
+    // The second unit's own run exited 0, so its Ticket completes, without the other run's answer or Session.
+    expect(latestAssignment(stored(read.ticket))!.report).toMatchObject({ state: 'ready', summary: `Unit ${nameOf(read.ticket)} exited 0.` })
+    expect(binding(read.ticket)!.sessionId).toBeUndefined()
+  })
+  it('leaves a unit another orchestrator labels alone: stopping its Ticket stops nothing, and its end settles only as superseded', async () => {
+    await start()
+    const stopped = await accepted(request('1', { cwd: directory() }))
+    const watched = await accepted(request('5', { cwd: directory() }))
+    for (const { ticket } of [stopped, watched]) fake.instances.get(nameOf(ticket))!.recipe.labels['superagent.orchestrator'] = 'another-orchestrator'
+    h!.runtime.engine.stopTicket(stopped.ticket.id); await h!.runtime.idle()
+    expect(fake.stops).toEqual([])
+    expect(binding(stopped.ticket)!.ended?.verdict).toBe('superseded')
+    fake.end(nameOf(watched.ticket), { lines: runLines('session-x', 'Another orchestrator\'s answer.') }); await later()
+    expect(stored(watched.ticket).ended).toBeUndefined()
+    expect(latestAssignment(stored(watched.ticket))!.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('ended superseded.') })
   })
   it('keeps an Assignment whose unit dshd cannot tell about, and settles it once it can', async () => {
     await start()
@@ -445,6 +601,15 @@ describe('restart', () => {
     expect(stored(ticket).assignments).toHaveLength(1)
     expect(fake.runs).toHaveLength(1)
   })
+  it('does not launch again on restart an Assignment whose launch failed and waits for a person', async () => {
+    await start()
+    const { ticket } = await accepted(request('1', { cwd: directory(), pair: 'gpu' }))
+    const report = latestAssignment(stored(ticket))!.report
+    expect(report).toMatchObject({ state: 'failed', summary: 'unknown pair gpu' })
+    await h!.restart(); await h!.runtime.idle(); await later()
+    expect(latestAssignment(stored(ticket))!.report).toEqual(report)
+    expect(reports()).toHaveLength(1)
+  })
   it('does not observe a binding another host made', async () => {
     await start()
     const { ticket } = await accepted(request('1', { cwd: directory() }))
@@ -479,6 +644,65 @@ describe('stop', () => {
     fake.end(nameOf(ticket), { exitCode: 1, lines: [] }); await later()
     h!.runtime.engine.stopTicket(ticket.id); await h!.runtime.idle()
     expect(fake.stops).toEqual([])
+  })
+  it('does not stop a unit whose binding another host made', async () => {
+    await start()
+    const { ticket } = await accepted(request('1', { cwd: directory() }))
+    const id = stored(ticket).assignments[0]!.id
+    h!.runtime.store.set(BINDING(id), { ...binding(ticket)!, host: 'another-host' })
+    h!.runtime.engine.stopTicket(ticket.id); await h!.runtime.idle()
+    expect(fake.stops).toEqual([])
+    expect(binding(ticket)!.state).toBe('running')
+    expect(h!.runtime.effects.pending('dshd-stop', id)).toBe(true)
+  })
+  it('records how a unit that ended before its Ticket was stopped ended, and stops nothing', async () => {
+    await start()
+    const { ticket } = await accepted(request('1', { cwd: directory() }))
+    fake.end(nameOf(ticket), { lines: runLines('session-1', 'Done.') })
+    h!.runtime.engine.stopTicket(ticket.id); await h!.runtime.idle()
+    expect(fake.stops).toEqual([])
+    expect(binding(ticket)).toMatchObject({ state: 'ended', ended: { verdict: 'completed' } })
+  })
+  it('keeps the end a watch recorded while dshd stop had not answered yet', async () => {
+    await start()
+    const { ticket } = await accepted(request('1', { cwd: directory() }))
+    const id = stored(ticket).assignments[0]!.id
+    const gate = deferred()
+    let stopping = false
+    const stop = fake.stop.bind(fake)
+    fake.stop = async name => { stopping = true; await gate.promise; return stop(name) }
+    h!.runtime.engine.stopTicket(ticket.id)
+    void h!.runtime.pump()
+    await waitUntil(() => stopping)
+    // The unit ends on its own, and its watch records how before the stop returns.
+    fake.end(nameOf(ticket), { lines: runLines('session-1', 'Done.') })
+    h!.runtime.effects.enqueue('dshd-watch', id, { ticketId: ticket.id, assignmentId: id })
+    await waitUntil(() => binding(ticket)!.state === 'ended')
+    gate.resolve()
+    await h!.runtime.idle()
+    expect(binding(ticket)).toMatchObject({ state: 'ended', sessionId: 'session-1', ended: { verdict: 'completed', exitCode: 0 } })
+  })
+  it('stops the unit of a launch a crash cut off when its Ticket is stopped before the launch runs again', async () => {
+    await start()
+    fake.hold = deferred().promise
+    const trigger = request('1', { cwd: directory() })
+    h!.runtime.receive(trigger); await h!.runtime.idle()
+    const result = await h!.route({ kind: 'accept', trigger_id: trigger.id, title: 'Fix', worktree_name: 'fix-regression', acknowledgement: '收到。' })
+    await waitUntil(() => fake.runs.length === 1)
+    const ticketId = (result.ticket as { ticket_id: string }).ticket_id
+    // Processing stays paused across the restart, so the launch is not retried before the person's stop.
+    await h!.runtime.settings.pause(true, 'panel')
+    await h!.restart()
+    fake.hold = undefined
+    const [unbound] = h!.runtime.store.tickets.list()
+    expect(binding(unbound!)).toMatchObject({ state: 'launching' })
+    expect(binding(unbound!)!.invocationId).toBeUndefined()
+    h!.runtime.engine.stopTicket(ticketId); await h!.runtime.idle()
+    // The binding names no invocation yet: the unit is this Assignment's by its label.
+    expect(fake.stops).toEqual([fake.runs[0]!.name])
+    expect(binding(unbound!)).toMatchObject({ state: 'ended', ended: { verdict: 'stopped' } })
+    await h!.runtime.settings.pause(false, 'panel'); await later()
+    expect(fake.runs).toHaveLength(1)
   })
   it('stops the new unit of a Ticket stopped while its launch ran', async () => {
     await start()
@@ -516,5 +740,26 @@ describe('inputs', () => {
     fake.end(nameOf(ticket)); await later(); await later()
     expect(stored(ticket).ended?.outcome).toBe('completed')
     expect(h!.candidates()).toContain(followup.id)
+  })
+  it('counts the Inputs a brief carries as read, so the Ticket\'s end does not hand them back to Eval', async () => {
+    await start()
+    const { ticket } = await accepted(request('1', { cwd: directory() }))
+    const followup = feishu('3', '@bot 还有这个', { root_id: 'om_1' })
+    h!.runtime.receive(followup); await h!.runtime.idle()
+    fake.cut(nameOf(ticket)); await later()
+    // The second unit's brief carries the follow-up the first never saw.
+    expect(JSON.parse(fake.runs[1]!.task).inputs.join('\n')).toContain('还有这个')
+    fake.end(nameOf(ticket, 2)); await later(); await later()
+    expect(stored(ticket).ended?.outcome).toBe('completed')
+    expect(h!.candidates()).not.toContain(followup.id)
+  })
+  it('tells the unit of a Ticket a person retried that it was retried', async () => {
+    await start()
+    const { ticket } = await accepted(request('1', { cwd: directory() }))
+    fake.end(nameOf(ticket), { exitCode: 1, lines: [] }); await later()
+    h!.runtime.engine.retryTicket(ticket.id); await later()
+    const briefs = fake.runs.map(recipe => JSON.parse(recipe.task) as { attempt: number; retried?: string })
+    expect(briefs.map(brief => [brief.attempt, brief.retried])).toEqual([[1, undefined],
+      [2, 'A person retried this ticket. Continue the assignment from the current directory and what it holds now.']])
   })
 })
