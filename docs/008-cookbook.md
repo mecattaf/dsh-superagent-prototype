@@ -617,10 +617,10 @@ return notes
 
 ### 3. Try it offline
 
-`src/workflow/cli.ts` runs a script under a mock backend that calls no model, so `meta`, the builtins and the shape of the run are checked before any Ticket exists:
+From a checkout of this repository, after `pnpm install`, `src/workflow/cli.ts` runs a script under a mock backend that calls no model, so `meta`, the builtins and the shape of the run are checked before any Ticket exists. The plugin that `dsh plugin` installs ships only the built `lib/`, not this runner.
 
 ```sh
-node --experimental-transform-types src/workflow/cli.ts release-notes.workflow.js --print-result
+node --experimental-transform-types src/workflow/cli.ts /srv/work/widgets/release-notes.workflow.js --print-result
 ```
 
 ### 4. Start and follow the run
