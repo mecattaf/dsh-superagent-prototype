@@ -121,7 +121,7 @@ describe('the plugin entry', () => {
     const timers = vi.spyOn(globalThis, 'setTimeout')
     try {
       const config = workflowPlugin.Config({ pollMs: 500 })
-      const nothing = { threads: { get: () => undefined }, tickets: { get: () => undefined } }
+      const nothing = { threads: { get: () => undefined }, tickets: { get: () => undefined, open: () => [] }, state: { get: () => undefined, set: () => {} } }
       const waiter = new TicketWaiter(nothing as never, () => config.pollMs.get())
       void waiter.settled('wf:run:node-a1', 'workflow:run:node', false)
       expect(timers.mock.calls.at(-1)?.[1]).toBe(500)
