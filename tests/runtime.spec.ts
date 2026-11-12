@@ -1817,4 +1817,12 @@ describe('the executor', () => {
     // No account probe ran.
     expect(subprocess.spawn).not.toHaveBeenCalled()
   })
+  it('resolves the GitHub account as upstream does under executor dshd once a repository is set', async () => {
+    subprocess.spawn.mockClear()
+    const next = await restart({ executor: 'dshd', dshd })
+    await next.ready
+    expect(next.configured()).toBe(true)
+    expect(next.deployment).toMatchObject({ repository: 'acme/widgets', github: { cli: AGENT(), login: 'agent-bot' } })
+    expect(subprocess.spawn.mock.calls.map(([spec]) => spec.argv)).toContainEqual(expect.arrayContaining([AGENT(), 'api', 'user']))
+  })
 })
