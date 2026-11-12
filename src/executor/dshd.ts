@@ -126,6 +126,15 @@ export function eventsOf(read: Pick<DshdRead, 'lines'>): { sessionId?: string; f
   }
   return { ...(sessionId !== undefined ? { sessionId } : {}), ...(final !== undefined ? { final } : {}) }
 }
+/**
+ * Whether `assignmentId` is the latest Assignment of the live Ticket and the only one running, so its unit's end may settle it.
+ * After jason261014 `isCurrentRunningAssignment`, kept here so src/core stays untouched.
+ */
+const current = (ticket: Ticket, assignmentId: string): boolean => {
+  const latest = latestAssignment(ticket)
+  return liveTicket(ticket) && latest?.id === assignmentId && latest.state === 'running'
+    && ticket.assignments.filter(assignment => assignment.state === 'running').length === 1
+}
 /** A launch that cannot succeed as configured, such as an unknown pair or a missing directory; it is recorded failed and not retried. */
 class LaunchRefused extends Error {}
 
@@ -359,19 +368,19 @@ export class DshdExecutor implements ExecutorPort {
     this.sameHost(binding)
     const signal = this.host.lifetime
     let status = await this.dshd.get(name, signal)
-    if (status === 'not-found') return this.settle(ticketId, assignmentId, binding, 'lost')
-    if (status.labels[LABEL.orchestrator] !== this.host.masterId) return this.settle(ticketId, assignmentId, binding, 'superseded')
+    if (status === 'not-found') return this.settle(ticketId, assignmentId, 'lost')
+    if (status.labels[LABEL.orchestrator] !== this.host.masterId) return this.settle(ticketId, assignmentId, 'superseded')
     if (!binding.invocationId && invocationOf(status)) {
       binding = { ...binding, invocationId: invocationOf(status)! }
       this.host.store.set(BINDING(assignmentId), binding)
     }
-    if (invocationOf(status) !== binding.invocationId) return this.settle(ticketId, assignmentId, binding, 'superseded')
+    if (invocationOf(status) !== binding.invocationId) return this.settle(ticketId, assignmentId, 'superseded')
     if (RUNNING.has(status.state)) {
       const waited = await this.dshd.wait(name, this.host.machine.dshd.watchSeconds, signal)
       if (waited !== 'not-found' && waited.outcome === 'still-running') throw new Later(`Unit ${name} still runs`)
       status = await this.dshd.get(name, signal)
-      if (status === 'not-found') return this.settle(ticketId, assignmentId, binding, 'lost')
-      if (invocationOf(status) !== binding.invocationId) return this.settle(ticketId, assignmentId, binding, 'superseded')
+      if (status === 'not-found') return this.settle(ticketId, assignmentId, 'lost')
+      if (invocationOf(status) !== binding.invocationId) return this.settle(ticketId, assignmentId, 'superseded')
     }
     const verdict = verdictOf(status)
     if (verdict === 'running') throw new Later(`Unit ${name} still runs`)
@@ -379,20 +388,24 @@ export class DshdExecutor implements ExecutorPort {
     const read = await this.dshd.read(name, signal)
     const events = read !== 'not-found' && read.invocationId === binding.invocationId ? eventsOf(read) : {}
     const child = status.lastRun?.child ?? {}
-    this.settle(ticketId, assignmentId, binding, verdict, { ...child, ending: status.lastRun?.ending ?? null }, events)
+    this.settle(ticketId, assignmentId, verdict, { ...child, ending: status.lastRun?.ending ?? null }, events)
   }
   /**
-   * Records how the unit ended on its binding and, while its Assignment still runs the open Ticket, tells the Engine in the same
-   * transaction: a report, or for a cut unit upstream's restart, and relays the report to the main Session.
+   * Records how the unit ended on its binding and, while its Assignment is the one running the live Ticket, tells the Engine in
+   * the same transaction: a report, or for a cut unit upstream's restart, and relays the report to the main Session. A binding
+   * that ended meanwhile, by a stop or an earlier run of this watch, is settled already and stays as it is.
    */
-  private settle(ticketId: string, assignmentId: string, binding: DshdBinding, verdict: Verdict,
+  private settle(ticketId: string, assignmentId: string, verdict: Verdict,
     end: { exitCode?: number; signal?: number; ending?: string | null } = {}, events: { sessionId?: string; final?: string } = {}): void {
     const { store, engine } = this.host
     store.atomic(() => {
+      const binding = store.get(BINDING(assignmentId))
+      if (!binding || binding.state === 'ended') return
       store.set(BINDING(assignmentId), { ...binding, state: 'ended', ended: { at: now(), verdict, ...end },
         ...(events.sessionId ? { sessionId: events.sessionId } : {}) })
       const ticket = store.tickets.get(ticketId)
-      if (!ticket || !liveTicket(ticket) || runningAssignment(ticket)?.id !== assignmentId) return
+      // The end is recorded either way; the Engine hears of it only for the Assignment that still runs the Ticket.
+      if (!ticket || !current(ticket, assignmentId)) return
       if (verdict === 'cut') { engine.assignmentInterrupted(ticketId, assignmentId); return }
       const sessionId = events.sessionId ?? binding.sessionId
       const report = { state: verdict === 'completed' ? 'ready' as const : 'failed' as const, summary: summaryOf(binding.name, verdict, end, events.final, sessionId) }
@@ -422,8 +435,11 @@ export class DshdExecutor implements ExecutorPort {
       await this.dshd.stop(binding.name, signal)
       verdict = 'stopped'
     } else verdict = verdictOf(status) === 'unknown' ? 'lost' : verdictOf(status)
-    const current = this.host.store.get(BINDING(assignmentId)) ?? binding
-    this.host.store.atomic(() => { this.host.store.set(BINDING(assignmentId), { ...current, state: 'ended', ended: { at: now(), verdict } }) })
+    this.host.store.atomic(() => {
+      const latest = this.host.store.get(BINDING(assignmentId)) ?? binding
+      // A watch that settled the unit meanwhile has recorded how it ended.
+      if (latest.state !== 'ended') this.host.store.set(BINDING(assignmentId), { ...latest, state: 'ended', ended: { at: now(), verdict } })
+    })
   }
   /** A binding is observed only on the host that launched its unit: dshd units are local to one user manager. */
   private sameHost(binding: DshdBinding): void {

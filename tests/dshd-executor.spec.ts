@@ -328,6 +328,46 @@ describe('settlement', () => {
     fake.end(nameOf(ticket), { lines: runLines('session-3', 'Done.') }); await later()
     expect(reports()).toEqual([expect.objectContaining({ kind: 'worker_report', state: 'ready', summary: 'Done.', unit: nameOf(ticket), session: 'session-3' })])
   })
+  it('records the end of a unit whose Ticket a person stopped while it was watched, and neither reports nor retries', async () => {
+    await start()
+    const { ticket } = await accepted(request('1', { cwd: directory() }))
+    const id = stored(ticket).assignments[0]!.id
+    // The watch has read how the unit ended and waits for its journal when the person stops the Ticket.
+    const gate = deferred()
+    let reading = false
+    const read = fake.read.bind(fake)
+    fake.read = async name => { reading = true; await gate.promise; return read(name) }
+    fake.end(nameOf(ticket), { lines: runLines('session-4', 'Done.') })
+    skew += 10 * 60_000
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + skew })
+    try { await h!.runtime.pump(); await waitUntil(() => reading) } finally { vi.useRealTimers() }
+    h!.runtime.engine.stopTicket(ticket.id)
+    await waitUntil(() => binding(ticket)!.state === 'ended')
+    const stopped = binding(ticket)
+    gate.resolve()
+    await h!.runtime.idle()
+    expect(stored(ticket).ended).toBeDefined()
+    expect(latestAssignment(stored(ticket))!.report).toBeUndefined()
+    expect(reports()).toEqual([])
+    expect(h!.runtime.effects.pending('dshd-watch', id)).toBe(false)
+    // The stop recorded the end; the watch that resumed after it left that record as it was.
+    expect(binding(ticket)).toEqual(stopped)
+    expect(binding(ticket)!.sessionId).toBeUndefined()
+  })
+  it('settles a unit once when its watch handler runs twice', async () => {
+    await start()
+    const { ticket } = await accepted(request('1', { cwd: directory() }))
+    const id = stored(ticket).assignments[0]!.id
+    fake.end(nameOf(ticket), { lines: runLines('session-5', 'Done.') }); await later()
+    const settled = binding(ticket)
+    expect(settled).toMatchObject({ state: 'ended', sessionId: 'session-5' })
+    // The queue runs the watch again, as after a crash between the settlement's commit and the row's removal.
+    h!.runtime.effects.enqueue('dshd-watch', id, { ticketId: ticket.id, assignmentId: id })
+    await later()
+    expect(reports()).toHaveLength(1)
+    expect(binding(ticket)).toEqual(settled)
+    expect(latestAssignment(stored(ticket))!.report).toMatchObject({ state: 'ready', summary: 'Done.' })
+  })
   it('keeps an Assignment whose unit dshd cannot tell about, and settles it once it can', async () => {
     await start()
     const { ticket } = await accepted(request('1', { cwd: directory() }))
