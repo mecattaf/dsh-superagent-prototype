@@ -9,10 +9,7 @@ import { HealthBoard } from '../src/infra/health.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import * as workflowPlugin from '../src/sources/workflow.ts'
-import { workflowKind } from '../src/sources/workflow.ts'
 import { WorkflowFloor } from '../src/sources/workflow-floor.ts'
-import { parseJournal, runWorkflow } from '../src/workflow/index.ts'
-import { startRuntime } from './fixtures/host.ts'
 import { FIXTURE, newDirectory, workflowHost, type WorkflowHost } from './fixtures/workflow.ts'
 
 const until = (check: () => unknown) => vi.waitFor(() => { if (!check()) throw new Error('not yet') }, { timeout: 3000, interval: 5 })
@@ -94,44 +91,6 @@ describe('orchestrator_workflow_start', () => {
     expect(() => h.floor.startRun({ script: 'missing.js', cwd: directory })).toThrow('cannot read the script')
     expect(() => h.floor.startRun({ script: 'bad.js', cwd: directory })).toThrow('meta is invalid')
     expect(h.floor.status()).toEqual([])
-  })
-  it('replays an exported journal with no dispatch', async () => {
-    const { h, directory } = start()
-    await h.started
-    const { run_id: run } = h.floor.startRun({ script: FIXTURE, cwd: directory, args: { tag: 't' } })
-    await until(() => h.offered().length === 2)
-    h.accept('a1'); h.accept('a2'); h.report('a1', 'DONE'); h.report('a2', 'DONE')
-    await until(() => h.offered().length === 1)
-    h.accept('b1'); h.report('b1', '{"a1": "alpha t", "a2": "beta t"}')
-    await until(() => h.run(run)?.state !== 'running')
-    const dispatched = vi.fn(async () => { throw new Error('dispatched') })
-    const replayed = await runWorkflow(readFileSync(FIXTURE, 'utf8'), { backend: { name: 'refusing', run: dispatched }, args: { tag: 't' },
-      resumeFrom: parseJournal(h.journal(run)), cacheIdentity: 'content' })
-    expect(replayed.status).toBe('completed')
-    expect(replayed.result).toEqual(h.run(run)!.result)
-    expect(replayed.calls.map(call => call.state)).toEqual(['cached', 'cached', 'cached'])
-    expect(dispatched).not.toHaveBeenCalled()
-  })
-})
-
-describe('a Source kind\'s main-Session tools', () => {
-  it('reach the main Session when the kind registers after it was decorated, and leave it when the kind unregisters', async () => {
-    const host = await startRuntime()
-    const floor = { startRun: vi.fn(() => ({ run_id: 'wf-1', state: 'started' as const, script_sha256: '', name: 'n' })), status: vi.fn(() => []) }
-    const unregister = host.runtime.sources.register(workflowKind(floor))
-    expect([...host.tools.get(host.runtime.masterId)!.keys()].filter(name => name.startsWith('orchestrator_workflow_')))
-      .toEqual(['orchestrator_workflow_start', 'orchestrator_workflow_status'])
-    expect(await host.runTool(host.runtime.masterId, 'orchestrator_workflow_status', {})).toEqual({ runs: [] })
-    unregister()
-    expect(host.tools.get(host.runtime.masterId)!.has('orchestrator_workflow_start')).toBe(false)
-    await host.stop()
-  })
-  it('must be named orchestrator_<kind>_', () => {
-    const kind = { ...workflowKind({ startRun: vi.fn(), status: vi.fn() }), kind: 'other' }
-    return startRuntime().then(async host => {
-      expect(() => host.runtime.sources.register(kind)).toThrow('does not start with orchestrator_other_')
-      await host.stop()
-    })
   })
 })
 

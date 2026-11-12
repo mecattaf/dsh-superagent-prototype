@@ -11,6 +11,9 @@ import { ciCounts, ciFact, ciSummary } from '../src/sources/github-read.ts'
 import { apply as applyGithub, githubKind, pollFailure, pollRound } from '../src/sources/github.ts'
 import { pollThreads as pollGithubThreads } from '../src/sources/github.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
+import { sourceTool, type SourceKind } from '../src/sources/kind.ts'
+import { startRuntime } from './fixtures/host.ts'
+import { z } from 'zod'
 import { cursorAt, POLL_HORIZON_MS } from '../src/sources/poll.ts'
 import { Store } from '../src/app/store.ts'
 import { Commands, commandError } from '../src/infra/commands.ts'
@@ -1403,5 +1406,28 @@ describe('observing the GitHub repository', () => {
       meta: { ci: true, branch: 'main', sha: 'bbb2222' }, url: 'https://github.com/acme/widgets/commit/bbb2222' })
     expect(h.receive.mock.calls[0]![0].text).toContain('Read github/commits/bbb2222/checks for every check.')
     h.store.close()
+  })
+})
+
+describe('a Source kind\'s main-Session tools', () => {
+  const probe = (name: string): SourceKind => ({ kind: 'probe', title: { zh: 'probe', en: 'probe' }, description: { zh: 'probe', en: 'probe' },
+    schema: z.object({}).strict(), fields: [], health: ['probe'],
+    tools: [sourceTool({ name, description: 'Echo the text.', schema: z.object({ text: z.string() }).strict(), execute: async ({ text }) => ({ text }) })] })
+  it('reach the main Session when the kind registers after the main Session was decorated, and leave it when the kind unregisters', async () => {
+    const host = await startRuntime()
+    const unregister = host.runtime.sources.register(probe('orchestrator_probe_echo'))
+    expect(await host.runTool(host.runtime.masterId, 'orchestrator_probe_echo', { text: 'hi' })).toEqual({ text: 'hi' })
+    unregister()
+    expect(host.tools.get(host.runtime.masterId)!.has('orchestrator_probe_echo')).toBe(false)
+    // Registered again, before or after the main Session was decorated, the kind's tools come back.
+    host.runtime.sources.register(probe('orchestrator_probe_echo'))
+    expect(host.tools.get(host.runtime.masterId)!.has('orchestrator_probe_echo')).toBe(true)
+    await host.stop()
+  })
+  it('must be named orchestrator_<kind>_, or the kind does not register', async () => {
+    const host = await startRuntime()
+    expect(() => host.runtime.sources.register(probe('orchestrator_echo'))).toThrow('does not start with orchestrator_probe_')
+    expect(host.runtime.sources.kind('probe')).toBeUndefined()
+    await host.stop()
   })
 })

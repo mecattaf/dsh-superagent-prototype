@@ -424,7 +424,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/stage.spec.ts` | The Ticket stages, row by row |
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |
 | `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
-| `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |
+| `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health; and a kind's main-Session tools |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
@@ -465,7 +465,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/workflow-journal.spec.ts` | `KvJournal`: lines read back after the Store reopens parse as the same run's journal in memory does |
 | `tests/workflow-run.spec.ts` | Workflow runs on a real Store and Engine with a stand-in Executor: the three-node fixture, and the restarts and failures K1–K6 |
 | `tests/workflow-window.spec.ts` | A run's window: a held node waits and the same Trigger proceeds when requeued, other work goes first, and an Eval nobody answers |
-| `tests/workflow-start.spec.ts` | `orchestrator_workflow_start` and `_status`: idempotence, the pinned script and `workflow()` children, the refusals, the tools on the main Session, the replay of a run's journal with no dispatch, and the plugin entry, which waits for the `orchestrator` service and unregisters its kind when disposed |
+| `tests/workflow-start.spec.ts` | `orchestrator_workflow_start` and `_status`: idempotence, the pinned script and `workflow()` children, the refusals, and the plugin entry, which waits for the `orchestrator` service and unregisters its kind when disposed |
+| `tests/workflow-zero-dispatch.spec.ts` | A finished run's exported journal replays with no dispatch |
 | `tests/class-docs.spec.ts` | Every class in `src`, apart from the vendored `src/workflow`, has a JSDoc block before it |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
 
