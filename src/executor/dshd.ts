@@ -55,6 +55,8 @@ export interface DshdBinding {
   ended?: { at: string; verdict: Verdict; exitCode?: number; signal?: number; ending?: string | null }
   /** Since when dshd holds no record of the unit, under `dshd.removeEnded`: `dshd rm` removed it, or dshd no longer knew it. */
   removedAt?: string
+  /** When and why `dshd rm --invocation` last kept the unit: dshd's refusal, as `<kind>: <message>`. */
+  kept?: { at: string; reason: string }
 }
 /** The binding of each Assignment the dshd executor launched, by Assignment ID. */
 export const BINDING = KV.dshd.binding
@@ -603,7 +605,8 @@ export class DshdExecutor implements ExecutorPort {
   /**
    * Removes an ended unit's dshd record with `dshd rm` once its Ticket has ended and its binding records how it ended and its
    * Session, reading the Session from the unit's journal first when the binding has none. Only a unit that holds the bound run,
-   * carries this orchestrator's labels and does not run is removed; one that names no Session is kept. DSH keeps the Session.
+   * carries this orchestrator's labels and does not run is removed; one that names no Session is kept. Where dshd takes
+   * `rm --invocation`, the removal names the bound run, and dshd's refusal keeps the unit and is recorded as `kept`. DSH keeps the Session.
    */
   private async removeQueued({ ticketId, assignmentId }: { ticketId: string; assignmentId: string }): Promise<void> {
     const { store, machine } = this.host
@@ -621,7 +624,14 @@ export class DshdExecutor implements ExecutorPort {
       const sessionId = binding.sessionId ?? (await this.printed(binding.name, binding.invocationId, signal)).sessionId
       if (sessionId === undefined) return
       if (!binding.sessionId) store.atomic(() => { store.set(BINDING(assignmentId), { ...store.get(BINDING(assignmentId)) ?? binding, sessionId }) })
-      await this.dshd.rm(binding.name, signal)
+      // Where dshd takes it, `rm --invocation` repeats the check under dshd's locks, so a run started since the get stays.
+      const invocation = binding.invocationId && await this.dshd.removesByInvocation(signal) ? binding.invocationId : undefined
+      const removed = await this.dshd.rm(binding.name, signal, invocation)
+      if (removed !== 'not-found' && 'refused' in removed) {
+        const kept = { at: now(), reason: `${removed.refused}: ${removed.message}` }
+        store.atomic(() => { store.set(BINDING(assignmentId), { ...store.get(BINDING(assignmentId)) ?? binding, kept }) })
+        return
+      }
     }
     store.atomic(() => { store.set(BINDING(assignmentId), { ...store.get(BINDING(assignmentId)) ?? binding, removedAt: now() }) })
   }

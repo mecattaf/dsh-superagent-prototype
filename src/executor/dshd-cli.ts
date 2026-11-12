@@ -1,4 +1,4 @@
-/** The thin dshd client: argv for `dshd run`, `get`, `wait`, `read`, `stop` and `rm`, and the JSON they print. */
+/** The thin dshd client: argv for `dshd run`, `get`, `wait`, `read`, `stop` and `rm` (and `rm --help`), and the JSON they print. */
 import type { SubprocessOutputReader, SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { z } from 'zod'
 
@@ -24,8 +24,14 @@ export interface DshdPort {
   /** The newest `lines` journal lines of the unit's current or last run (`-n`), by default dshd's 200. */
   read(name: string, signal: AbortSignal, lines?: number): Promise<DshdRead | 'not-found'>
   stop(name: string, signal: AbortSignal): Promise<DshdStatus | 'not-found'>
-  /** Removes an instance that does not run and answers its status before the removal; dshd refuses a running one. DSH's Sessions stay. */
-  rm(name: string, signal: AbortSignal): Promise<DshdStatus | 'not-found'>
+  /**
+   * Removes an instance that does not run and answers its status before the removal; dshd refuses a running one. DSH's Sessions
+   * stay. With `invocationId` (`dshd rm --invocation`), dshd removes it only when its last run was that one, and answers its
+   * refusal otherwise: `not-running` (exit 5) for another run or none, `instance-running` (exit 4) while that run still runs.
+   */
+  rm(name: string, signal: AbortSignal, invocationId?: string): Promise<DshdStatus | 'not-found' | DshdRefusal>
+  /** Whether this dshd's `rm` takes `--invocation ID`; a dshd before it removes by name only. */
+  removesByInvocation(signal: AbortSignal): Promise<boolean>
 }
 /** dshd cannot reach systemd or its own parts (exit 7: systemd-unavailable, tool-missing, template-missing); a later try may succeed. */
 export class DshdUnavailable extends Error {}
@@ -67,6 +73,7 @@ function json(text: string): unknown {
  * environment (`env -i`) holding only the recipe's entries, which dshd captures for every later start of the unit.
  */
 export class DshdCli implements DshdPort {
+  private rmByInvocation?: boolean
   constructor(private readonly subprocess: SubprocessRuntime, private readonly command: string) {}
   async run(recipe: DshdRecipe, signal: AbortSignal): Promise<DshdRunResult> {
     const env = Object.entries(recipe.env).sort(([a], [b]) => a.localeCompare(b)).map(([name, value]) => `${name}=${value}`)
@@ -100,10 +107,21 @@ export class DshdCli implements DshdPort {
     if (exit.exitCode !== 0) return this.missing('stop', name, exit)
     return this.parse('stop', name, Status, exit)
   }
-  async rm(name: string, signal: AbortSignal): Promise<DshdStatus | 'not-found'> {
-    const exit = await this.call([this.command, 'rm', '--json', name], '/', signal)
+  async rm(name: string, signal: AbortSignal, invocationId?: string): Promise<DshdStatus | 'not-found' | DshdRefusal> {
+    const argv = [this.command, 'rm', '--json', ...invocationId === undefined ? [] : ['--invocation', invocationId], name]
+    const exit = await this.call(argv, '/', signal)
+    // `--invocation` refuses with exit 5 (another run, or none) or exit 4 (that run still runs), and the instance stays.
+    if (invocationId !== undefined && (exit.exitCode === 5 || exit.exitCode === 4)) return this.refusal('rm', name, exit)
     if (exit.exitCode !== 0) return this.missing('rm', name, exit)
     return this.parse('rm', name, Status, exit)
+  }
+  /** Read once from `dshd rm --help`, whose usage line names `[--invocation ID]` where dshd takes it; a call cut off is read again. */
+  async removesByInvocation(signal: AbortSignal): Promise<boolean> {
+    if (this.rmByInvocation !== undefined) return this.rmByInvocation
+    const exit = await this.call([this.command, 'rm', '--help'], '/', signal)
+    const takes = exit.exitCode === 0 && /\brm \[--invocation ID\]/.test(exit.stdout)
+    if (exit.exitCode !== null) this.rmByInvocation = takes
+    return takes
   }
   private async call(argv: string[], cwd: string, signal: AbortSignal, timeoutMs = CALL_TIMEOUT_MS, maxBytes = 1 << 20): Promise<Exit> {
     const handle = this.subprocess.spawn({ argv, cwd, graceMs: 2000, signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
