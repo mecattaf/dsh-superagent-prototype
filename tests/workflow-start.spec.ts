@@ -73,7 +73,7 @@ describe('orchestrator_workflow_start', () => {
     await until(() => h2.offered().length === 4)
     expect([pairs(h2, configured), pairs(h2, overridden)]).toEqual([['p-source', 'p-source'], ['p-request', 'p-request']])
   })
-  it('status without run_id lists the 20 newest runs, newest first', async () => {
+  it('status without run_id lists the 20 newest runs, newest first, and refuses a run it does not have', async () => {
     const { h } = start()
     await h.started
     // Written oldest first under ids that sort the same way, so neither the order of writes nor of keys is newest first.
@@ -83,6 +83,7 @@ describe('orchestrator_workflow_start', () => {
         startedAt: new Date(Date.UTC(2026, 10, 12, 0, n)).toISOString(), seq: 0 })
     }
     expect(h.floor.status().map(run => run.run_id)).toEqual(Array.from({ length: 20 }, (_, n) => `wf-${String(20 - n).padStart(2, '0')}`))
+    expect(() => h.floor.status('wf-missing')).toThrow('no workflow run wf-missing')
   })
   it('a resumed run uses the pinned script, not the edited file', async () => {
     const { h: h1, directory } = start()
@@ -127,6 +128,32 @@ describe('orchestrator_workflow_start', () => {
     const { run_id: run } = h.floor.startRun({ script: 'top.workflow.js', cwd: directory })
     await until(() => h.run(run)?.state !== 'running')
     expect(h.run(run)).toMatchObject({ state: 'failed', error: expect.stringContaining('nesting is limited') })
+  })
+  it('nested workflow() resolves a relative .js reference beside the calling script, not the run\'s cwd', async () => {
+    const { h, directory } = start()
+    await h.started
+    mkdirSync(join(directory, 'scripts', 'lib'), { recursive: true })
+    writeFileSync(join(directory, 'scripts', 'parent.workflow.js'), script('parent', 'return await workflow("./lib/child.js")'))
+    writeFileSync(join(directory, 'scripts', 'lib', 'child.js'), script('child', 'return await agent("Child work.", { label: "child" })'))
+    const { run_id: run } = h.floor.startRun({ script: 'scripts/parent.workflow.js', cwd: directory })
+    await until(() => h.offered().length === 1)
+    h.accept('child'); h.report('child', 'child done')
+    await until(() => h.run(run)?.state !== 'running')
+    expect(h.run(run)).toMatchObject({ state: 'completed', result: 'child done' })
+  })
+  it('a run whose kept script is gone fails on resume rather than read the file again', async () => {
+    const { h: h1, directory } = start()
+    await h1.started
+    const { run_id: run, script_sha256: sha } = h1.floor.startRun({ script: FIXTURE, cwd: directory, args: { tag: 't' } })
+    await until(() => h1.offered().length === 2)
+    await h1.stop()
+    const store = new Store(join(directory, 'orchestrator.sqlite'))
+    store.delete(KV.workflow.script(sha))
+    store.close()
+    const { h: h2 } = start(directory)
+    await until(() => h2.run(run)?.state !== 'running')
+    expect(h2.run(run)).toMatchObject({ state: 'failed', result: null, error: `the script ${sha} it was started with is not kept` })
+    expect(h2.receive).not.toHaveBeenCalled()
   })
   it('nested workflow() takes the child beside the script before the one of the same name in <cwd>/.claude/workflows', async () => {
     const { h, directory } = start()
