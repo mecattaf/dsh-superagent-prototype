@@ -43,7 +43,7 @@ The main Session assesses node candidates as it assesses any inferred candidate.
 | Release | `orchestrator_trigger_requeue` with the node's Trigger: the same Trigger goes to a fresh Eval |
 | Other work first | Accept the other work now and hold the node |
 | No answer | An Eval that expires twice more is recorded unavailable; the node is `unavailable`, not `held`, and waits as a held one does, until it is requeued. The Source logs a warning for it, and its health detail counts the held and the unassessed nodes apart |
-| Main Session away | An Eval whose candidate never reaches the main Session does not expire, so its node stays `offered`. Past `offeredWarnSeconds` the Source logs a warning for it, once, and its health detail counts the nodes offered for longer; the node still waits for its assessment |
+| Main Session away | An Eval whose candidate never reaches the main Session does not expire, so its node stays `offered`. Past `offeredWarnSeconds` the Source logs a warning for it, once, and its health detail counts the nodes offered for longer; the node still waits for its assessment. A candidate that reached the main Session is not counted, however old its Eval: it is being assessed, and its Eval expires on its own deadline |
 
 So every node costs one Eval of the main Session, and a run moves only as fast as that Session assesses: while it cannot answer, each new node waits as a held one does, and so does its run. This keeps admission as upstream defines it, where a senderless Trigger can only be an inferred candidate or ignored (`src/admission.ts`). Letting a node launch without an Eval, with the main Session reordering only by hold and release, would need a new admission value in that table.
 

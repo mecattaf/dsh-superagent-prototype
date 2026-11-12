@@ -207,12 +207,17 @@ describe('the window of a workflow run', () => {
     expect(h.journal(run)).not.toContain('"type":"failed"')
     expect(h.offered()).toHaveLength(2)
     expect(h.offered().flatMap(candidate => h.store.decisions.byThread(candidate.thread.key))).toHaveLength(0)
-    // A node accepted at last leaves the count, and the other is not told again.
-    h.accept('a1')
+    // A candidate that reached the main Session is being assessed, and its Eval expires on its own deadline, so a1 leaves the
+    // count and is not told again, though its Eval is as old as before.
+    h.engine.candidateDelivered(h.offered().find(item => h.label(item.triggers[0]!.id) === 'a1')!.evalId)
     await until(() => h.board.all.workflow?.detail === '1 runs under way, 2 nodes waiting for their tickets: 1 offered for more than 1 h')
+    expect(node('a1')).toMatchObject({ state: 'offered', offered_since: since })
+    // A node accepted at last leaves the count, and nothing is told again.
+    h.accept('a2')
+    await until(() => h.board.all.workflow?.detail === '1 runs under way, 2 nodes waiting for their tickets')
     expect(h.logger.warn).toHaveBeenCalledTimes(2)
-    expect(node('a1').offered_since).toBeUndefined()
-    h.accept('a2'); h.report('a1', 'DONE'); h.report('a2', 'DONE')
+    expect(node('a2').offered_since).toBeUndefined()
+    h.accept('a1'); h.report('a1', 'DONE'); h.report('a2', 'DONE')
     await finishRun(h, run)
     expect(h.run(run)).toMatchObject({ state: 'completed', result: { a1: 'DONE', a2: 'DONE' } })
   })

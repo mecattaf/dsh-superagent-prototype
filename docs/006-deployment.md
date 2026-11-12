@@ -158,7 +158,7 @@ The optional `dsh-superagent-workflow` entry runs workflow scripts: each `agent(
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `pollMs` | 2000 | How often a node that waits reads its Ticket for a failed or blocked report, which ends nothing, in milliseconds; a node whose Ticket ends settles at once. A change applies at the next poll, without a restart |
-| `offeredWarnSeconds` | 3600 | How long a node may stay `offered` in one Eval before the entry logs a warning for it, once, and its health detail counts it, in seconds; an Eval whose candidate never reaches the main Session does not expire, and nothing here expires it. A change applies at the next poll, without a restart |
+| `offeredWarnSeconds` | 3600 | How long a node may stay `offered` in one Eval whose candidate has not reached the main Session before the entry logs a warning for it, once, and its health detail counts it, in seconds; such an Eval does not expire, and nothing here expires it. A change applies at the next poll, without a restart |
 | `concurrency` | 16 | `agent()` calls of one run in flight at once; Execution's `maxWorkers` still caps the Tickets that run |
 | `maxAttempts` | 1 | Attempts at each call, each one a new Trigger; with 1, a node whose Ticket fails or whose reply does not match its schema is `null` |
 | `pair` | empty | The compute pair of the nodes of a run that names none; empty leaves the choice to the Executor |
