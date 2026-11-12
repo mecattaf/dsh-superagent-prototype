@@ -1,7 +1,10 @@
-import { rmSync } from 'node:fs'
+import { rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { Trigger } from '../src/core/index.ts'
-import { FIXTURE, neverStopped, newDirectory, requeue, workflowHost, type WorkflowHost } from './fixtures/workflow.ts'
+import { threadKey, type Trigger } from '../src/core/index.ts'
+import { NODE_FAILURE, settle, TicketBackend, TicketWaiter } from '../src/sources/workflow-backend.ts'
+import { nodeOf } from '../src/sources/workflow-trigger.ts'
+import { FIXTURE, neverStopped, newDirectory, requeue, WORKFLOW_SETTINGS, workflowHost, type WorkflowHost } from './fixtures/workflow.ts'
 
 const B1 = '{"a1": "alpha t", "a2": "beta t"}'
 const RESULT = { a1: 'DONE', a2: 'DONE', b1: { a1: 'alpha t', a2: 'beta t' } }
@@ -49,6 +52,7 @@ describe('workflow runs', () => {
     const trigger = h.receive.mock.calls[0]![0] as Trigger
     expect(trigger.meta).toMatchObject({ kind: 'workflow-node', run, cwd: directory, labels: { 'superagent.run': run } })
     expect(new Set(h.receive.mock.calls.map(([item]) => (item as Trigger).threads[0]!.id)).size).toBe(3)
+    expect(h.store.threads.get(threadKey(trigger.threads[0]!))?.meta).toMatchObject({ label: 'fixture-3 · a1', facts: { run: { value: run } } })
     expect(h.floor.status(run)[0]!.nodes.map(node => [node.label, node.state])).toEqual([['a1', 'done'], ['a2', 'done'], ['b1', 'done']])
   })
   it('K1 floor killed while b1 runs: no new Trigger, Ticket or launch after restart', async () => {
@@ -137,6 +141,8 @@ describe('workflow runs', () => {
     const [first, second] = h.receive.mock.calls.slice(2).map(([item]) => item as Trigger)
     expect([first!.meta.attempt, second!.meta.attempt]).toEqual([1, 2])
     expect(second!.threads).toEqual(first!.threads)
+    // Status traces the node's latest attempt, not the Ticket of the one before.
+    expect(h.floor.status(run)[0]!.nodes.find(node => node.label === 'b1')).toMatchObject({ state: 'offered', trigger_id: second!.id })
     h.accept('b1'); h.report('b1', B1)
     await until(() => h.run(run)?.state !== 'running')
     expect(h.run(run)).toMatchObject({ state: 'completed', result: RESULT })
@@ -159,6 +165,146 @@ describe('workflow runs', () => {
     await until(() => h2.run(run)?.state !== 'running')
     expect(h2.run(run)).toMatchObject({ state: 'completed', result: { a1: null, a2: 'DONE', b1: { a1: 'alpha t', a2: 'beta t' } } })
     expect(received(h2).map(([label]) => label)).toEqual(['a2', 'b1'])
+  })
+  it('a node failure worded like a retryable one is still replayed as null on resume', async () => {
+    const { host: h1, directory } = start()
+    await h1.started
+    const { run_id: run } = h1.floor.startRun({ script: FIXTURE, cwd: directory, args: { tag: 't' } })
+    await until(() => h1.offered().length === 2)
+    // "refused" is a word the interpreter retries on resume; a node's own failure is never one of those.
+    h1.accept('a1'); h1.accept('a2'); h1.report('a1', 'the connection was refused', 'failed')
+    await until(() => lines(h1, run).some(line => line.type === 'failed'))
+    await h1.stop()
+    const { host: h2 } = start(directory)
+    await until(() => h2.receive.mock.calls.length === 1)
+    h2.report('a2', 'DONE')
+    await until(() => h2.offered().length === 1)
+    h2.accept('b1'); h2.report('b1', B1)
+    await until(() => h2.run(run)?.state !== 'running')
+    expect(h2.run(run)).toMatchObject({ state: 'completed', result: { a1: null } })
+    expect(received(h2).map(([label]) => label)).toEqual(['a2', 'b1'])
+  })
+  it('a resumed run answers every finished node from the journal, whatever order the nodes finished in', async () => {
+    const { host: h1, directory } = start()
+    await h1.started
+    const script = join(directory, 'reorder.workflow.js')
+    writeFileSync(script, `export const meta = { name: 'reorder', description: 'Two items through two stages' }
+return await pipeline(['x', 'y'], item => agent('stage1 ' + item, { label: 's1:' + item }), (r, item) => agent('stage2 of ' + item + ' got ' + r, { label: 's2:' + item }))\n`)
+    const { run_id: run } = h1.floor.startRun({ script, cwd: directory })
+    await until(() => h1.offered().length === 2)
+    // The second item finishes both stages before the first item finishes its first.
+    h1.accept('s1:x'); h1.accept('s1:y'); h1.report('s1:y', 'Y')
+    await until(() => h1.offered().length === 1)
+    h1.accept('s2:y'); h1.report('s2:y', 'Y2'); h1.report('s1:x', 'X')
+    await until(() => h1.offered().length === 1)
+    h1.accept('s2:x')
+    await h1.stop()
+    const { host: h2 } = start(directory)
+    await until(() => h2.receive.mock.calls.length === 1)
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(received(h2)).toEqual([['s2:x', 'duplicate']])
+    h2.report('s2:x', 'X2')
+    await until(() => h2.run(run)?.state !== 'running')
+    expect(h2.run(run)).toMatchObject({ state: 'completed', result: ['X2', 'Y2'] })
+    expect(received(h2)).toEqual([['s2:x', 'duplicate']])
+  })
+  it('a restart drives no run that already ended: no Trigger, no journal line and no second end', async () => {
+    const { host: h1, directory } = start()
+    const run = await firstWave(h1, directory)
+    h1.accept('b1'); h1.report('b1', B1)
+    await until(() => h1.run(run)?.state !== 'running')
+    const ended = h1.run(run), journal = h1.journal(run)
+    await h1.stop()
+    const { host: h2 } = start(directory)
+    await h2.started
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(h2.floor.active).toBe(0)
+    expect(h2.receive).not.toHaveBeenCalled()
+    expect(h2.journal(run)).toBe(journal)
+    expect(h2.run(run)).toEqual(ended)
+  })
+  it('two identical agent() calls are two nodes, each with its own Trigger, Thread and status row', async () => {
+    const { host: h, directory } = start()
+    await h.started
+    const script = join(directory, 'twins.workflow.js')
+    writeFileSync(script, `export const meta = { name: 'twins', description: 'Two identical calls' }
+return await parallel([() => agent('Same work.', { label: 'twin' }), () => agent('Same work.', { label: 'twin' })])\n`)
+    const { run_id: run } = h.floor.startRun({ script, cwd: directory })
+    await until(() => h.offered().length === 2)
+    const triggers = h.receive.mock.calls.map(([item]) => item as Trigger)
+    expect(triggers.map(item => item.meta.node)).toEqual([expect.stringMatching(/-o1$/), expect.stringMatching(/-o2$/)])
+    expect(new Set(triggers.map(item => item.threads[0]!.id)).size).toBe(2)
+    h.accept('twin'); h.accept('twin'); h.report('twin', 'one'); h.report('twin', 'two')
+    await until(() => h.run(run)?.state !== 'running')
+    expect([...h.run(run)?.result as string[]].sort()).toEqual(['one', 'two'])
+    expect(h.floor.status(run)[0]!.nodes.map(node => [node.node, node.trigger_id, node.state])).toEqual(triggers.map(item => [item.meta.node, item.id, 'done']))
+  })
+  it('a node the Source filters returns null, and so does one whose Trigger was filtered before a restart', async () => {
+    // The workflow Source is installed but off, so the Engine takes its Triggers in as filtered and gives them no Thread.
+    const off = { ...WORKFLOW_SETTINGS, sources: { workflow: { enabled: false } } }
+    const { host: h, directory } = start(undefined, { settings: off })
+    await h.started
+    const { run_id: run } = h.floor.startRun({ script: FIXTURE, cwd: directory, args: { tag: 't' } })
+    await until(() => h.run(run)?.state !== 'running')
+    expect(h.run(run)).toMatchObject({ state: 'completed', result: { a1: null, a2: null, b1: null } })
+    expect(lines(h, run).filter(line => line.type === 'failed').map(line => String(line.error))).toEqual(Array(3).fill(expect.stringMatching(/^workflow node filtered: /)))
+    // The process dies as the first node is filtered: a resume raises that Trigger again, which the Engine answers duplicate.
+    const { host: h1, directory: other } = start(undefined, { settings: off })
+    await h1.started
+    const take = h1.receive.getMockImplementation()!
+    h1.receive.mockImplementation(trigger => { void take(trigger); h1.floor.stop(); return new Promise<never>(() => {}) })
+    const { run_id: killed } = h1.floor.startRun({ script: FIXTURE, cwd: other, args: { tag: 't' } })
+    await until(() => h1.receive.mock.calls.length >= 1)
+    await h1.stop()
+    const { host: h2 } = start(other)
+    await until(() => h2.run(killed)?.state !== 'running')
+    expect(received(h2)[0]).toEqual(['a1', 'duplicate'])
+    expect(h2.run(killed)).toMatchObject({ state: 'completed', result: { a1: null, a2: null, b1: null } })
+  })
+})
+describe('the parts of a node', () => {
+  const call = { cid: `c1:${'ab'.repeat(32)}#1`, occurrence: 1, attempt: 1, prompt: 'Work.', opts: {} }
+  const done = { id: 'ticket-1', origin: { triggerIds: ['wf:r:n-a1'] }, assignments: [{ report: { state: 'ready', summary: 'done' } }], ended: { outcome: 'completed' } }
+  it('a call without a content identity has no node name', () => {
+    expect(nodeOf(call)).toBe('abababababababab-o1')
+    expect(() => nodeOf({ ...call, cid: undefined })).toThrow('without a content identity')
+  })
+  it('settle answers a blocked or failed report as a failure capped at 500 characters, and a completed Ticket with no ready report as no result', () => {
+    const ticket = (report?: { state: string; summary: string }, ended?: { outcome: string }) =>
+      ({ id: 'ticket-1', assignments: [{ ...report && { report } }], ...ended && { ended } }) as never
+    expect(settle(ticket({ state: 'progress', summary: 'half way' }), false)).toBeUndefined()
+    expect(settle(ticket({ state: 'blocked', summary: 'needs a key' }), false)).toEqual({ error: `${NODE_FAILURE}blocked: needs a key`, agentId: 'ticket-1' })
+    expect(settle(ticket({ state: 'failed', summary: 'x'.repeat(800) }), false)!.error).toBe(`${NODE_FAILURE}failed: ${'x'.repeat(500)}`)
+    expect(settle(ticket({ state: 'progress', summary: 'half way' }, { outcome: 'completed' }), false)).toEqual({ error: `${NODE_FAILURE}completed: half way`, agentId: 'ticket-1' })
+  })
+  it('TicketWaiter answers a node whose Ticket already ended at once, and once stopped answers nothing, asked before or after the stop', async () => {
+    let ticket: unknown = done
+    const source = { threads: { get: () => ({ subscriptions: ['ticket-1'] }) }, tickets: { get: () => ticket } } as never
+    const first = new TicketWaiter(source, () => 60_000)
+    expect(await Promise.race([first.settled('wf:r:n-a1', 'workflow:r:n', false), Promise.resolve('later')])).toEqual({ text: 'done', agentId: 'ticket-1' })
+    first.stop()
+    ticket = undefined
+    const waiter = new TicketWaiter(source, () => 1)
+    let answered = 0
+    void waiter.settled('wf:r:n-a1', 'workflow:r:n', false).then(() => { answered++ })
+    waiter.stop()
+    void waiter.settled('wf:r:n-a1', 'workflow:r:n', false).then(() => { answered++ })
+    ticket = done
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(answered).toBe(0)
+    expect(waiter.size).toBe(0)
+  })
+  it('a TicketBackend whose Source stopped raises no Trigger: the call parks', async () => {
+    const receive = vi.fn()
+    const run = { id: 'wf-r', name: 'n', scriptPath: '/s.js', scriptSha256: '', cwd: '/', state: 'running' as const, startedAt: '', seq: 0 }
+    const waiter = new TicketWaiter({ threads: { get: () => undefined }, tickets: { get: () => undefined } } as never, () => 1)
+    const backend = new TicketBackend({ source: { receive } as never, run, waiter, signal: AbortSignal.abort() })
+    let answered = false
+    void backend.run(call as never).then(() => { answered = true }, () => { answered = true })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(receive).not.toHaveBeenCalled()
+    expect(answered).toBe(false)
+    waiter.stop()
   })
 })
 describe('node results', () => {
