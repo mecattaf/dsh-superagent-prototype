@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { threadKey, type Trigger } from '../src/core/index.ts'
 import { NODE_FAILURE, settle, TicketBackend, TicketWaiter } from '../src/sources/workflow-backend.ts'
 import { nodeOf } from '../src/sources/workflow-trigger.ts'
+import { SettingsSchema } from '../src/policy.ts'
 import { FIXTURE, neverStopped, newDirectory, requeue, WORKFLOW_SETTINGS, workflowHost, type WorkflowHost } from './fixtures/workflow.ts'
 
 const B1 = '{"a1": "alpha t", "a2": "beta t"}'
@@ -260,6 +261,17 @@ return await parallel([() => agent('Same work.', { label: 'twin' }), () => agent
     await until(() => h2.run(killed)?.state !== 'running')
     expect(received(h2)[0]).toEqual(['a1', 'duplicate'])
     expect(h2.run(killed)).toMatchObject({ state: 'completed', result: { a1: null, a2: null, b1: null } })
+  })
+  it('a next attempt the Source filters returns null, though the attempt before gave the node its Thread', async () => {
+    const { host: h, directory } = start(undefined, { config: { maxAttempts: 2 } })
+    const run = await firstWave(h, directory)
+    h.accept('b1')
+    // The workflow Source goes off between b1's attempts: the Engine takes the second in as filtered, on the Thread of the first.
+    h.store.saveSettings(SettingsSchema.parse({ ...WORKFLOW_SETTINGS, sources: { workflow: { enabled: false } } }))
+    h.report('b1', 'Both files say alpha and beta.')
+    await until(() => h.run(run)?.state !== 'running')
+    expect(received(h).slice(2)).toEqual([['b1', 'stored'], ['b1', 'filtered']])
+    expect(h.run(run)).toMatchObject({ state: 'completed', result: { a1: 'DONE', a2: 'DONE', b1: null } })
   })
 })
 describe('the parts of a node', () => {
