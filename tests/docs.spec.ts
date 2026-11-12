@@ -55,6 +55,14 @@ describe('documentation', () => {
   it('leaves no merge conflict markers in any document', () => {
     expect(documents.filter(path => /^(<{7}|>{7}) /m.test(read(path)))).toEqual([])
   })
+  it('lists the node states of orchestrator_workflow_status as the workflow Source defines them', () => {
+    const states = [.../^export type NodeState = (.+)$/m.exec(read('src/sources/workflow-floor.ts'))![1]!.matchAll(/'([a-z]+)'/g)].map(([, state]) => `\`${state}\``)
+    // A list of states is backticked words joined by commas and a final "or", starting with the first state.
+    const lists = documents.flatMap(path => read(path).split('\n').filter(line => line.includes('orchestrator_workflow_status'))
+      .flatMap(line => [...line.matchAll(/`[a-z]+`(?:(?:, | or )`[a-z]+`)+/g)].map(([list]) => list).filter(list => list.startsWith(states[0]!)).map(list => ({ path, list }))))
+    expect(lists.length).toBeGreaterThan(0)
+    expect(lists.filter(({ list }) => list.split(/, | or /).join() !== states.join())).toEqual([])
+  })
   it('lists every module of src in the module table of 007 Architecture, and only files that exist', () => {
     const modules = listed('Modules')
     expect(files('src').filter(path => !modules.includes(path))).toEqual([])

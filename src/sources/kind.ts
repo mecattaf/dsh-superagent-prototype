@@ -113,7 +113,7 @@ export interface SourceKind<C extends Record<string, unknown> = Record<string, u
   environment?: { variables: readonly VariableSpec[]; values(input: EnvironmentInput<C>): Record<string, string> }
   /** Main-Session tools the kind adds while it is registered; each name starts with `orchestrator_<kind>_`. */
   tools?: readonly SourceTool[]
-  /** Hears that a Ticket ended, inside the transaction that ended it, so it only reads, and never throws. */
+  /** Hears that a Ticket ended, once the transaction that ended it commits; an end that a rollback undid is never heard. */
   ticketEnded?(ticket: Ticket): void
 }
 /** A main-Session tool of a Source kind: its arguments are parsed with `schema` before `execute` runs. */

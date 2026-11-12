@@ -38,7 +38,8 @@ export function workflowHost(directory: string, options: { slots?: number; confi
   ready?: Promise<void>; configured?: () => boolean } = {}) {
   const store = new Store(join(directory, 'orchestrator.sqlite'))
   if (store.get(KV.settings.revision) === undefined) store.saveSettings(SettingsSchema.parse(options.settings ?? WORKFLOW_SETTINGS))
-  const sources = new SourceRegistry(() => store.settings(), new HealthBoard())
+  const board = new HealthBoard()
+  const sources = new SourceRegistry(() => store.settings(), board)
   const candidates: Candidate[] = []
   const launches: string[] = [], pending: { ticket: string; assignment: string }[] = [], running = new Set<string>()
   type Call = (ticket: Ticket, assignment: Assignment) => void
@@ -67,7 +68,10 @@ export function workflowHost(directory: string, options: { slots?: number; confi
   const host = { sources, context: (kind: { kind: string; health: readonly string[] }) => sourceContextOf(deps, kind) }
   // The Ticket waiter reads pollMs each time it schedules a poll, so counting the reads counts the polls it scheduled.
   let polls = 0
-  const floor = new WorkflowFloor(host, { pollMs: { get: () => { polls += 1; return 5 } }, concurrency: 16, maxAttempts: 1, pair: '', ...options.config })
+  const logger = { info: vi.fn<(format: string, ...args: unknown[]) => void>(), warn: vi.fn<(format: string, ...args: unknown[]) => void>() }
+  // A test clock may run hours behind the wall clock the floor's threshold reads, so only a test that sets the threshold has one.
+  const floor = new WorkflowFloor(host, { pollMs: { get: () => { polls += 1; return 5 } }, offeredWarnSeconds: { get: () => Infinity }, concurrency: 16,
+    maxAttempts: 1, pair: '', ...options.config }, logger)
   const unregister = sources.register(workflowKind(floor))
   const started = floor.start()
 
@@ -106,8 +110,8 @@ export function workflowHost(directory: string, options: { slots?: number; confi
   const context = host.context({ kind: 'workflow', health: ['workflow'] })
   const run = (id: string) => store.get(KV.workflow.run(id))
   const journal = (id: string) => KvJournal.text(context, id)
-  return { store, engine, sources, floor, executor, receive, candidates, offered, accept, hold, report, launch, launches, stop, run, journal,
-    context, label, started, polls: () => polls }
+  return { store, engine, sources, board, logger, floor, executor, receive, candidates, offered, accept, hold, report, launch, launches, stop, run,
+    journal, context, label, started, polls: () => polls }
 }
 export type WorkflowHost = ReturnType<typeof workflowHost>
 /** Requeues a held node's Trigger, as `orchestrator_trigger_requeue` does, and runs the pass that offers it again. */

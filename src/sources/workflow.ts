@@ -9,12 +9,14 @@ import { MAX_ATTEMPTS, SOURCE } from './workflow-trigger.ts'
 
 export { SOURCE } from './workflow-trigger.ts'
 /**
- * The Source's machine settings. `pollMs` applies without a restart, as the waiting nodes read it at each poll; changing another
- * remounts the plugin, which resumes every run from its journal.
+ * The Source's machine settings. `pollMs` and `offeredWarnSeconds` apply without a restart, as the waiting nodes read them at
+ * each poll; changing another remounts the plugin, which resumes every run from its journal.
  */
 export const Config = s.object({
   pollMs: s.number().min(500).max(60000).step(1).default(2000)
     .description('How often a node that waits reads its ticket for a failed or blocked report, in milliseconds; a node settles as soon as its ticket ends.').volatile(),
+  offeredWarnSeconds: s.number().min(60).max(604800).step(1).default(3600)
+    .description('How long a node may stay offered in one evaluation whose candidate has not reached the main Session before the log warns once and the health detail counts it, in seconds; such an evaluation does not expire, and nothing here expires it.').volatile(),
   concurrency: s.number().min(1).max(64).step(1).default(16)
     .description('agent() calls of one run in flight at once; the Executor\'s worker limit still caps the tickets that run.'),
   maxAttempts: s.number().min(1).max(MAX_ATTEMPTS).step(1).default(1)
@@ -48,7 +50,7 @@ function checked(config: WorkflowConfig): WorkflowConfig {
 export function apply(ctx: Context, config: WorkflowConfig): void {
   checked(config)
   ctx.effect(() => {
-    const floor = new WorkflowFloor(ctx.orchestrator, config)
+    const floor = new WorkflowFloor(ctx.orchestrator, config, ctx.logger)
     const unregister = ctx.orchestrator.sources.register(workflowKind(floor))
     // DSH ends its process on an unhandled rejection, so a failure that escapes the start becomes the Source's health.
     const running = floor.start().catch((error: unknown) => { ctx.orchestrator.context({ kind: SOURCE, health: [SOURCE] }).report(SOURCE, { state: 'error', detail: String(error) }) })

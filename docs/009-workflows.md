@@ -15,7 +15,7 @@ The workflow Source is the plugin `dsh-superagent-workflow`, inserted disabled b
 
 ## Settings a deployment gives it
 
-[006 Deployment](006-deployment.md) lists the plugin's Config keys, set on the row `dsh-superagent-workflow` of a profile's `cordis.patch.yml`, and an example rule for its nodes. Changing any key but `pollMs` restarts the plugin, which resumes every run from its journal.
+[006 Deployment](006-deployment.md) lists the plugin's Config keys, set on the row `dsh-superagent-workflow` of a profile's `cordis.patch.yml`, and an example rule for its nodes. Changing any key but `pollMs` and `offeredWarnSeconds` restarts the plugin, which resumes every run from its journal.
 
 A node is a senderless Trigger, so the gate admits it only through the Source's admission table, and only as an inferred candidate. Three settings make the next node proceed by default; the Source sets none of them:
 
@@ -30,7 +30,7 @@ The kind adds two main-Session tools. They reach the main Session when the plugi
 | Tool | Does |
 | --- | --- |
 | `orchestrator_workflow_start` | Starts `script` in the absolute directory `cwd` with `args` and `pair`. A repeated `trigger_id` with the same script, directory and arguments returns the run it started, so its description tells the main Session always to pass the `trigger_id` of the request it answers. It refuses a relative or missing directory, a script it cannot read, and a script whose `meta` is invalid |
-| `orchestrator_workflow_status` | One run, or the newest runs, with each node `waiting`, `offered`, `held`, `ticket`, `done` or `null`, and its latest Trigger and its Ticket once it has them. A node a resumed run answered from its journal is `done` or `null` as its journal line says |
+| `orchestrator_workflow_status` | One run, or the newest runs, with each node `waiting`, `offered`, `held`, `unavailable`, `ticket`, `done` or `null`, and its latest Trigger and its Ticket once it has them. A `held` or `unavailable` node also gives `decided_at` and `reason`, from its Decision. An `offered` node in an Eval gives `offered_since`, when that Eval started. A node a resumed run answered from its journal is `done` or `null` as its journal line says |
 
 ## The window
 
@@ -42,7 +42,8 @@ The main Session assesses node candidates as it assesses any inferred candidate.
 | Hold | Ignore the candidate with a reason; the node waits, and its run with it |
 | Release | `orchestrator_trigger_requeue` with the node's Trigger: the same Trigger goes to a fresh Eval |
 | Other work first | Accept the other work now and hold the node |
-| No answer | An Eval that expires twice more is recorded unavailable; the node waits as a held one does, until it is requeued |
+| No answer | An Eval that expires twice more is recorded unavailable; the node is `unavailable`, not `held`, and waits as a held one does, until it is requeued. The Source logs a warning for it, and its health detail counts the held and the unassessed nodes apart |
+| Main Session away | An Eval whose candidate never reaches the main Session does not expire, so its node stays `offered`. Past `offeredWarnSeconds` the Source logs a warning for it, once, and its health detail counts the nodes offered for longer; the node still waits for its assessment. A candidate that reached the main Session is not counted, however old its Eval: it is being assessed, and its Eval expires on its own deadline |
 
 So every node costs one Eval of the main Session, and a run moves only as fast as that Session assesses: while it cannot answer, each new node waits as a held one does, and so does its run. This keeps admission as upstream defines it, where a senderless Trigger can only be an inferred candidate or ignored (`src/admission.ts`). Letting a node launch without an Eval, with the main Session reordering only by hold and release, would need a new admission value in that table.
 

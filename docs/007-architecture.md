@@ -188,7 +188,7 @@ With the dshd executor, a `launch` held by a pair at its own `maxWorkers` tries 
 
 Sources extend the host through `SourceKind`, defined in `src/sources/kind.ts`. A kind declares its identity, title, description, configuration `schema` and `fields`, derived `facts`, and `health` entries. Optional behavior includes `scope`, a `channel` (`allowed`, `send`, `link`), `threadContext`, `find`, `policy`, `environment`, `refreshLabels`, `tools` and `ticketEnded`.
 
-`tools` is this fork's one addition to upstream's Source protocol: main-Session tools that a kind adds while it is registered, each typed with `sourceTool` and named `orchestrator_<kind>_…`. It exists because the main Session receives tools only from `mainTools` when it is decorated, and then restricts what it inherits, while a Source plugin registers its kind only once dsh-superagent is ready, after that decoration. The hook is these four changes to upstream files, and touches nothing under `src/core`:
+`tools` is the first of this fork's two additions to upstream's Source protocol: main-Session tools that a kind adds while it is registered, each typed with `sourceTool` and named `orchestrator_<kind>_…`. It exists because the main Session receives tools only from `mainTools` when it is decorated, and then restricts what it inherits, while a Source plugin registers its kind only once dsh-superagent is ready, after that decoration. The hook is these four changes to upstream files, and touches nothing under `src/core`:
 
 | File | Change |
 | --- | --- |
@@ -199,7 +199,7 @@ Sources extend the host through `SourceKind`, defined in `src/sources/kind.ts`. 
 
 The prefix keeps a kind's tools apart from the host's and each other's, and inside the `orchestrator_` names that bridges to other agent runtimes pass. The workflow Source is the one kind that uses it.
 
-`ticketEnded` is the fork's second addition: the Runtime's handler of the Engine's domain events, which already words a ticket's pull request end for its conversations, also hands every ended Ticket to `SourceRegistry.ticketEnded`, which calls each kind that declares the hook. It runs inside the transaction that ended the Ticket, so a kind only reads there and never throws. The workflow Source settles a node as its Ticket ends with it, instead of at its next poll; it still polls for a worker's failed or blocked report, which ends nothing, because no domain event tells of a report. The hook changes `src/sources/kind.ts`, `src/sources/registry.ts` and `src/app/runtime.ts`, and nothing under `src/core`.
+`ticketEnded` is the fork's second addition: the Runtime's handler of the Engine's domain events, which already words a ticket's pull request end for its conversations, also hands every ended Ticket to `SourceRegistry.ticketEnded`, which calls each kind that declares the hook. It runs once the transaction that ended the Ticket commits, through the Store's `afterCommit`, so an end that a rollback undid reaches no kind, and a kind that throws fails no end; the Store reports what it throws. The workflow Source settles a node as its Ticket ends with it, instead of at its next poll; it still polls for a worker's failed or blocked report, which ends nothing, because no domain event tells of a report. The hook changes `src/sources/kind.ts`, `src/sources/registry.ts` and `src/app/runtime.ts`, and nothing under `src/core`.
 
 `SourceRegistry` (`registry.ts`) owns registered kinds and stored instances, and implements the Engine's `SourceScope`. Registration claims health entries on `HealthBoard`; duplicate claims and reserved `sync:` names are refused. A SourceContext writes only through its registration's claimed entries, so reports after unregistration do nothing.
 
@@ -209,7 +209,7 @@ Generic code accesses Source behavior through the registry. `send(message, comma
 
 Plugins receive `SourceHost`: the registry and `context(kind)`. The kind itself uses a narrower `SourceContext`, built by `sourceContextOf` in `src/app/source-context.ts`.
 
-That context supplies deployment and commands, setup readiness (`ready`, `configured`, `problem`), configuration, `receive`, `atomic`, and typed `state`. It also exposes Thread reads and metadata writes, Ticket reads and binding/closure commands, Trigger reads, `notify` through Outbox, and `report` for declared health entries.
+That context supplies deployment and commands, setup readiness (`ready`, `configured`, `problem`), configuration, `receive`, `atomic`, and typed `state`. It also exposes Thread reads and metadata writes, Ticket reads and binding/closure commands, Trigger reads, `notify` through Outbox, and `report` for declared health entries. Its Trigger reads include `triggers.decision`, the fork's one addition to the context: the Decision that last decided a Trigger, read through the disposition the core already records, which the workflow Source uses to tell a held node from one whose Eval went unassessed. It changes `src/sources/host.ts` and `src/app/source-context.ts`, and nothing under `src/core`.
 
 ### DshExecutor
 
@@ -511,7 +511,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/scheduled-e2e.spec.ts` | Scheduled occurrences end to end on the simulated host with the dshd executor: a record becomes one accepted Ticket and one unit, each occurrence has its own Thread, a stop reaches only the bound unit, a launch repeated after a crash, slots, setup without an account, a Ticket page that lists no variables, and an end while a machine Input waits |
 | `tests/workflow-dshd-e2e.spec.ts` | Workflow nodes end to end on the dshd executor: each node one unit whose final answer is its result, the three-node fixture, a restart that adopts a running node's unit, and the nodes that return null |
 | `tests/class-docs.spec.ts` | Every class in `src`, apart from the vendored `src/workflow`, has a JSDoc block before it |
-| `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
+| `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, every document that lists the node states of `orchestrator_workflow_status` lists those of `NodeState`, and this document's tables list every module and every test |
 
 `tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `fake-dshd.ts`, an in-memory dshd; `dshd-0.1.0.ts`, lines dshd 0.1.0 printed; `dshd-floor.ts`, the simulated host as a floor on the dshd executor, seeded through the management API, with the main Session as a scripted assessor; `git.ts`, the environment of every git the tests start, which names no repository; `workflow.ts`, the workflow Source on a real Store and Engine with a stand-in Executor, and `fixture-3.workflow.js`, the three-node workflow its tests and the live check run; `async.ts`; and `scheduled-occurrence-v1.json`, the occurrence record format a scheduler writes. `tests/workflow/helpers.ts` is the interpreter tests' own helper.
 
@@ -677,7 +677,7 @@ Most built-in instructions live in `prompts/*.md`, with one sentence per line jo
 
 ## Configuration reload
 
-Every plugin configuration key except `stateDir`, `engine`, `executor` and the `dshd` block is volatile; changing one of those remounts dsh-superagent. The scheduled Source's `inbox` and every key of the workflow Source but `pollMs` remount their own entry. The panel's Deployment settings and DeepSeek Harness's Plugin Manager edit them through DeepSeek Harness's configuration form; the host writes `cordis.patch.yml` and updates the values in place, and dsh-superagent reads each limit when it uses it, so a change applies without a restart.
+Every plugin configuration key except `stateDir`, `engine`, `executor` and the `dshd` block is volatile; changing one of those remounts dsh-superagent. The scheduled Source's `inbox` and every key of the workflow Source but `pollMs` and `offeredWarnSeconds` remount their own entry. The panel's Deployment settings and DeepSeek Harness's Plugin Manager edit them through DeepSeek Harness's configuration form; the host writes `cordis.patch.yml` and updates the values in place, and dsh-superagent reads each limit when it uses it, so a change applies without a restart.
 
 A settings save that changes a Source field setup reads, such as an account's CLI, and any save while setup waits, restarts dsh-superagent. DeepSeek Harness's settings service does not serve the entry during that restart, so after its own restart dsh-superagent asks it to read the entry again, and an open form becomes editable again.
 

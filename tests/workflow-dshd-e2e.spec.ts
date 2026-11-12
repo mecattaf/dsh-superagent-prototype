@@ -54,8 +54,8 @@ async function start(): Promise<void> {
 /** Mounts the plugin entry on the Runtime as DSH loads it, polling every `pollMs` (5 ms), and waits until its runs are under way. */
 async function mount(pollMs = 5): Promise<void> {
   const disposers: (() => unknown)[] = []
-  workflow.apply({ orchestrator: h!.runtime, effect: (effect: () => () => unknown) => { disposers.push(effect()) } } as never,
-    { pollMs: reference(pollMs), concurrency: 16, maxAttempts: 1, pair: '' } as never)
+  workflow.apply({ orchestrator: h!.runtime, logger: { info: () => {}, warn: () => {} }, effect: (effect: () => () => unknown) => { disposers.push(effect()) } } as never,
+    { pollMs: reference(pollMs), offeredWarnSeconds: reference(3600), concurrency: 16, maxAttempts: 1, pair: '' } as never)
   unmount = async () => { for (const dispose of disposers.reverse()) await dispose() }
   await vi.waitFor(() => { if (h!.runtime.health.workflow?.state !== 'ready') throw new Error('not yet') })
 }
