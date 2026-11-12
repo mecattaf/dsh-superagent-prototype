@@ -1044,7 +1044,7 @@ describe('feishu event consumer', () => {
   })
   /**
    * A bot CLI whose `event consume` behaves as `mode` says: `never` gets ready, `warn` warns once ready, `ready` stays up,
-   * and `flaky` exits after its first ready. It records each run and the PID of the latest.
+   * `flaky` exits after its first ready, and `events` prints the event lines once `go` exists. It records each run and the PID of the latest.
    */
   function cli(mode: 'never' | 'warn' | 'ready' | 'flaky' | 'events' | 'late'): string {
     const path = join(dir, 'lark-bot')
@@ -1056,7 +1056,7 @@ describe('feishu event consumer', () => {
     warn) echo '[event] ready' >&2; echo 'WARN the connection was reset' >&2; exec sleep 60 ;;
     ready) echo '[event] ready' >&2; exec sleep 60 ;;
     flaky) echo '[event] ready' >&2; [ "$n" -gt 1 ] && exec sleep 60; exit 1 ;;
-    events) echo '[event] ready' >&2; cat '${dir}/events'; touch '${dir}/printed'; exec sleep 60 ;;
+    events) echo '[event] ready' >&2; until [ -e '${dir}/go' ]; do sleep 0.1; done; cat '${dir}/events'; touch '${dir}/printed'; exec sleep 60 ;;
     late) echo '[event] ready' >&2; sleep 1; cat '${dir}/events'; touch '${dir}/printed'; exec sleep 60 ;;
   esac
   `, { mode: 0o755 })
@@ -1094,6 +1094,9 @@ describe('feishu event consumer', () => {
       event('om_3', 'oc_group', 'group')].join('\n') + '\n')
     const { ctx, health, store } = consumerSource(cli('events'))
     running = runFeishu(ctx, controller.signal)
+    // The ready line and the events arrive on different pipes, so the CLI prints the events only once the consumer is ready.
+    await vi.waitFor(() => expect(health.feishu).toMatchObject({ state: 'ready' }), until)
+    writeFileSync(join(dir, 'go'), '')
     await vi.waitFor(() => expect(store.triggers.get(feishuTriggerId('om_3'))).toBeDefined(), until)
     expect(['om_1', 'om_2'].map(id => store.triggers.get(feishuTriggerId(id))?.meta.direct)).toEqual([false, true])
     expect(store.get(KV.feishu.chats)).toEqual({ oc_group: false, oc_dm: true })
