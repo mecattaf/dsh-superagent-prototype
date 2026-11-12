@@ -2,8 +2,8 @@
  * An in-memory dshd for the dshd executor's tests: instances by name under dshd's same-name and same-recipe rules, which run a
  * headless task once, and the CLI they answer through DSH's subprocess service as `DshdCli` calls it (`spawn`).
  */
-import { DshdUnavailable, type DshdLastRun, type DshdPort, type DshdRead, type DshdRecipe, type DshdRunResult, type DshdStatus,
-  type DshdWaitResult } from '../../src/executor/dshd-cli.ts'
+import { DshdUnavailable, type DshdLastRun, type DshdPort, type DshdRead, type DshdRecipe, type DshdRefusal, type DshdRunResult,
+  type DshdStatus, type DshdWaitResult } from '../../src/executor/dshd-cli.ts'
 
 interface Instance { recipe: DshdRecipe; id: string; state: string; invocationId: string | null; lastRun: DshdLastRun; lines: string[] }
 type Verb = 'run' | 'get' | 'wait' | 'read' | 'stop' | 'rm'
@@ -20,10 +20,15 @@ export class FakeDshd implements DshdPort {
   readonly stops: string[] = []
   /** Every name `rm` removed. */
   readonly removals: string[] = []
+  /** Every `rm` the CLI was asked for, with its `--invocation` if any, removed or not. */
+  readonly removed: { name: string; invocation: string | undefined }[] = []
+  /** Whether `rm` takes `--invocation ID`, as dshd.nix's compare-and-remove does; false answers as a dshd before it. */
+  rmInvocation = true
   /** While set, the CLI's answer to `run` waits for it (or for the caller's abort), after the instance was created. */
   hold?: Promise<void>
   private invocations = 0
   private readonly failures: { verb: Verb; exit: number; kind: string }[] = []
+  private readonly hooks: { verb: Verb; act: () => void }[] = []
   async run(recipe: DshdRecipe): Promise<DshdRunResult> {
     this.runs.push(recipe)
     this.fail('run')
@@ -66,12 +71,23 @@ export class FakeDshd implements DshdPort {
     if (instance.state === 'running') { this.stops.push(name); this.end(name, { ending: 'stopped', signal: 15 }) }
     return this.status(instance)
   }
-  /** As `dshd rm`: refuses a running instance (`instance-running`, exit 4), else answers its status and deletes it. */
-  async rm(name: string): Promise<DshdStatus | 'not-found'> {
+  /**
+   * As `dshd rm`: refuses a running instance (`instance-running`, exit 4), else answers its status and deletes it. With
+   * `invocationId`, as `dshd rm --invocation`, it first refuses an instance whose current or last run is another (`not-running`, exit 5).
+   */
+  async rm(name: string, _signal?: AbortSignal, invocationId?: string): Promise<DshdStatus | 'not-found' | DshdRefusal> {
+    this.removed.push({ name, invocation: invocationId })
     this.fail('rm')
     const instance = this.instances.get(name)
     if (!instance) return 'not-found'
-    if (instance.state === 'running') throw Object.assign(new Error(`${name} is running`), { kind: 'instance-running', exit: 4 })
+    const last = instance.invocationId ?? instance.lastRun.invocationId
+    if (invocationId !== undefined && last !== invocationId) {
+      return { refused: 'not-running', exit: 5, message: `${name}'s last run was ${last || 'none'}, not ${invocationId}` }
+    }
+    if (instance.state === 'running') {
+      if (invocationId !== undefined) return { refused: 'instance-running', exit: 4, message: `${name} still runs ${invocationId}` }
+      throw Object.assign(new Error(`${name} is running`), { kind: 'instance-running', exit: 4 })
+    }
     const status = this.status(instance)
     this.instances.delete(name); this.removals.push(name)
     return status
@@ -97,6 +113,10 @@ export class FakeDshd implements DshdPort {
   remove(name: string): void { this.instances.delete(name) }
   /** The next call of `verb` fails with dshd's error `kind` and exit code `exit`. */
   failNext(verb: Verb, exit: number, kind: string): void { this.failures.push({ verb, exit, kind }) }
+  /** `act` runs as the next call of `verb` begins, such as a rerun between the executor's `get` and its `rm`. */
+  beforeNext(verb: Verb, act: () => void): void { this.hooks.push({ verb, act }) }
+  /** As `dshd rm --help`: whether this dshd's `rm` takes `--invocation`. */
+  async removesByInvocation(): Promise<boolean> { return this.rmInvocation }
   /** DSH's subprocess service as `DshdCli` uses it: answers the dshd argv, or returns undefined for any other command. */
   spawn(spec: { argv: readonly string[]; signal?: AbortSignal }) {
     const argv = [...spec.argv]
@@ -112,6 +132,22 @@ export class FakeDshd implements DshdPort {
     const reader = (text: () => string) => ({ readFrom: () => ({ text: text(), nextOffset: text().length, lossy: false }) })
     const answer = async (): Promise<number | null> => {
       try {
+        if (verb === 'rm' && argv.includes('--help')) {
+          stdout = `Usage: dshd rm ${this.rmInvocation ? '[--invocation ID] ' : ''}[--json | --text] NAME\n`
+          return 0
+        }
+        if (verb === 'rm' && argv.includes('--invocation') && !this.rmInvocation) {
+          stderr = JSON.stringify({ error: { kind: 'usage', message: 'unknown flag --invocation', hint: 'dshd help rm' } })
+          return 2
+        }
+        if (verb === 'rm') {
+          const at = argv.indexOf('--invocation')
+          const result = await this.rm(name, undefined, at < 0 ? undefined : argv[at + 1])
+          if (result === 'not-found') { stderr = JSON.stringify({ error: { kind: 'not-found', message: `no instance ${name}`, hint: null } }); return 3 }
+          if ('refused' in result) { stderr = JSON.stringify({ error: { kind: result.refused, message: result.message, hint: `dshd get ${name}` } }); return result.exit }
+          stdout = JSON.stringify({ outcome: 'removed', ...result })
+          return 0
+        }
         if (verb === 'run') {
           const flags = argv.slice(2, argv.indexOf('--'))
           const after = argv.slice(argv.indexOf('--') + 1)
@@ -125,9 +161,9 @@ export class FakeDshd implements DshdPort {
           return 0
         }
         const result = verb === 'get' ? await this.get(name) : verb === 'wait' ? await this.wait(name) : verb === 'read' ? await this.read(name)
-          : verb === 'rm' ? await this.rm(name) : await this.stop(name)
+          : await this.stop(name)
         if (result === 'not-found') { stderr = JSON.stringify({ error: { kind: 'not-found', message: `no instance ${name}`, hint: null } }); return 3 }
-        stdout = JSON.stringify(verb === 'read' ? { name, streams: ['stdout', 'stderr'], ...result } : verb === 'rm' ? { outcome: 'removed', ...result } : result)
+        stdout = JSON.stringify(verb === 'read' ? { name, streams: ['stdout', 'stderr'], ...result } : result)
         return 0
       } catch (error) {
         const kind = error instanceof DshdUnavailable ? 'systemd-unavailable' : (error as { kind?: string }).kind ?? 'io'
@@ -146,6 +182,8 @@ export class FakeDshd implements DshdPort {
       labels: instance.recipe.labels, lastRun: instance.lastRun })
   }
   private fail(verb: Verb): void {
+    const hook = this.hooks.findIndex(entry => entry.verb === verb)
+    if (hook >= 0) this.hooks.splice(hook, 1)[0]!.act()
     const at = this.failures.findIndex(failure => failure.verb === verb)
     if (at < 0) return
     const { exit, kind } = this.failures.splice(at, 1)[0]!
