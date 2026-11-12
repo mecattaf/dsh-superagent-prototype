@@ -15,7 +15,7 @@ flowchart TB
   engine -->|Policy| policy[Policy]
   engine -->|SourceScope| registry[SourceRegistry]
   engine -->|Assessor| assessor[MasterAssessor]
-  engine -->|Executor| executor[DshExecutor]
+  engine -->|Executor| executor[DshExecutor or DshdExecutor]
   assessor -->|decide| engine
   engine -->|Outbox| outbox[Outbox]
   executor -->|assignmentStarted, inputsDelivered, report| engine
@@ -172,13 +172,17 @@ Failures retry with exponential backoff. Throwing `Later` defers work without co
 | Kind | Handler | Does | At once | Retry |
 | --- | --- | --- | --- | --- |
 | `assessment` | MasterAssessor | Steers an Eval's candidate card into the main Session's turn, then tells the Engine it was delivered, which starts the Eval's deadline | 4, none while paused | 2 s doubling to 60 s |
-| `launch` | DshExecutor | Launches a pending Assignment: prepare command, Executor Session, assignment message | The free worker slots, none while paused | A passing failure of the model provider or the network runs again after 5 s doubling to 300 s, three times; any other failure, and a failed prepare command, fails its Ticket. One held by a pause or by full worker slots tries again after 5 s |
-| `delivery` | DshExecutor | Hands a Ticket's waiting Inputs to its running Assignment, in order | 4, none while paused | 2 s doubling to 60 s; one that waits for a worker slot tries again after 2 s |
+| `launch` | DshExecutor, DshdExecutor | Launches a pending Assignment: prepare command, Executor Session, assignment message; or, with the dshd executor, the unit's `dshd run` | The free worker slots, none while paused | A passing failure of the model provider or the network runs again after 5 s doubling to 300 s, three times; any other failure, and a failed prepare command, fails its Ticket. One held by a pause or by full worker slots tries again after 5 s |
+| `delivery` | DshExecutor | Hands a Ticket's waiting Inputs to its running Assignment, in order; the dshd executor ends each at once, as a unit reads only its brief | 4, none while paused | 2 s doubling to 60 s; one that waits for a worker slot tries again after 2 s |
 | `relay` | Sessions | Steers a worker's report or question, or a person's follow-up, into the main Session's turn | 1, in queue order | 2 s doubling to 60 s |
 | `notice` | Sessions | Injects a notice into the main Session without waking it | 1, in queue order | 2 s doubling to 60 s |
+| `dshd-watch` | DshdExecutor | Follows a running unit with `dshd wait` for `watchSeconds`, then reads how it ended and its final answer, and settles its Assignment | `LIMITS.maxWorkers.max` | 2 s doubling to 60 s; one whose unit still runs looks again after 2 s |
+| `dshd-stop` | DshdExecutor | Stops the unit of an Assignment the domain ended, while the unit's current run is the bound one | 4 | 2 s doubling to 60 s |
 | `reply` | Outbox | Sends a message for a Channel through its Source, after the earlier messages of its Ticket to its conversation that have not failed three times; withdrawing the message cancels it | 1, none while paused | 5 s doubling to 300 s; one whose Source is off, or behind an earlier message, tries again after 5 s |
 
 Each kind has a health entry under its name. It reports an error once one of its effects failed three times in a row, except `delivery`, whose failures show on their Ticket instead. Relays keep their order, and so do notices; a failed one holds back the later ones of its kind.
+
+With the dshd executor, a `launch` held by a pair at its own `maxWorkers` tries again after 5 s, dshd's refusal fails its Ticket at once, and a dshd that cannot be reached fails it after three tries. `dshd-watch` and `dshd-stop` come from module augmentation of `EffectPayloads` in `src/executor/dshd.ts`, so `src/app/effects.ts` is unchanged.
 
 ### Sources
 
@@ -211,15 +215,19 @@ That context supplies deployment and commands, setup readiness (`ready`, `config
 
 `prepare(ticket, outcome)` supplies the Engine's `prepareTicket` hook: short name, directory and `ticketExecution` assignment text. `workerSessionId(ticket.id)` derives the Session id.
 
-### DshdExecutor
-
-`DshdExecutor` (`src/executor/dshd.ts`), chosen with `executor: dshd`, runs each Assignment as one dshd headless unit. Runtime holds either Executor as an `ExecutorPort` (`src/executor/port.ts`). A launch stores the unit's recipe as the Assignment's `DshdBinding` before `dshd run`, so every later attempt repeats it and dshd's same-name rule keeps one unit per Assignment. A `dshd-watch` effect follows the unit with `dshd wait` until it ends, and the end settles the Assignment through `report` or `assignmentInterrupted`. `stop` enqueues a `dshd-stop` effect, which stops the unit only while its current run is the bound one. `deliver` queues nothing: a headless unit reads only its brief.
-
 `WorkerSlots` reserves capacity before a launch or a delivery that wakes an idle worker. A human message can use one slot beyond `maxWorkers`, and wakes have priority over launches. `activeCount` supplies panel load.
 
 Transient provider and network failures get three retries. Launches use effect backoff; failed turns receive continuation messages after 15, 30 and 60 seconds. `inputMessage` renders each Input from current Ticket state, and `mandateInstructions` adds the matched-rule limits for inferred work.
 
 `install` subscribes to Session events; `dispose` unsubscribes. A turn end normally reports waiting, except after readiness or while human action is required. Errors report failed. At startup, `resume` reports interrupted Assignments through `assignmentInterrupted` and requeues pending launches that do not wait for a person, oldest Ticket first.
+
+### DshdExecutor
+
+`DshdExecutor` (`src/executor/dshd.ts`), chosen with `executor: dshd`, runs each Assignment as one dshd headless unit. Runtime holds either Executor as an `ExecutorPort` (`src/executor/port.ts`), and only one is built. `DshdCli` (`src/executor/dshd-cli.ts`) calls dshd through DeepSeek Harness's subprocess service, and every `dshd run` starts from `env -i` with the recipe's environment.
+
+A launch stores the unit's recipe as the Assignment's `DshdBinding` before `dshd run`, so every later attempt repeats it byte for byte and dshd's same-name rule keeps one unit per Assignment. The binding records the host, the pair, the unit's invocation and, once read, its Session. A `dshd-watch` effect follows the unit with `dshd wait` until it ends, then `dshd get` and `dshd read` give how it ended and its last final answer, and the end settles the Assignment through `report` or `assignmentInterrupted`. `stop` enqueues a `dshd-stop` effect, which stops the unit only while its current run is the bound one. `deliver` queues nothing: a headless unit reads only its brief, and Inputs that arrive while it runs wait for its end.
+
+`prepare` sets the Ticket's directory to its Trigger's `meta.cwd`, else `dshd.cwd`, else upstream's directory under the Execution directory; the pair is the Trigger's `meta.pair`, else `dshd.defaultPair`. The same `WorkerSlots` caps running units at `maxWorkers`, and a pair's own `maxWorkers` holds its launches. At startup, `resume` adopts each running Assignment whose binding has not ended and watches its unit again, interrupts one that has no binding because it ran under the dsh executor, and launches pending ones, oldest Ticket first; [003 Execution](003-execution.md) states this restart rule. `shutdown` leaves units running.
 
 ### MasterAssessor
 
@@ -527,12 +535,16 @@ A generated column is computed from its row's JSON and is empty outside its set,
 | Session prompt history | `session-prompts:<session id>` |
 | Source state | Read positions such as `github-cursor:<number>`, PR CI fingerprints and seen Feishu-topic messages; keys begin with the kind or `thread-` plus a Thread key |
 | Display names | `source-labels:<source id>` |
+| dshd units | `dshd-binding:<Assignment id>`: the unit's host, name, pair, recipe, invocation, Session and how it ended |
+| Workflow runs | `workflow-run:<run>`, the run; `workflow-journal:<run>:<seq>`, one journal line each; `workflow-script:<sha256>`, each script and `workflow()` child a run read; `workflow-nested:<run>:<reference>`, which child a reference resolved to |
 
 Dismissal is stored on its Decision. Input text is rendered from the Ticket when read, so neither needs a separate key-value record.
 
+Beside the database, `stateDir` holds the briefs too long for a unit's argument, in `briefs/`, and the scheduled Source's default inbox, `inbox/scheduled/`, with its `.done/` and `.bad/` records.
+
 Read caches use bounded in-memory `TextCache` instances and are lost on restart. A Session paging through an original Source record or prompt preview must reread offset 0 after a restart. Feishu links resolved after intake are cached the same way; link-based search finds them only after that link has been read during the current process lifetime.
 
-Nothing deletes old records yet, so these grow without bound: the `trigger`, `disposition` and `decision` rows; ended Tickets and their Threads; the outbox's receipts; and in `kv`, every saved settings revision and prompt version, the prompt revisions each Session worked under, and the Sources' records per Thread and per Issue or pull request.
+Nothing deletes old records yet, so these grow without bound: the `trigger`, `disposition` and `decision` rows; ended Tickets and their Threads; the outbox's receipts; and in `kv`, every saved settings revision and prompt version, the prompt revisions each Session worked under, the Sources' records per Thread and per Issue or pull request, the dshd bindings, and the workflow runs, journals and scripts. The briefs files and the inbox's `.done/` and `.bad/` records grow too, and dshd keeps every ended unit until someone removes it.
 
 `SCHEMA_VERSION` only increases. A database of a newer version refuses to start; `src/app/migration.ts` upgrades a database of the pre-release schema 10 once, at start, and refuses an older one.
 
@@ -656,7 +668,7 @@ Most built-in instructions live in `prompts/*.md`, with one sentence per line jo
 
 ## Configuration reload
 
-Every plugin configuration key except `stateDir`, `engine`, `executor` and the `dshd` block is volatile; changing one of those remounts dsh-superagent. The panel's Deployment settings and DeepSeek Harness's Plugin Manager edit them through DeepSeek Harness's configuration form; the host writes `cordis.patch.yml` and updates the values in place, and dsh-superagent reads each limit when it uses it, so a change applies without a restart.
+Every plugin configuration key except `stateDir`, `engine`, `executor` and the `dshd` block is volatile; changing one of those remounts dsh-superagent. The scheduled Source's `inbox` and every key of the workflow Source but `pollMs` remount their own entry. The panel's Deployment settings and DeepSeek Harness's Plugin Manager edit them through DeepSeek Harness's configuration form; the host writes `cordis.patch.yml` and updates the values in place, and dsh-superagent reads each limit when it uses it, so a change applies without a restart.
 
 A settings save that changes a Source field setup reads, such as an account's CLI, and any save while setup waits, restarts dsh-superagent. DeepSeek Harness's settings service does not serve the entry during that restart, so after its own restart dsh-superagent asks it to read the entry again, and an open form becomes editable again.
 
