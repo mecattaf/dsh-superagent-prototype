@@ -11,7 +11,7 @@ import { latestAssignment, waitsForPerson, type Ticket } from '../src/core/index
 import { BINDING } from '../src/executor/dshd.ts'
 import { KV } from '../src/kv.ts'
 import * as workflow from '../src/sources/workflow.ts'
-import { SCHEMA_INSTRUCTION } from '../src/sources/workflow-trigger.ts'
+import { nodeTriggerId, SCHEMA_INSTRUCTION } from '../src/sources/workflow-trigger.ts'
 import type { RunStatus } from '../src/sources/workflow-floor.ts'
 import { KvJournal } from '../src/sources/workflow-store.ts'
 import { reference } from './fixtures/deployment.ts'
@@ -46,11 +46,15 @@ function script(cwd: string, kind: 'text' | 'schema'): string {
   return 'once.workflow.js'
 }
 
-/** The floor with the `workflow-node` rule and admission cell seeded, and the workflow plugin mounted with a 5 ms poll. */
+/** The floor with the `workflow-node` rule and admission cell seeded, and the workflow plugin mounted. */
 async function start(): Promise<void> {
   ({ h, fake } = await startFloor({ rule: RULE, source: 'workflow', row: 'workflow' }))
+  await mount()
+}
+/** Mounts the plugin entry on the Runtime as DSH loads it, polling every 5 ms, and waits until its runs are under way. */
+async function mount(): Promise<void> {
   const disposers: (() => unknown)[] = []
-  workflow.apply({ orchestrator: h.runtime, effect: (effect: () => () => unknown) => { disposers.push(effect()) } } as never,
+  workflow.apply({ orchestrator: h!.runtime, effect: (effect: () => () => unknown) => { disposers.push(effect()) } } as never,
     { pollMs: reference(5), concurrency: 16, maxAttempts: 1, pair: '' } as never)
   unmount = async () => { for (const dispose of disposers.reverse()) await dispose() }
   await vi.waitFor(() => { if (h!.runtime.health.workflow?.state !== 'ready') throw new Error('not yet') })
@@ -132,6 +136,29 @@ describe('workflow nodes on the dshd executor', () => {
     expect(await ended(run)).toMatchObject({ state: 'completed', result: { a1: 'DONE', a2: 'DONE', b1: { a1: 'alpha t1', a2: 'beta t1' } } })
     expect(fake.runs.map(recipe => recipe.cwd)).toEqual([cwd, cwd, cwd])
     expect(new Set(fake.runs.map(recipe => recipe.labels['superagent.node'])).size).toBe(3)
+  })
+
+  it('a floor restart while a node\'s unit runs adopts the unit, and the resumed run completes with no second Trigger, Ticket or unit', async () => {
+    await start()
+    const cwd = agency()
+    const run = await startRun(cwd, script(cwd, 'text'))
+    const { trigger, ticket } = await acceptNode(run, 'digest')
+    const node = h!.runtime.store.triggers.get(trigger)!.meta.node as string
+    // The floor stops while the unit runs; DSH mounts the plugin again on the restarted Runtime, which resumes the run.
+    await unmount!(); unmount = undefined
+    await h!.restart()
+    await mount()
+    expect((await status(run)).nodes).toEqual([expect.objectContaining({ label: 'digest', state: 'ticket', ticket_id: ticket.id })])
+    fake.end(unitOf(ticket), { lines: runLines('session-1', 'Digest written.') })
+    await later(h!)
+    expect(await ended(run)).toMatchObject({ state: 'completed', result: { answer: 'Digest written.' } })
+    expect(h!.runtime.store.get(BINDING(stored(ticket).assignments[0]!.id))).toMatchObject({ invocationId: 'invocation-1', ended: { verdict: 'completed' } })
+    expect(stored(ticket).assignments).toHaveLength(1)
+    expect(h!.runtime.store.tickets.list()).toHaveLength(1)
+    expect(h!.runtime.store.triggers.get(nodeTriggerId(run, node, 2))).toBeUndefined()
+    // The resumed call journals its start again under the same key, as a resume does; it is still one node.
+    expect(new Set(journal(run).filter(line => line.type === 'started').map(line => line.key)).size).toBe(1)
+    expect(fake.runs).toHaveLength(1)
   })
 
   it('a node whose unit exited 0 with no final answer returns null: the summary Unit <name> exited 0. is not a result, and the node is not retried', async () => {

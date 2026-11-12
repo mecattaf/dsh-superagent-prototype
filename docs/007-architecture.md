@@ -492,7 +492,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/workflow-start.spec.ts` | `orchestrator_workflow_start` and `_status`: idempotence, the pinned script and `workflow()` children, the refusals, and the plugin entry, which waits for the `orchestrator` service and unregisters its kind when disposed |
 | `tests/workflow-zero-dispatch.spec.ts` | A finished run's exported journal replays with no dispatch |
 | `tests/scheduled-e2e.spec.ts` | Scheduled occurrences end to end on the simulated host with the dshd executor: a record becomes one accepted Ticket and one unit, each occurrence has its own Thread, a stop reaches only the bound unit, a launch repeated after a crash, slots, setup without an account, and an end while a machine Input waits |
-| `tests/workflow-dshd-e2e.spec.ts` | Workflow nodes end to end on the dshd executor: each node one unit whose final answer is its result, the three-node fixture, and the nodes that return null |
+| `tests/workflow-dshd-e2e.spec.ts` | Workflow nodes end to end on the dshd executor: each node one unit whose final answer is its result, the three-node fixture, a restart that adopts a running node's unit, and the nodes that return null |
 | `tests/class-docs.spec.ts` | Every class in `src`, apart from the vendored `src/workflow`, has a JSDoc block before it |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
 
