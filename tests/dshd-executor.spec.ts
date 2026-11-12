@@ -301,6 +301,33 @@ describe('idempotency', () => {
     expect(fake.runs).toHaveLength(3)
     expect(latestAssignment(stored(ticket))!.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('systemd-unavailable') })
   })
+  it('adopts the unit a dshd run that never answered started: the retry re-runs the frozen recipe and dshd reports already-running', async () => {
+    await start()
+    fake.answerNothingNext('run')
+    const { ticket } = await accepted(request('1', { cwd: directory() }))
+    await later()
+    expect(fake.runs).toHaveLength(2)
+    expect(fake.runs[1]).toEqual(fake.runs[0])
+    expect(fake.instances.size).toBe(1)
+    expect(latestAssignment(stored(ticket))!.report).toBeUndefined()
+    expect(runningAssignment(stored(ticket))?.id).toBe(stored(ticket).assignments[0]!.id)
+    expect(binding(ticket)).toMatchObject({ state: 'running', invocationId: 'invocation-1' })
+    fake.end(nameOf(ticket), { lines: runLines('session-8', 'Done.') }); await later()
+    expect(stored(ticket).ended?.outcome).toBe('completed')
+  })
+  it('records failed after three dshd runs that never answered, and stops the unit the first one started, found by its name and labels', async () => {
+    await start()
+    for (let i = 0; i < 3; i++) fake.answerNothingNext('run')
+    const { ticket } = await accepted(request('1', { cwd: directory() }))
+    await later(); await later(); await later()
+    expect(fake.runs).toHaveLength(3)
+    expect(latestAssignment(stored(ticket))!.report).toMatchObject({ state: 'failed', summary: expect.stringContaining('was stopped before it finished') })
+    // No unit runs outside the orchestrator's view: a person's retry starts -a2 alone.
+    expect(fake.stops).toEqual([fake.runs[0]!.name])
+    expect(binding(ticket)).toMatchObject({ state: 'ended', ended: { verdict: 'stopped' } })
+    h!.runtime.engine.retryTicket(ticket.id); await later()
+    expect([...fake.instances.values()].filter(unit => unit.state === 'running').map(unit => unit.recipe.name)).toEqual([nameOf(ticket, 2)])
+  })
 })
 
 describe('slots', () => {
@@ -799,6 +826,41 @@ describe('stop', () => {
     await h!.runtime.idle()
     expect(fake.stops).toEqual([fake.runs[0]!.name])
     expect(h!.runtime.store.tickets.get(ticketId)!.assignments[0]!.startedAt).toBeUndefined()
+  })
+  it('stops the unit of a Ticket stopped while dshd did not answer its launch, without trying the launch again', async () => {
+    await start()
+    const gate = deferred()
+    fake.hold = gate.promise
+    fake.answerNothingNext('run')
+    const trigger = request('1', { cwd: directory() })
+    h!.runtime.receive(trigger); await h!.runtime.idle()
+    const result = await h!.route({ kind: 'accept', trigger_id: trigger.id, title: 'Fix', worktree_name: 'fix-regression', acknowledgement: '收到。' })
+    await waitUntil(() => fake.runs.length === 1)
+    const ticketId = (result.ticket as { ticket_id: string }).ticket_id
+    h!.runtime.engine.stopTicket(ticketId)
+    fake.hold = undefined; gate.resolve()
+    await h!.runtime.idle()
+    expect(fake.stops).toEqual([fake.runs[0]!.name])
+    expect(fake.runs).toHaveLength(1)
+    expect(h!.runtime.store.get(BINDING(h!.runtime.store.tickets.get(ticketId)!.assignments[0]!.id))).toMatchObject({ state: 'ended', ended: { verdict: 'stopped' } })
+  })
+  it('stops the unit of a Ticket stopped while its launch ran, when a restart cut that launch before dshd answered', async () => {
+    await start()
+    fake.hold = deferred().promise
+    const trigger = request('1', { cwd: directory() })
+    h!.runtime.receive(trigger); await h!.runtime.idle()
+    const result = await h!.route({ kind: 'accept', trigger_id: trigger.id, title: 'Fix', worktree_name: 'fix-regression', acknowledgement: '收到。' })
+    await waitUntil(() => fake.runs.length === 1)
+    const ticketId = (result.ticket as { ticket_id: string }).ticket_id
+    h!.runtime.engine.stopTicket(ticketId)
+    // The stop has run and left the unit to the launch under way.
+    await h!.runtime.effects.idle('dshd-stop')
+    expect(h!.runtime.effects.pending('dshd-stop')).toBe(false)
+    await h!.restart()
+    fake.hold = undefined
+    await h!.runtime.idle()
+    expect(fake.stops).toEqual([fake.runs[0]!.name])
+    expect(fake.runs).toHaveLength(1)
   })
 })
 

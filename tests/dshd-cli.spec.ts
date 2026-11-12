@@ -1,6 +1,6 @@
 /** The dshd client: the argv it gives DSH's subprocess service, and the JSON and error objects of dshd it reads. */
 import { describe, expect, it, vi } from 'vitest'
-import { DshdCli, DshdUnavailable, invocationOf, type DshdRecipe } from '../src/executor/dshd-cli.ts'
+import { DshdCli, DshdUnanswered, DshdUnavailable, invocationOf, type DshdRecipe } from '../src/executor/dshd-cli.ts'
 import { eventsOf } from '../src/executor/dshd.ts'
 
 /** A subprocess service whose every command exits with `exitCode`, printing `stdout` and `stderr`, as in tests/fixtures/host.ts. */
@@ -44,6 +44,13 @@ describe('DshdCli', () => {
   it('throws DshdUnavailable on exit 7', async () => {
     await expect(cli(answering('', refusal('systemd-unavailable'), 7)).run(recipe, signal)).rejects.toBeInstanceOf(DshdUnavailable)
     await expect(cli(answering('', refusal('tool-missing'), 7)).get('sa-fix-a1', signal)).rejects.toBeInstanceOf(DshdUnavailable)
+  })
+  it('throws DshdUnanswered when a signal or the call\'s timeout ends dshd before it answers, since dshd may have acted', async () => {
+    await expect(cli(answering('', '', null)).run(recipe, signal)).rejects.toBeInstanceOf(DshdUnanswered)
+    await expect(cli(answering('', '', null)).run(recipe, signal)).rejects.toThrow('dshd run sa-fix-a1 was stopped before it finished')
+    await expect(cli(answering('', '', null)).get('sa-fix-a1', signal)).rejects.toBeInstanceOf(DshdUnanswered)
+    // An answer that is not dshd's is no lost answer.
+    await expect(cli(answering('', 'Segmentation fault', 139)).run(recipe, signal)).rejects.not.toBeInstanceOf(DshdUnanswered)
   })
   it('reads get --json state, invocationId, labels and lastRun, and exit 3 as not-found', async () => {
     const ended = status({ state: 'stopped', invocationId: null,
