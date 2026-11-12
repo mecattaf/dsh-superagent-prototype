@@ -313,7 +313,7 @@ describe('the parts of a node', () => {
   })
   it('TicketWaiter answers a node whose Ticket already ended at once, and once stopped answers nothing, asked before or after the stop', async () => {
     let ticket: unknown = done
-    const source = { threads: { get: () => ({ subscriptions: ['ticket-1'] }) }, tickets: { get: () => ticket } } as never
+    const source = { threads: { get: () => ({ subscriptions: ['ticket-1'] }) }, tickets: { get: () => ticket, open: () => [] }, state: { get: () => undefined, set: () => {} } } as never
     const first = new TicketWaiter(source, () => 60_000)
     expect(await Promise.race([first.settled('wf:r:n-a1', 'workflow:r:n', false), Promise.resolve('later')])).toEqual({ text: 'done', agentId: 'ticket-1' })
     first.stop()
