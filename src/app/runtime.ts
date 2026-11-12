@@ -150,9 +150,13 @@ export class Runtime extends Service implements SourceHost {
           const followed = !this.quiet && (event.type === 'trigger.received' || event.type === 'ticket.resumed' || event.type === 'trigger.followup')
           const followup = followed ? followupNotice(store, sources, event.data.triggerId) : undefined
           if (followup) sessions.relay(followup.id, followup.text)
-          // Tell the Source kinds that the ticket ended, a quiet end too, and its conversations whenever it ends via a pull request.
+          // Tell the Source kinds that the ticket ended, a quiet end too, once the transaction that ended it commits: an end that a
+          // rollback undoes reaches no kind, and a kind that throws fails no end. Tell its conversations whenever it ends via a pull request.
           const ended = event.type === 'ticket.ended' ? store.tickets.get(event.data.ticketId) : undefined
-          if (ended) sources.ticketEnded(ended)
+          if (ended) {
+            const id = ended.id
+            store.afterCommit(() => { const committed = store.tickets.get(id); if (committed) sources.ticketEnded(committed) })
+          }
           if (ended && setup.configured()) {
             const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
             for (const message of pullEndNotices(ended, request, setup.deployment.repository)) outbox.send(message)

@@ -188,7 +188,7 @@ With the dshd executor, a `launch` held by a pair at its own `maxWorkers` tries 
 
 Sources extend the host through `SourceKind`, defined in `src/sources/kind.ts`. A kind declares its identity, title, description, configuration `schema` and `fields`, derived `facts`, and `health` entries. Optional behavior includes `scope`, a `channel` (`allowed`, `send`, `link`), `threadContext`, `find`, `policy`, `environment`, `refreshLabels`, `tools` and `ticketEnded`.
 
-`tools` is this fork's one addition to upstream's Source protocol: main-Session tools that a kind adds while it is registered, each typed with `sourceTool` and named `orchestrator_<kind>_…`. It exists because the main Session receives tools only from `mainTools` when it is decorated, and then restricts what it inherits, while a Source plugin registers its kind only once dsh-superagent is ready, after that decoration. The hook is these four changes to upstream files, and touches nothing under `src/core`:
+`tools` is the first of this fork's two additions to upstream's Source protocol: main-Session tools that a kind adds while it is registered, each typed with `sourceTool` and named `orchestrator_<kind>_…`. It exists because the main Session receives tools only from `mainTools` when it is decorated, and then restricts what it inherits, while a Source plugin registers its kind only once dsh-superagent is ready, after that decoration. The hook is these four changes to upstream files, and touches nothing under `src/core`:
 
 | File | Change |
 | --- | --- |
@@ -199,7 +199,7 @@ Sources extend the host through `SourceKind`, defined in `src/sources/kind.ts`. 
 
 The prefix keeps a kind's tools apart from the host's and each other's, and inside the `orchestrator_` names that bridges to other agent runtimes pass. The workflow Source is the one kind that uses it.
 
-`ticketEnded` is the fork's second addition: the Runtime's handler of the Engine's domain events, which already words a ticket's pull request end for its conversations, also hands every ended Ticket to `SourceRegistry.ticketEnded`, which calls each kind that declares the hook. It runs inside the transaction that ended the Ticket, so a kind only reads there and never throws. The workflow Source settles a node as its Ticket ends with it, instead of at its next poll; it still polls for a worker's failed or blocked report, which ends nothing, because no domain event tells of a report. The hook changes `src/sources/kind.ts`, `src/sources/registry.ts` and `src/app/runtime.ts`, and nothing under `src/core`.
+`ticketEnded` is the fork's second addition: the Runtime's handler of the Engine's domain events, which already words a ticket's pull request end for its conversations, also hands every ended Ticket to `SourceRegistry.ticketEnded`, which calls each kind that declares the hook. It runs once the transaction that ended the Ticket commits, through the Store's `afterCommit`, so an end that a rollback undid reaches no kind, and a kind that throws fails no end; the Store reports what it throws. The workflow Source settles a node as its Ticket ends with it, instead of at its next poll; it still polls for a worker's failed or blocked report, which ends nothing, because no domain event tells of a report. The hook changes `src/sources/kind.ts`, `src/sources/registry.ts` and `src/app/runtime.ts`, and nothing under `src/core`.
 
 `SourceRegistry` (`registry.ts`) owns registered kinds and stored instances, and implements the Engine's `SourceScope`. Registration claims health entries on `HealthBoard`; duplicate claims and reserved `sync:` names are refused. A SourceContext writes only through its registration's claimed entries, so reports after unregistration do nothing.
 
@@ -209,7 +209,7 @@ Generic code accesses Source behavior through the registry. `send(message, comma
 
 Plugins receive `SourceHost`: the registry and `context(kind)`. The kind itself uses a narrower `SourceContext`, built by `sourceContextOf` in `src/app/source-context.ts`.
 
-That context supplies deployment and commands, setup readiness (`ready`, `configured`, `problem`), configuration, `receive`, `atomic`, and typed `state`. It also exposes Thread reads and metadata writes, Ticket reads and binding/closure commands, Trigger reads, `notify` through Outbox, and `report` for declared health entries.
+That context supplies deployment and commands, setup readiness (`ready`, `configured`, `problem`), configuration, `receive`, `atomic`, and typed `state`. It also exposes Thread reads and metadata writes, Ticket reads and binding/closure commands, Trigger reads, `notify` through Outbox, and `report` for declared health entries. Its Trigger reads include `triggers.decision`, the fork's one addition to the context: the Decision that last decided a Trigger, read through the disposition the core already records, which the workflow Source uses to tell a held node from one whose Eval went unassessed. It changes `src/sources/host.ts` and `src/app/source-context.ts`, and nothing under `src/core`.
 
 ### DshExecutor
 
