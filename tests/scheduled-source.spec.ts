@@ -2,7 +2,8 @@
 import { Context } from '@deepseek-ai/cordis'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { lockSync } from 'proper-lockfile'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Engine, key, type Ticket, type Trigger } from '../src/core/index.ts'
@@ -153,6 +154,15 @@ describe('scheduled Source', () => {
       '[Scheduled item, run now] team/widgets:nightly-digest — Nightly digest',
       'Requested 2026-11-12T09:15:30.000Z by scheduled-run. Working directory: /srv/work/widgets. Item file: /srv/work/widgets/schedule/nightly-digest.json. Revision 3f9d2b7c1a0e. Pair: default.',
       '', TEXT].join('\n'))
+  })
+
+  it('names in the rule of 006 Deployment the time each header form gives', () => {
+    const doc = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'docs', '006-deployment.md'), 'utf8')
+    const rule = JSON.parse(/```json\n(\{"id": "scheduled",[\s\S]*?)\n```/.exec(doc)![1]!) as { instruction: string }
+    for (const value of [record('/srv/work/widgets'), manual('/srv/work/widgets', RUN_A)]) {
+      const time = scheduledTrigger(value, 'x', { missed: 0 }).text.split('\n')[1]!.split(' ')[0]!
+      expect(rule.instruction).toMatch(new RegExp(`judged from the [A-Za-z ]*\\b${time}\\b[A-Za-z ]* time`))
+    }
   })
 
   it('keeps meta to the occurrence fields and never the text', () => {
