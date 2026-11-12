@@ -17,6 +17,7 @@ import { LIMITS } from '../limits.ts'
 import { WorkerSlots, batchOf, inputMessage, sourceTrigger, ticketExecution } from './dsh.ts'
 import { DshdCli, DshdUnavailable, invocationOf, type DshdPort, type DshdRead, type DshdRecipe, type DshdStatus } from './dshd-cli.ts'
 import type { ExecutorPort } from './port.ts'
+import { noAnswerSummary } from './dshd-summary.ts'
 
 declare module '../app/effects.ts' {
   interface EffectPayloads {
@@ -107,7 +108,7 @@ export function composeBrief(ticket: Ticket, k: number, origin: Trigger | undefi
  * node parses as JSON; any other end says how the unit ended, then its answer and where its record is.
  */
 function summaryOf(name: string, verdict: Verdict, end: { exitCode?: number; signal?: number }, final?: string, sessionId?: string): string {
-  if (verdict === 'completed') return final ?? `Unit ${name} exited 0.`
+  if (verdict === 'completed') return final ?? noAnswerSummary(name)
   const answer = final === undefined ? undefined : `${final.slice(0, FINAL_CHARS)}${final.length > FINAL_CHARS ? '…' : ''}`
   const pointer = `Unit ${name}; session ${sessionId ?? 'unknown'}.`
   const how = `Unit ${name} ended ${verdict}${end.exitCode !== undefined ? ` (exit ${end.exitCode})` : ''}${end.signal ? ` (signal ${end.signal})` : ''}.`
