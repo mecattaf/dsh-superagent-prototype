@@ -1,4 +1,4 @@
-/** The thin dshd client: argv for `dshd run`, `get`, `wait`, `read` and `stop`, and the JSON they print. */
+/** The thin dshd client: argv for `dshd run`, `get`, `wait`, `read`, `stop` and `rm`, and the JSON they print. */
 import type { SubprocessOutputReader, SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { z } from 'zod'
 
@@ -21,6 +21,8 @@ export interface DshdPort {
   /** The newest `lines` journal lines of the unit's current or last run (`-n`), by default dshd's 200. */
   read(name: string, signal: AbortSignal, lines?: number): Promise<DshdRead | 'not-found'>
   stop(name: string, signal: AbortSignal): Promise<DshdStatus | 'not-found'>
+  /** Removes an instance that does not run and answers its status before the removal; dshd refuses a running one. DSH's Sessions stay. */
+  rm(name: string, signal: AbortSignal): Promise<DshdStatus | 'not-found'>
 }
 /** dshd cannot reach systemd or its own parts (exit 7: systemd-unavailable, tool-missing, template-missing); a later try may succeed. */
 export class DshdUnavailable extends Error {}
@@ -89,6 +91,11 @@ export class DshdCli implements DshdPort {
     const exit = await this.call([this.command, 'stop', '--json', name], '/', signal)
     if (exit.exitCode !== 0) return this.missing('stop', name, exit)
     return this.parse('stop', name, Status, exit)
+  }
+  async rm(name: string, signal: AbortSignal): Promise<DshdStatus | 'not-found'> {
+    const exit = await this.call([this.command, 'rm', '--json', name], '/', signal)
+    if (exit.exitCode !== 0) return this.missing('rm', name, exit)
+    return this.parse('rm', name, Status, exit)
   }
   private async call(argv: string[], cwd: string, signal: AbortSignal, timeoutMs = CALL_TIMEOUT_MS, maxBytes = 1 << 20): Promise<Exit> {
     const handle = this.subprocess.spawn({ argv, cwd, graceMs: 2000, signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),

@@ -20,7 +20,7 @@ afterEach(async () => {
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true })
 })
 const directory = () => { const made = mkdtempSync(join(tmpdir(), 'dshd-cleanup-')); directories.push(made); return made }
-async function start(dshd: Partial<DshdConfig> & { removeEnded?: boolean } = {}): Promise<Host> {
+async function start(dshd: Partial<DshdConfig> = {}): Promise<Host> {
   fake = new FakeDshd()
   h = await startRuntime(undefined, { machine: { executor: 'dshd', dshd: testDshd({ pairs: PAIRS, defaultPair: 'opus', ...dshd }) },
     spawn: spec => fake.spawn(spec) })

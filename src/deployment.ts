@@ -48,6 +48,8 @@ export const Config = s.object({
     watchSeconds: s.number().min(5).max(600).step(1).default(30).description('How long one dshd wait follows a unit before looking again.'),
     briefArgvMaxChars: s.number().min(1000).max(120000).step(1).default(64000)
       .description('Longest brief passed as the task argument; a longer one is written to a file under stateDir.'),
+    removeEnded: s.boolean().default(false)
+      .description('Whether a unit is removed with dshd rm once its Ticket has ended and its binding records how it ended and its Session. DSH keeps the Session. Off: ended units stay until someone removes them.'),
   }).default({}).description('The dshd executor; read only when executor is dshd.'),
 })
 export type DeploymentConfig = ReturnType<typeof Config>
@@ -65,6 +67,7 @@ export interface DshdConfig {
   args: string[]
   watchSeconds: number
   briefArgvMaxChars: number
+  removeEnded: boolean
 }
 export interface Machine {
   stateDir: string

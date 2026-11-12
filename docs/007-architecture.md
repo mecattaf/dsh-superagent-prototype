@@ -213,7 +213,7 @@ That context supplies deployment and commands, setup readiness (`ready`, `config
 
 ### DshdExecutor
 
-`DshdExecutor` (`src/executor/dshd.ts`), chosen with `executor: dshd`, runs each Assignment as one dshd headless unit. Runtime holds either Executor as an `ExecutorPort` (`src/executor/port.ts`). A launch stores the unit's recipe as the Assignment's `DshdBinding` before `dshd run`, so every later attempt repeats it and dshd's same-name rule keeps one unit per Assignment. A `dshd-watch` effect follows the unit with `dshd wait` until it ends, and the end settles the Assignment through `report` or `assignmentInterrupted`. `stop` enqueues a `dshd-stop` effect, which stops the unit only while its current run is the bound one. `deliver` queues nothing: a headless unit reads only its brief.
+`DshdExecutor` (`src/executor/dshd.ts`), chosen with `executor: dshd`, runs each Assignment as one dshd headless unit. Runtime holds either Executor as an `ExecutorPort` (`src/executor/port.ts`). A launch stores the unit's recipe as the Assignment's `DshdBinding` before `dshd run`, so every later attempt repeats it and dshd's same-name rule keeps one unit per Assignment. A `dshd-watch` effect follows the unit with `dshd wait` until it ends, and the end settles the Assignment through `report` or `assignmentInterrupted`. `stop` enqueues a `dshd-stop` effect, which stops the unit only while its current run is the bound one. With `dshd.removeEnded`, a `dshd-stop` of a Ticket that has ended enqueues a `dshd-rm` effect for each of its ended units, which removes the unit's dshd record once its binding records its Session, and records `removedAt` on the binding, which stays. `deliver` queues nothing: a headless unit reads only its brief.
 
 `WorkerSlots` reserves capacity before a launch or a delivery that wakes an idle worker. A human message can use one slot beyond `maxWorkers`, and wakes have priority over launches. `activeCount` supplies panel load.
 
@@ -473,6 +473,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/cards.spec.ts` | The rules the built-in text must state, file by file |
 | `tests/model-surface.spec.ts` | Everything models read: tools, prompts, skills and inputs, checked against the tool schemas, the execution environment and the glossary, within a size budget per role |
 | `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts`, `tests/engine.spec.ts` | The plugin configuration and setup, the agent's process environment, the plugin entry, and the entry on a Cordis context with its engine off and on |
+| `tests/dshd-cleanup.spec.ts` | The dshd executor's opt-in `dshd.removeEnded`: which ended units it removes with `dshd rm`, when, and which it keeps |
 | `tests/dshd-cli.spec.ts` | The dshd client's argv and the JSON and error objects of dshd it reads |
 | `tests/dshd-executor.spec.ts` | The dshd executor on the simulated host with an in-memory dshd: recipe, idempotent launches, slots, settlement, restart and stop |
 | `tests/dshd-names.spec.ts` | Unit names stay inside dshd's name rule and apart for distinct Assignments |

@@ -92,4 +92,11 @@ describe('DshdCli', () => {
       .toMatchObject({ state: 'stopped' })
     await expect(cli(answering('ok')).get('sa-fix-a1', signal)).rejects.toThrow('printed what dsh-superagent does not read: ok')
   })
+  it('runs dshd rm --json NAME, reads the status before removal, not-found as such, and throws on a running instance', async () => {
+    const subprocess = answering(JSON.stringify({ outcome: 'removed', warnings: [], ...status({ state: 'stopped' }) }))
+    expect(await cli(subprocess).rm('sa-fix-a1', signal)).toMatchObject({ state: 'stopped' })
+    expect(subprocess.spawn.mock.calls[0]![0].argv).toEqual(['dshd', 'rm', '--json', 'sa-fix-a1'])
+    expect(await cli(answering('', refusal('not-found'), 3)).rm('sa-fix-a1', signal)).toBe('not-found')
+    await expect(cli(answering('', refusal('instance-running'), 4)).rm('sa-fix-a1', signal)).rejects.toThrow('dshd rm sa-fix-a1 refused: instance-running')
+  })
 })
