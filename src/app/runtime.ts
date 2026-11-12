@@ -167,7 +167,8 @@ export class Runtime extends Service implements SourceHost {
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
-        quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
+        quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } },
+        takesInput: () => this.executor.takesInput !== false }
       this.ready = this.initialize()
     } catch (error) {
       // Release the database and state lock if initialization fails so an in-process restart can reacquire them.

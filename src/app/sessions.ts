@@ -96,7 +96,8 @@ function noWait({ name, arguments: input }: { name: string; arguments: unknown }
  * Code bridge, would then fail every turn of the Session.
  */
 function toolParameters(schema: z.ZodType): ReturnType<typeof z.toJSONSchema> {
-  return JSON.parse(JSON.stringify(z.toJSONSchema(schema))) as ReturnType<typeof z.toJSONSchema>
+  // What the model must send: the input side, so an argument with a default is optional, as `schema.parse` supplies it.
+  return JSON.parse(JSON.stringify(z.toJSONSchema(schema, { io: 'input' }))) as ReturnType<typeof z.toJSONSchema>
 }
 
 /**

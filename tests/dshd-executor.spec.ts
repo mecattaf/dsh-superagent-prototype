@@ -877,4 +877,15 @@ describe('inputs', () => {
     expect(briefs.map(brief => [brief.attempt, brief.retried])).toEqual([[1, undefined],
       [2, 'A person retried this ticket. Continue the assignment from the current directory and what it holds now.']])
   })
+  it('tells the main Session that a note or an attach reaches a unit only through the brief of a later launch', async () => {
+    await start()
+    const { ticket } = await accepted(request('1', { cwd: directory() }))
+    const noted = await h!.runTool(h!.runtime.masterId, 'orchestrator_ticket_note', { ticket_id: ticket.id, text: 'Ticket B renamed the setting.' })
+    expect(noted.reason).toMatch(/^Recorded\. .*reads only its brief.*next launch.*does not reach a worker already running\.$/)
+    const other = request('2', { cwd: directory() })
+    h!.runtime.receive(other); await h!.runtime.idle()
+    const attached = await h!.route({ kind: 'attach', ticket_id: ticket.id, trigger_id: other.id })
+    expect(attached.reason).toMatch(/^Attached: .*reads only its brief.*does not receive it, and its end hands the trigger back to Eval\.$/)
+    expect(fake.runs).toHaveLength(1)
+  })
 })

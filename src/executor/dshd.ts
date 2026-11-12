@@ -193,6 +193,8 @@ export class DshdExecutor implements ExecutorPort {
   /** A unit starts from its own environment, so it needs no account unless the deployment names a repository. */
   readonly needsAccount: boolean = false
   readonly workerEnvironment: WorkerEnvironment = 'own'
+  /** A unit reads only its brief, see `deliver`. */
+  readonly takesInput = false
   private readonly slots: WorkerSlots
   private readonly dshd: DshdPort
   private readonly hostname: () => string
