@@ -55,32 +55,39 @@ export function ticketOf(source: Pick<Tickets, 'threads' | 'tickets' | 'state'>,
 /** Where a node's Trigger is while no Ticket was accepted from it. */
 export type Untaken = 'offered' | 'held' | 'unavailable'
 /**
- * Where a node's Trigger is while no Ticket was accepted from it: `offered` while it is queued for or in an Eval; `unavailable`
- * once its Eval ended without an assessment, as when the main Session did not answer in time; else `held`, which the main
- * Session or a person decided. The last two come with their Decision when the Store has it. Neither is offered again until
- * the Trigger is requeued.
+ * Where a node's Trigger is while no Ticket was accepted from it: `offered` while it is queued for or in an Eval, `since` the
+ * Eval that holds it started; `unavailable` once its Eval ended without an assessment, as when the main Session did not answer
+ * in time; else `held`, which the main Session or a person decided. The last two come with their Decision when the Store has
+ * it. Neither is offered again until the Trigger is requeued. An Eval whose candidate never reaches the main Session does not
+ * expire, so a node can stay offered as long as the main Session is away.
  */
-export function untaken(source: Pick<Tickets, 'threads' | 'triggers'>, trigger: string, thread: string): { state: Untaken; decision?: Decision } {
+export function untaken(source: Pick<Tickets, 'threads' | 'triggers'>, trigger: string, thread: string): { state: Untaken; decision?: Decision; since?: string } {
   const queue = source.threads.get(thread)
-  if (queue && (queue.pending.includes(trigger) || queue.evaluating?.triggerIds.includes(trigger))) return { state: 'offered' }
+  if (queue?.evaluating?.triggerIds.includes(trigger)) return { state: 'offered', since: queue.evaluating.startedAt }
+  if (queue?.pending.includes(trigger)) return { state: 'offered' }
   const decision = source.triggers.decision(trigger)
   return { state: decision?.kind === 'unavailable' ? 'unavailable' : 'held', ...decision && { decision } }
 }
-/** A waiting node whose Trigger came to be held or unavailable, or left that state (`state` undefined) at the latest poll. */
-export interface Waited { trigger: string; state?: 'held' | 'unavailable'; decision?: Decision }
+/**
+ * A waiting node whose Trigger came to be held or unavailable, or offered `since` longer than the waiter's threshold, or left
+ * that state (`state` undefined) at the latest poll.
+ */
+export interface Waited { trigger: string; state?: 'held' | 'unavailable' | 'offered'; decision?: Decision; since?: string }
 
 /**
  * Waits for the Tickets of nodes. A node settles at once when its Ticket ends, which `ended` hears from the Source kind's
  * `ticketEnded`. A worker's failed or blocked report ends nothing and no domain event tells of it, so one timer, every `pollMs`
  * as it reads at each poll, also reads each waiting node's Thread and its Ticket until it settles, and tells `observed` when a
- * waiting node comes to be held or unavailable, or leaves that state. Once stopped, what still waits never settles, so a run
- * parked at stop writes nothing more and resumes from its journal.
+ * waiting node comes to be held or unavailable, or offered in one Eval for longer than `offeredMs` as it reads at each poll, or
+ * leaves that state. It never decides or expires anything. Once stopped, what still waits never settles, so a run parked at
+ * stop writes nothing more and resumes from its journal.
  */
 export class TicketWaiter {
-  private readonly waiting = new Map<string, { thread: string; structured: boolean; settled: (outcome: AgentOutcome) => void; state?: Waited['state']; decided?: string }>()
+  private readonly waiting = new Map<string, { thread: string; structured: boolean; settled: (outcome: AgentOutcome) => void; state?: Waited['state']; seen?: string }>()
   private timer: ReturnType<typeof setTimeout> | undefined
   private stopped = false
-  constructor(private readonly source: Tickets, private readonly pollMs: () => number, private readonly observed: (node: Waited) => void = () => {}) {}
+  constructor(private readonly source: Tickets, private readonly pollMs: () => number, private readonly observed: (node: Waited) => void = () => {},
+    private readonly offeredMs: () => number = () => Infinity) {}
   settled(trigger: string, thread: string, structured: boolean): Promise<AgentOutcome> {
     const now = settle(ticketOf(this.source, trigger, thread), structured)
     if (now) return Promise.resolve(now)
@@ -100,8 +107,8 @@ export class TicketWaiter {
   }
   /** How many nodes wait. */
   get size(): number { return this.waiting.size }
-  /** How many waiting nodes were held, or unavailable, at the latest poll. */
-  count(state: 'held' | 'unavailable'): number { return [...this.waiting.values()].filter(item => item.state === state).length }
+  /** How many waiting nodes were held, unavailable, or offered past the threshold, at the latest poll. */
+  count(state: NonNullable<Waited['state']>): number { return [...this.waiting.values()].filter(item => item.state === state).length }
   stop(): void { this.stopped = true; clearTimeout(this.timer); this.timer = undefined; this.waiting.clear() }
   private arm(): void {
     if (this.timer || this.stopped || !this.waiting.size) return
@@ -114,12 +121,14 @@ export class TicketWaiter {
       const outcome = settle(ticket, item.structured)
       if (outcome) { this.waiting.delete(trigger); item.settled(outcome) }
       const now = outcome || ticket ? undefined : untaken(this.source, trigger, item.thread)
-      const state = now?.state === 'offered' ? undefined : now?.state
-      // A node held again, or unavailable again, after a requeue the polls did not see is a new Decision, so it is told again.
-      const decided = state && now?.decision?.id
-      if (state === item.state && decided === item.decided) continue
-      item.state = state; item.decided = decided
-      changed.push({ trigger, ...state && { state, ...now?.decision && { decision: now.decision } } })
+      const overdue = now?.since !== undefined && Date.now() - Date.parse(now.since) > this.offeredMs()
+      const state = now?.state === 'offered' && !overdue ? undefined : now?.state
+      // A node held again, or unavailable again, after a requeue the polls did not see is a new Decision, and one overdue in a
+      // later Eval a new offer, so it is told again.
+      const seen = state === 'offered' ? now?.since : state && now?.decision?.id
+      if (state === item.state && seen === item.seen) continue
+      item.state = state; item.seen = seen
+      changed.push({ trigger, ...state && { state, ...now?.decision && { decision: now.decision }, ...now?.since !== undefined && { since: now.since } } })
     }
     for (const node of changed) this.observed(node)
     this.arm()

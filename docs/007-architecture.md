@@ -677,7 +677,7 @@ Most built-in instructions live in `prompts/*.md`, with one sentence per line jo
 
 ## Configuration reload
 
-Every plugin configuration key except `stateDir`, `engine`, `executor` and the `dshd` block is volatile; changing one of those remounts dsh-superagent. The scheduled Source's `inbox` and every key of the workflow Source but `pollMs` remount their own entry. The panel's Deployment settings and DeepSeek Harness's Plugin Manager edit them through DeepSeek Harness's configuration form; the host writes `cordis.patch.yml` and updates the values in place, and dsh-superagent reads each limit when it uses it, so a change applies without a restart.
+Every plugin configuration key except `stateDir`, `engine`, `executor` and the `dshd` block is volatile; changing one of those remounts dsh-superagent. The scheduled Source's `inbox` and every key of the workflow Source but `pollMs` and `offeredWarnSeconds` remount their own entry. The panel's Deployment settings and DeepSeek Harness's Plugin Manager edit them through DeepSeek Harness's configuration form; the host writes `cordis.patch.yml` and updates the values in place, and dsh-superagent reads each limit when it uses it, so a change applies without a restart.
 
 A settings save that changes a Source field setup reads, such as an account's CLI, and any save while setup waits, restarts dsh-superagent. DeepSeek Harness's settings service does not serve the entry during that restart, so after its own restart dsh-superagent asks it to read the entry again, and an open form becomes editable again.
 

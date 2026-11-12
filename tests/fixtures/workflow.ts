@@ -69,7 +69,9 @@ export function workflowHost(directory: string, options: { slots?: number; confi
   // The Ticket waiter reads pollMs each time it schedules a poll, so counting the reads counts the polls it scheduled.
   let polls = 0
   const logger = { info: vi.fn<(format: string, ...args: unknown[]) => void>(), warn: vi.fn<(format: string, ...args: unknown[]) => void>() }
-  const floor = new WorkflowFloor(host, { pollMs: { get: () => { polls += 1; return 5 } }, concurrency: 16, maxAttempts: 1, pair: '', ...options.config }, logger)
+  // A test clock may run hours behind the wall clock the floor's threshold reads, so only a test that sets the threshold has one.
+  const floor = new WorkflowFloor(host, { pollMs: { get: () => { polls += 1; return 5 } }, offeredWarnSeconds: { get: () => Infinity }, concurrency: 16,
+    maxAttempts: 1, pair: '', ...options.config }, logger)
   const unregister = sources.register(workflowKind(floor))
   const started = floor.start()
 

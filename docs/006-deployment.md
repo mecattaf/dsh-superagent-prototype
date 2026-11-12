@@ -158,11 +158,12 @@ The optional `dsh-superagent-workflow` entry runs workflow scripts: each `agent(
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `pollMs` | 2000 | How often a node that waits reads its Ticket for a failed or blocked report, which ends nothing, in milliseconds; a node whose Ticket ends settles at once. A change applies at the next poll, without a restart |
+| `offeredWarnSeconds` | 3600 | How long a node may stay `offered` in one Eval before the entry logs a warning for it, once, and its health detail counts it, in seconds; an Eval whose candidate never reaches the main Session does not expire, and nothing here expires it. A change applies at the next poll, without a restart |
 | `concurrency` | 16 | `agent()` calls of one run in flight at once; Execution's `maxWorkers` still caps the Tickets that run |
 | `maxAttempts` | 1 | Attempts at each call, each one a new Trigger; with 1, a node whose Ticket fails or whose reply does not match its schema is `null` |
 | `pair` | empty | The compute pair of the nodes of a run that names none; empty leaves the choice to the Executor |
 
-Changing any key but `pollMs` restarts the entry, which resumes every run from its journal in the database: a node with a result or a failure answers from it, and a node whose Trigger was raised is not raised again.
+Changing any key but `pollMs` and `offeredWarnSeconds` restarts the entry, which resumes every run from its journal in the database: a node with a result or a failure answers from it, and a node whose Trigger was raised is not raised again.
 
 - **Starting.** The kind gives the main Session two tools: `orchestrator_workflow_start`, with `script`, the absolute `cwd` every node works in, and optional `args`, `pair` and `trigger_id`; and `orchestrator_workflow_status`, which shows each node of a run. Ask the main Session for a run, naming the script and the directory.
 - **Admission.** A node has no sender and does not address the agent, so it goes through the unlisted unaddressed cell of the Source's one admission row, `workflow`, which is `ignore` by default. Set it to `inferred`, set the accept mode to `auto`, and add a rule that accepts nodes; without the cell every node is ignored with `admission_ignored`, and its run waits.

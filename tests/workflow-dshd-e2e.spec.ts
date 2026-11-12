@@ -55,7 +55,7 @@ async function start(): Promise<void> {
 async function mount(pollMs = 5): Promise<void> {
   const disposers: (() => unknown)[] = []
   workflow.apply({ orchestrator: h!.runtime, effect: (effect: () => () => unknown) => { disposers.push(effect()) } } as never,
-    { pollMs: reference(pollMs), concurrency: 16, maxAttempts: 1, pair: '' } as never)
+    { pollMs: reference(pollMs), offeredWarnSeconds: reference(3600), concurrency: 16, maxAttempts: 1, pair: '' } as never)
   unmount = async () => { for (const dispose of disposers.reverse()) await dispose() }
   await vi.waitFor(() => { if (h!.runtime.health.workflow?.state !== 'ready') throw new Error('not yet') })
 }

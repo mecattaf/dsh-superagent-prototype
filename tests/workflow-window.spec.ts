@@ -173,4 +173,44 @@ describe('the window of a workflow run', () => {
     await until(() => h.logger.info.mock.calls.length === 2)
     expect(node('a2')).toMatchObject({ state: 'held', decided_at: new Date(clock).toISOString() })
   })
+  it('W2d a node whose Eval never reaches the main Session gives offered_since, and past the threshold the log warns once and the health counts it', async () => {
+    // The threshold reads the wall clock, and the Engine's clock starts two hours behind it, so each Eval is two hours old at once.
+    let clock = Date.now() - 2 * 3600_000, threshold = 3 * 3600
+    const { h, directory } = start({ now: () => new Date(clock).toISOString(), config: { offeredWarnSeconds: { get: () => threshold } } })
+    await h.started
+    const { run_id: run } = h.floor.startRun({ script: FIXTURE, cwd: directory, args: { tag: 't' } })
+    await until(() => h.offered().length === 2)
+    const since = new Date(clock).toISOString()
+    const node = (label: string) => h.floor.status(run)[0]!.nodes.find(item => item.label === label)!
+    const [a1, a2] = [node('a1').trigger_id!, node('a2').trigger_id!]
+    expect(node('a1')).toMatchObject({ state: 'offered', offered_since: since })
+    // No candidate reached the main Session, so no deadline passes and nothing expires, however long it waits.
+    clock += 3 * 121_000
+    h.engine.evaluateDue()
+    expect(node('a1')).toMatchObject({ state: 'offered', offered_since: since })
+    // Under the threshold the polls tell nothing.
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(h.logger.warn).not.toHaveBeenCalled()
+    expect(String(h.board.all.workflow?.detail)).not.toContain('offered for more than')
+    // The threshold applies at the next poll, without a restart.
+    threshold = 3600
+    await until(() => String(h.board.all.workflow?.detail).includes('offered for more than'))
+    expect(h.board.all.workflow).toMatchObject({ state: 'ready', detail: '1 runs under way, 2 nodes waiting for their tickets: 2 offered for more than 1 h' })
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(h.logger.warn.mock.calls).toHaveLength(2)
+    expect(h.logger.warn.mock.calls).toEqual(expect.arrayContaining([[expect.stringContaining('offered since'), run, 'a1', since, '1 h', a1],
+      [expect.stringContaining('offered since'), run, 'a2', since, '1 h', a2]]))
+    // Nothing expires, fails or is offered again: both Evals still wait for the main Session.
+    expect(h.journal(run)).not.toContain('"type":"failed"')
+    expect(h.offered()).toHaveLength(2)
+    expect(h.offered().flatMap(candidate => h.store.decisions.byThread(candidate.thread.key))).toHaveLength(0)
+    // A node accepted at last leaves the count, and the other is not told again.
+    h.accept('a1')
+    await until(() => h.board.all.workflow?.detail === '1 runs under way, 2 nodes waiting for their tickets: 1 offered for more than 1 h')
+    expect(h.logger.warn).toHaveBeenCalledTimes(2)
+    expect(node('a1').offered_since).toBeUndefined()
+    h.accept('a2'); h.report('a1', 'DONE'); h.report('a2', 'DONE')
+    await finishRun(h, run)
+    expect(h.run(run)).toMatchObject({ state: 'completed', result: { a1: 'DONE', a2: 'DONE' } })
+  })
 })
