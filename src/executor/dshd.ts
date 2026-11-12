@@ -62,11 +62,12 @@ const RUNNING = new Set(['running', 'starting', 'stopping'])
 const UNCERTAIN = new Set(['masked', 'orphaned', 'inconsistent', 'unknown'])
 /** Tries of a launch while dshd is unavailable (exit 7) before the Assignment is recorded failed. */
 const UNAVAILABLE_TRIES = 3
-/** Longest worker answer a Report summary carries. */
+/** Longest worker answer the summary of a unit that did not complete carries; a completed unit's answer is its whole result. */
 const FINAL_CHARS = 3800
 const RETRIED = 'A person retried this ticket. Continue the assignment from the current directory and what it holds now.'
 const DSHD_WORKER_NOTE = 'You are one headless task that dsh-superagent started. Work in the current directory. Nothing reaches you after this '
-  + 'message and there is no report tool: when the work is done, end with a short final answer. Your session log is the record.'
+  + 'message and there is no report tool: when the work is done, end with a short final answer. Your session log is the record. '
+  + 'If the task asks for a JSON-only reply, your final answer is that JSON value and nothing else.'
 
 /** The unit name of the `k`th Assignment (1-based) of a Ticket: `<prefix>-<execution name>-a<k>`, or `<prefix>-t<ticket id>-a<k>` when that name is unusable. */
 export function unitName(prefix: string, executionName: string | undefined, ticketId: string, k: number): string {
@@ -96,15 +97,19 @@ const triggerCard = (trigger: Trigger) => ({ trigger_id: trigger.id, from: trigg
 export function composeBrief(ticket: Ticket, k: number, origin: Trigger | undefined, batch: Trigger[], inputs: string[]): string {
   const assignment = ticket.execution?.assignment
   const previous = ticket.assignments.at(k - 2)
-  return JSON.stringify({ ticket_id: ticket.id, title: ticket.title, attempt: k, ...(assignment ? { assignment } : {}),
-    ...(origin ? { trigger: triggerCard(origin) } : {}), ...(batch.length ? { batch: batch.map(triggerCard) } : {}),
-    ...(inputs.length ? { inputs } : {}), ...(k > 1 && previous?.endedReason === 'retried' ? { retried: RETRIED } : {}), note: DSHD_WORKER_NOTE })
+  // The framing comes first and the request last, so a schema the request ends with is the last thing the worker reads.
+  return JSON.stringify({ note: DSHD_WORKER_NOTE, ticket_id: ticket.id, title: ticket.title, attempt: k, ...(assignment ? { assignment } : {}),
+    ...(inputs.length ? { inputs } : {}), ...(batch.length ? { batch: batch.map(triggerCard) } : {}),
+    ...(k > 1 && previous?.endedReason === 'retried' ? { retried: RETRIED } : {}), ...(origin ? { trigger: triggerCard(origin) } : {}) })
 }
-/** The Report summary of a settled unit: the worker's final answer, then where its record is. */
+/**
+ * The Report summary of a settled unit. A completed unit's is its final answer verbatim, the Ticket's result, which a workflow
+ * node parses as JSON; any other end says how the unit ended, then its answer and where its record is.
+ */
 function summaryOf(name: string, verdict: Verdict, end: { exitCode?: number; signal?: number }, final?: string, sessionId?: string): string {
+  if (verdict === 'completed') return final ?? `Unit ${name} exited 0.`
   const answer = final === undefined ? undefined : `${final.slice(0, FINAL_CHARS)}${final.length > FINAL_CHARS ? '…' : ''}`
   const pointer = `Unit ${name}; session ${sessionId ?? 'unknown'}.`
-  if (verdict === 'completed') return `${answer ?? `Unit ${name} exited 0.`}\n\n${pointer}`
   const how = `Unit ${name} ended ${verdict}${end.exitCode !== undefined ? ` (exit ${end.exitCode})` : ''}${end.signal ? ` (signal ${end.signal})` : ''}.`
   return `${how}${answer ? `\n\n${answer}` : ''}\n\n${pointer}`
 }
@@ -389,10 +394,11 @@ export class DshdExecutor implements ExecutorPort {
       const ticket = store.tickets.get(ticketId)
       if (!ticket || !liveTicket(ticket) || runningAssignment(ticket)?.id !== assignmentId) return
       if (verdict === 'cut') { engine.assignmentInterrupted(ticketId, assignmentId); return }
-      const report = { state: verdict === 'completed' ? 'ready' as const : 'failed' as const,
-        summary: summaryOf(binding.name, verdict, end, events.final, events.sessionId ?? binding.sessionId) }
+      const sessionId = events.sessionId ?? binding.sessionId
+      const report = { state: verdict === 'completed' ? 'ready' as const : 'failed' as const, summary: summaryOf(binding.name, verdict, end, events.final, sessionId) }
       const relay = reportRelay(engine.report(ticketId, report), report)
-      if (relay) this.host.sessions.relay(relay.id, relay.text)
+      // The relay names the unit and its Session, which a completed summary leaves out.
+      if (relay) this.host.sessions.relay(relay.id, JSON.stringify({ ...JSON.parse(relay.text) as object, unit: binding.name, session: sessionId ?? null }))
     })
   }
   /**

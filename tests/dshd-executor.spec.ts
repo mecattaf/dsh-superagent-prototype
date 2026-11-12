@@ -67,6 +67,9 @@ describe('launch and recipe', () => {
     // The brief is the whole first message: the Ticket, its source request in full and how a headless worker ends.
     expect(JSON.parse(recipe!.task)).toMatchObject({ ticket_id: ticket.id, title: `Fix ${ticket.origin.triggerId}`, attempt: 1,
       trigger: { trigger_id: ticket.origin.triggerId, text: '@bot 任务 1' }, note: expect.stringContaining('there is no report tool') })
+    // The framing comes first and the request last.
+    expect(Object.keys(JSON.parse(recipe!.task) as object)).toEqual(['note', 'ticket_id', 'title', 'attempt', 'trigger'])
+    expect(JSON.parse(recipe!.task).note).toMatch(/If the task asks for a JSON-only reply, your final answer is that JSON value and nothing else\.$/)
   })
   it('runs a Ticket whose Trigger names no directory in the configured cwd, else in a directory it makes under the Execution directory', async () => {
     const configured = directory()
@@ -249,7 +252,8 @@ describe('settlement', () => {
     fake.end(name, { lines: runLines('session-7', 'Cleaned the journal.') })
     await later()
     expect(stored(ticket).ended?.outcome).toBe('completed')
-    expect(latestAssignment(stored(ticket))!.report).toMatchObject({ state: 'ready', summary: `Cleaned the journal.\n\nUnit ${name}; session session-7.` })
+    // The answer is the Ticket's result verbatim and uncapped; the unit and its Session are in the binding and the relay.
+    expect(latestAssignment(stored(ticket))!.report).toMatchObject({ state: 'ready', summary: 'Cleaned the journal.' })
     expect(binding(ticket)).toMatchObject({ state: 'ended', sessionId: 'session-7', ended: { verdict: 'completed', exitCode: 0, ending: 'exited' } })
     expect(h!.runtime.executor.activeCount()).toBe(0)
   })
@@ -322,7 +326,7 @@ describe('settlement', () => {
     await start()
     const { ticket } = await accepted(request('1', { cwd: directory() }))
     fake.end(nameOf(ticket), { lines: runLines('session-3', 'Done.') }); await later()
-    expect(reports()).toEqual([expect.objectContaining({ kind: 'worker_report', state: 'ready', summary: expect.stringContaining('Done.') })])
+    expect(reports()).toEqual([expect.objectContaining({ kind: 'worker_report', state: 'ready', summary: 'Done.', unit: nameOf(ticket), session: 'session-3' })])
   })
   it('keeps an Assignment whose unit dshd cannot tell about, and settles it once it can', async () => {
     await start()
