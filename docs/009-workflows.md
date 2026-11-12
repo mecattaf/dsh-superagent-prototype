@@ -37,7 +37,7 @@ The kind adds two main-Session tools. They reach the main Session when the plugi
 | Tool | Does |
 | --- | --- |
 | `orchestrator_workflow_start` | Starts `script` in the absolute directory `cwd` with `args` and `pair`. A repeated `trigger_id` with the same script, directory and arguments returns the run it started. It refuses a relative or missing directory, a script it cannot read, and a script whose `meta` is invalid |
-| `orchestrator_workflow_status` | One run, or the newest runs, with each node `waiting`, `offered`, `held`, `ticket`, `done` or `null`, and its latest Trigger and its Ticket once it has them. A node a resumed run answered from its journal is `done` or `null` as its journal line says |
+| `orchestrator_workflow_status` | One run, or the newest runs, with each node `waiting`, `offered`, `held`, `unavailable`, `ticket`, `done` or `null`, and its latest Trigger and its Ticket once it has them. A `held` or `unavailable` node also gives `decided_at` and `reason`, from its Decision. A node a resumed run answered from its journal is `done` or `null` as its journal line says |
 
 ## The window
 
@@ -49,7 +49,7 @@ The main Session assesses node candidates as it assesses any inferred candidate.
 | Hold | Ignore the candidate with a reason; the node waits, and its run with it |
 | Release | `orchestrator_trigger_requeue` with the node's Trigger: the same Trigger goes to a fresh Eval |
 | Other work first | Accept the other work now and hold the node |
-| No answer | An Eval that expires twice more is recorded unavailable; the node waits as a held one does, until it is requeued |
+| No answer | An Eval that expires twice more is recorded unavailable; the node is `unavailable`, not `held`, and waits as a held one does, until it is requeued. The Source logs a warning for it, and its health detail counts the held and the unassessed nodes apart |
 
 ## Results, failures and resume
 
