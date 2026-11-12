@@ -132,7 +132,7 @@ describe('scheduled Source', () => {
     drop(h.inbox, 'run-a.json', manual(h.work, RUN_A)); drop(h.inbox, 'run-b.json', manual(h.work, RUN_B))
     const controller = new AbortController()
     const receive = async (trigger: Trigger) => { const result = await h.ctx.receive(trigger); controller.abort(); return result }
-    expect(await readInbox({ threads: h.ctx.threads, receive }, h.inbox, controller.signal)).toMatchObject({ read: 1 })
+    expect(await readInbox({ threads: h.ctx.threads, triggers: h.ctx.triggers, receive }, h.inbox, controller.signal)).toMatchObject({ read: 1 })
     expect(h.receive).toHaveBeenCalledTimes(1)
     expect(h.done()).toEqual(['run-a.json'])
     expect(h.waiting()).toEqual(['run-b.json'])
