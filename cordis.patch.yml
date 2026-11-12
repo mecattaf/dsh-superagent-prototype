@@ -2,8 +2,12 @@
 # profile supplies the `dsh-superagent` entry's stateDir (see docs/006-deployment.md and examples/profile.cordis.patch.yml); the plugin
 # refuses to start without stateDir.
 - insert:
+    # Off while the profile sets `engine: false`, before its module loads: the entry waits for a web app's services (`inject` in
+    # src/index.ts), so in DSH's headless app it would stay pending, and DSH reports a pending entry at every start. With the engine
+    # on it starts, and DSH still reports a service it waits for. A profile that sets `disabled` on this row decides instead.
     - id: dsh-superagent
       name: dsh-superagent
+      disabled: !!js "ctx[Symbol.for('cordis.entry')]?.options.config?.engine === false"
     - id: dsh-superagent-github
       name: dsh-superagent/github-watch
     # Optional Feishu Source; requires configuring a bot CLI after enabling.
