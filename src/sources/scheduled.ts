@@ -91,13 +91,17 @@ function header(record: OccurrenceRecord, due: string, missed: number): string {
   const earlier = missed === 0 ? 'no earlier due occurrence was missed' : `${missed} earlier due occurrence(s) did not run`
   return `[Scheduled occurrence] ${title(record)}\nDue ${due}; ${earlier}. ${facts}`
 }
-/** Builds the Trigger of one record; equal records give equal Trigger ids. */
+/** What tells one occurrence of an item from another: the run id of a manual run, or the due instant of a schedule record. */
+const instance = (record: OccurrenceRecord): string => record.kind === 'manual' ? `run:${record.run!}` : new Date(record.due).toISOString()
+/** The id a release before the namespace was part of it gave an occurrence; Triggers stored under it keep it. */
+const unscopedId = (record: OccurrenceRecord): string => key(SOURCE, record.cwd, record.item, instance(record))
+/** Builds the Trigger of one record; equal records give equal Trigger ids, and two namespaces never share one. */
 export function scheduledTrigger(record: OccurrenceRecord, occurrence: string, extra: { missed: number; superseded?: true }): Trigger {
   const due = new Date(record.due).toISOString()
   const meta: ScheduledMeta = { occurrence, namespace: record.namespace, item: record.item, cwd: record.cwd, kind: record.kind, due,
     missed: extra.missed, revision: record.revision, ...record.pair ? { pair: record.pair } : {}, ...extra.superseded ? { superseded: true as const } : {} }
   return {
-    id: key(SOURCE, record.cwd, record.item, record.kind === 'manual' ? `run:${record.run!}` : due),
+    id: key(SOURCE, record.namespace, record.cwd, record.item, instance(record)),
     source: SOURCE,
     threads: [occurrenceThread(occurrence)],
     // An occurrence has no sender: an empty actor id uses the admission cell of an unlisted sender who does not address the agent.
@@ -184,12 +188,18 @@ export async function readInbox(ctx: Pick<SourceContext, 'receive' | 'threads' |
   }
   // Within one item, only the latest due runs; a record with that same due is the same occurrence and answers duplicate.
   const latest = new Map<string, number>()
-  const itemOf = (record: OccurrenceRecord) => JSON.stringify([record.cwd, record.item])
+  const itemOf = (record: OccurrenceRecord) => JSON.stringify([record.namespace, record.cwd, record.item])
   for (const { record } of entries) {
     if (record.kind === 'schedule') latest.set(itemOf(record), Math.max(latest.get(itemOf(record)) ?? -Infinity, Date.parse(record.due)))
   }
   const older = (record: OccurrenceRecord) => record.kind === 'schedule' && Date.parse(record.due) < latest.get(itemOf(record))!
   const superseded = entries.filter(entry => older(entry.record)), live = entries.filter(entry => !older(entry.record))
+  // An occurrence a release before the namespace was in the id stored keeps its stored id, so its record answers duplicate.
+  // The namespace in the stored meta tells it from another namespace's occurrence that had the same id.
+  const kept = (trigger: Trigger, record: OccurrenceRecord): Trigger => {
+    const stored = ctx.triggers.get(unscopedId(record))
+    return stored?.source === SOURCE && stored.meta.namespace === record.namespace ? { ...trigger, id: stored.id } : trigger
+  }
   /** Receives one record's Trigger, labels its Thread, then moves the file; the receive's answer, or undefined once aborted. */
   const take = async (entry: Entry, trigger: Trigger) => {
     if (signal?.aborted) return undefined
@@ -212,14 +222,14 @@ export async function readInbox(ctx: Pick<SourceContext, 'receive' | 'threads' |
   // An older record counts as missed only when it is kept as superseded: one a crash left after it was stored as live ran.
   const missed = new Map<string, number>()
   for (const entry of superseded) {
-    const trigger = scheduledTrigger(entry.record, entry.name.slice(0, -5), { missed: entry.record.missed, superseded: true })
+    const trigger = kept(scheduledTrigger(entry.record, entry.name.slice(0, -5), { missed: entry.record.missed, superseded: true }), entry.record)
     if (await take(entry, trigger) === undefined) return tally
     tally.superseded += 1
     if (ctx.triggers.get(trigger.id)?.meta.superseded === true) missed.set(itemOf(entry.record), (missed.get(itemOf(entry.record)) ?? 0) + 1 + entry.record.missed)
   }
   for (const entry of live) {
-    const trigger = scheduledTrigger(entry.record, entry.name.slice(0, -5),
-      { missed: entry.record.missed + (entry.record.kind === 'schedule' ? missed.get(itemOf(entry.record)) ?? 0 : 0) })
+    const trigger = kept(scheduledTrigger(entry.record, entry.name.slice(0, -5),
+      { missed: entry.record.missed + (entry.record.kind === 'schedule' ? missed.get(itemOf(entry.record)) ?? 0 : 0) }), entry.record)
     if (await take(entry, trigger) === undefined) return tally
     tally.read += 1
   }

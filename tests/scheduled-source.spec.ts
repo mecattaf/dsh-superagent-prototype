@@ -80,7 +80,10 @@ const RUN_A = '01KA0Z8Q6V3M4N5P7R8S9T0W1X', RUN_B = '01KA0Z8Q6V3M4N5P7R8S9T0W1Y'
 const manual = (cwd: string, run: string, fields: Partial<OccurrenceRecord> = {}): OccurrenceRecord =>
   record(cwd, { kind: 'manual', run, due: '2026-11-12T09:15:30.000Z', at: '2026-11-12T09:15:30.000Z', by: 'scheduled-run', ...fields })
 const drop = (inbox: string, name: string, value: unknown): void => { writeFileSync(join(inbox, name), typeof value === 'string' ? value : JSON.stringify(value)) }
-const idOf = (value: OccurrenceRecord) => key('scheduled', value.cwd, value.item, value.kind === 'manual' ? `run:${value.run!}` : new Date(value.due).toISOString())
+const occurrenceOf = (value: OccurrenceRecord) => value.kind === 'manual' ? `run:${value.run!}` : new Date(value.due).toISOString()
+const idOf = (value: OccurrenceRecord) => key('scheduled', value.namespace, value.cwd, value.item, occurrenceOf(value))
+/** The id a floor gave an occurrence before the namespace was part of it. */
+const unscopedIdOf = (value: OccurrenceRecord) => key('scheduled', value.cwd, value.item, occurrenceOf(value))
 const NAME = 'team+widgets~nightly-digest@20261112T0200Z'
 const LABEL = 'team/widgets:nightly-digest — Nightly digest'
 
@@ -124,6 +127,53 @@ describe('scheduled Source', () => {
     await readInbox(h.ctx, h.inbox)
     expect(await h.receive.mock.results[2]!.value).toBe('duplicate')
     expect(h.done()).toEqual(['a.1.json', 'a.json'])
+  })
+
+  it('keeps two namespaces apart that share a working directory, an item and a due: two Triggers, each with its own missed count', async () => {
+    const h = host()
+    const ours = record(h.work), theirs = record(h.work, { namespace: 'team/gadgets' })
+    // An earlier occurrence in the other namespace is that namespace's own miss, not one of ours.
+    const earlier = record(h.work, { namespace: 'team/gadgets', due: '2026-11-12T01:00:00.000Z' })
+    drop(h.inbox, 'a.json', ours); drop(h.inbox, 'b.json', theirs); drop(h.inbox, 'c.json', earlier)
+    expect(await readInbox(h.ctx, h.inbox)).toEqual({ read: 2, superseded: 1, invalid: 0, unreadable: 0 })
+    // The superseded record is received first, and is stored as filtered.
+    expect(await Promise.all(h.receive.mock.results.map(result => result.value))).toEqual(['filtered', 'stored', 'stored'])
+    expect(idOf(ours)).not.toBe(idOf(theirs))
+    expect(h.store.triggers.get(idOf(ours))?.meta).toMatchObject({ namespace: 'team/widgets', occurrence: 'a', missed: 0 })
+    expect(h.store.triggers.get(idOf(ours))?.meta).not.toHaveProperty('superseded')
+    expect(h.store.triggers.get(idOf(theirs))?.meta).toMatchObject({ namespace: 'team/gadgets', occurrence: 'b', missed: 1 })
+    expect(h.store.triggers.get(idOf(earlier))?.meta).toMatchObject({ namespace: 'team/gadgets', superseded: true })
+  })
+
+  it('does not let a later due of another namespace supersede an occurrence', async () => {
+    const h = host()
+    const ours = record(h.work), theirs = record(h.work, { namespace: 'team/gadgets', due: '2026-11-12T03:00:00.000Z' })
+    drop(h.inbox, 'a.json', ours); drop(h.inbox, 'b.json', theirs)
+    expect(await readInbox(h.ctx, h.inbox)).toEqual({ read: 2, superseded: 0, invalid: 0, unreadable: 0 })
+    for (const value of [ours, theirs]) {
+      expect(h.store.triggers.get(idOf(value))?.meta).toMatchObject({ namespace: value.namespace, missed: 0 })
+      expect(h.store.triggers.disposition(idOf(value))?.filtered).toBeUndefined()
+    }
+  })
+
+  it('keeps a Trigger stored under the id without the namespace: its record answers duplicate, and another namespace\'s record is new', async () => {
+    const h = host()
+    const value = record(h.work)
+    // A floor before the upgrade stored the record under the old id, then stopped before moving it.
+    drop(h.inbox, 'a.json', value)
+    expect(await h.receive({ ...scheduledTrigger(value, 'a', { missed: 0 }), id: unscopedIdOf(value) })).toBe('stored')
+    expect(await readInbox(h.ctx, h.inbox)).toMatchObject({ read: 1 })
+    expect(await h.receive.mock.results[1]!.value).toBe('duplicate')
+    expect(h.store.triggers.get(unscopedIdOf(value))?.meta).toMatchObject({ namespace: 'team/widgets', occurrence: 'a' })
+    expect(h.store.triggers.get(idOf(value))).toBeUndefined()
+    expect(h.done()).toEqual(['a.json'])
+    // A record of another namespace has the same old id, but it is a different occurrence, so it is stored under its own id.
+    const theirs = record(h.work, { namespace: 'team/gadgets' })
+    drop(h.inbox, 'b.json', theirs)
+    await readInbox(h.ctx, h.inbox)
+    expect(await h.receive.mock.results[2]!.value).toBe('stored')
+    expect(h.store.triggers.get(idOf(theirs))?.meta).toMatchObject({ namespace: 'team/gadgets', occurrence: 'b' })
+    expect(h.store.threads.get('scheduled:b')?.meta).toMatchObject({ label: 'team/gadgets:nightly-digest — Nightly digest' })
   })
 
   it('keys a manual run by its run id, so two runs of one item are two Triggers', async () => {
@@ -385,7 +435,7 @@ describe('scheduled Source', () => {
     expect(parsed.map(value => value.kind)).toEqual(['schedule', 'manual'])
     // Strict: every field the fixture holds is one the schema knows, and parsing drops none.
     expect(parsed).toEqual(records)
-    expect(scheduledTrigger(parsed[1]!, 'run', { missed: 0 }).id).toBe(key('scheduled', '/srv/work/widgets', 'nightly-digest', `run:${parsed[1]!.run!}`))
+    expect(scheduledTrigger(parsed[1]!, 'run', { missed: 0 }).id).toBe(key('scheduled', 'team/widgets', '/srv/work/widgets', 'nightly-digest', `run:${parsed[1]!.run!}`))
     // `name` is optional: the manual record leaves it out, and its header names the item instead.
     expect(parsed[1]).not.toHaveProperty('name')
     expect(scheduledTrigger(parsed[1]!, 'run', { missed: 0 }).text.split('\n')[0]).toBe('[Scheduled item, run now] team/widgets:nightly-digest — nightly-digest')
