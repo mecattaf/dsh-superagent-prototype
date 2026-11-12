@@ -445,6 +445,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts`, `tests/engine.spec.ts` | The plugin configuration and setup, the agent's process environment, the plugin entry, and the entry on a Cordis context with its engine off and on |
 | `tests/dshd-cli.spec.ts` | The dshd client's argv and the JSON and error objects of dshd it reads |
 | `tests/dshd-executor.spec.ts` | The dshd executor on the simulated host with an in-memory dshd: recipe, idempotent launches, slots, settlement, restart and stop |
+| `tests/dshd-outcome.spec.ts` | What dshd 0.1.0 printed, read as the dshd executor reads it; every state, ending and refusal dshd documents, and the executor's answer to each |
 | `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux` and `dsh` |
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
 | `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |
@@ -454,7 +455,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
 
-`tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.
+`tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `fake-dshd.ts`, an in-memory dshd; `dshd-0.1.0.ts`, lines dshd 0.1.0 printed; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.
 
 ## Persistence
 
