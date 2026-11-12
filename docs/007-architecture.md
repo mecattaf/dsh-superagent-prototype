@@ -182,7 +182,7 @@ Failures retry with exponential backoff. Throwing `Later` defers work without co
 
 Each kind has a health entry under its name. It reports an error once one of its effects failed three times in a row, except `delivery`, whose failures show on their Ticket instead. Relays keep their order, and so do notices; a failed one holds back the later ones of its kind.
 
-With the dshd executor, a `launch` held by a pair at its own `maxWorkers` tries again after 5 s, dshd's refusal fails its Ticket at once, and a dshd that cannot be reached fails it after three tries. `dshd-watch` and `dshd-stop` come from module augmentation of `EffectPayloads` in `src/executor/dshd.ts`, so `src/app/effects.ts` is unchanged.
+With the dshd executor, a `launch` held by a pair at its own `maxWorkers` tries again after 5 s, as does one of work from before the start until `dshd.resumeDelaySeconds` after it; dshd's refusal fails its Ticket at once, and a dshd that cannot be reached fails it after three tries. `dshd-watch` and `dshd-stop` come from module augmentation of `EffectPayloads` in `src/executor/dshd.ts`, so `src/app/effects.ts` is unchanged.
 
 ### Sources
 

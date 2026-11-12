@@ -202,6 +202,9 @@ describe('idempotency', () => {
     await h!.restart()
     fake.hold = undefined
     await h!.runtime.idle()
+    // A launch from before the start runs again once dshd.resumeDelaySeconds have passed.
+    expect(fake.runs).toHaveLength(1)
+    await later()
     const [ticket] = h!.runtime.store.tickets.list()
     expect(fake.runs).toHaveLength(2)
     expect(fake.runs[1]).toEqual(fake.runs[0])
@@ -220,7 +223,7 @@ describe('idempotency', () => {
     await h!.restart({ executor: 'dshd', dshd: testDshd({ pairs: { opus: { profile: 'work-opus-next', env: { ADDED: '1' } } }, defaultPair: 'opus',
       args: ['--approval-policy', 'on-request'] }) })
     fake.hold = undefined
-    await h!.runtime.idle()
+    await later()
     const [ticket] = h!.runtime.store.tickets.list()
     // The new profile, arguments and environment apply to the next Assignment; this one keeps the recipe dshd already holds.
     expect(fake.runs).toHaveLength(2)
@@ -237,7 +240,7 @@ describe('idempotency', () => {
     await waitUntil(() => fake.runs.length === 1)
     await h!.restart({ executor: 'dshd', dshd: testDshd({ pairs: { opus: PAIRS.opus }, defaultPair: 'opus' }) })
     fake.hold = undefined
-    await h!.runtime.idle()
+    await later()
     const [ticket] = h!.runtime.store.tickets.list()
     // The binding was recorded before dshd run, so its pair and frozen recipe stand; looking the pair up again would refuse it.
     expect(fake.runs).toHaveLength(2)
@@ -417,6 +420,25 @@ describe('slots', () => {
     await later(); await later()
     expect(fake.stops).toEqual([nameOf(one.ticket)])
     expect(fake.runs).toHaveLength(2)
+    expect(seen).toEqual([0])
+  })
+  it('holds the slot of a unit an unanswered launch may have started until its stop records the unit\'s end', async () => {
+    await start()
+    for (let i = 0; i < 3; i++) fake.answerNothingNext('run')
+    const one = await accepted(request('1', { cwd: directory(), pair: 'local' }))
+    await later()
+    // The stop of the unit the first run started fails once while dshd is unavailable, so the unit may still run.
+    fake.failNext('stop', 7, 'systemd-unavailable')
+    await later()
+    expect(latestAssignment(stored(one.ticket))!.report).toMatchObject({ state: 'failed' })
+    expect(fake.stops).toEqual([])
+    const seen: number[] = []
+    const run = fake.run.bind(fake)
+    fake.run = async recipe => { seen.push([...fake.instances.values()].filter(unit => unit.state === 'running').length); return run(recipe) }
+    await accepted(request('5', { cwd: directory(), pair: 'local' }))
+    expect(seen).toEqual([])
+    await later(); await later()
+    expect(fake.stops).toEqual([nameOf(one.ticket)])
     expect(seen).toEqual([0])
   })
   it('holds launches while processing is paused', async () => {
@@ -689,6 +711,9 @@ describe('restart', () => {
     await h.restart({ executor: 'dshd', dshd: testDshd({ pairs: PAIRS, defaultPair: 'opus' }) })
     await h.runtime.idle()
     expect(stored(ticket).assignments.map(item => item.endedReason)).toEqual(['hostRestarted', undefined])
+    // The restart's new Assignment resumes work from before the start, so it waits for dshd.resumeDelaySeconds too.
+    expect(fake.runs).toEqual([])
+    await later()
     expect(fake.runs.map(recipe => recipe.name)).toEqual([expect.stringMatching(/-a2$/)])
   })
   it('leaves a settled Assignment alone on restart', async () => {
@@ -717,6 +742,114 @@ describe('restart', () => {
     expect(stored(ticket).ended).toBeUndefined()
     expect(binding(ticket)!.state).toBe('running')
     expect(h!.runtime.effects.pending('dshd-watch', id)).toBe(true)
+  })
+})
+
+describe('unattended starts', () => {
+  /** Time moves on by `ms` from now, not by the file's growing skew: effects due by then run. */
+  async function after(ms: number): Promise<void> {
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + ms })
+    try { await h!.runtime.pump(); await h!.runtime.idle() } finally { vi.useRealTimers() }
+  }
+  /** Accepts each request while processing is paused, so each Ticket's Assignment waits pending, as for a floor that was stopped. */
+  async function waiting(...triggers: Trigger[]): Promise<Ticket[]> {
+    for (const trigger of triggers) { h!.runtime.receive(trigger); await h!.runtime.idle() }
+    await h!.runtime.settings.pause(true, 'panel')
+    const tickets: Ticket[] = []
+    for (const trigger of triggers) {
+      const result = await h!.route({ kind: 'accept', trigger_id: trigger.id, title: `Fix ${trigger.id}`, worktree_name: `fix-${tickets.length + 1}`, acknowledgement: '收到。' })
+      tickets.push(h!.runtime.store.tickets.get((result.ticket as { ticket_id: string }).ticket_id)!)
+    }
+    return tickets
+  }
+  const worker = () => h!.runtime.health.worker?.detail
+
+  it('holds the launch of work from before a start for dshd.resumeDelaySeconds, never launches a Ticket a person stopped meanwhile, and launches new work at once', async () => {
+    await start({ resumeDelaySeconds: 300 })
+    const [one, two] = await waiting(request('1', { cwd: directory() }), request('5', { cwd: directory() }))
+    await h!.restart()
+    await h!.runtime.settings.pause(false, 'panel')
+    await after(60_000)
+    expect(fake.runs).toEqual([])
+    expect(worker()).toMatch(/^2 Assignments from before the start launch at \d\d:\d\d$/)
+    // A Ticket created after the start, as a Scheduled occurrence's at midnight, launches at once.
+    const fresh = await accepted(request('9', { cwd: directory(), pair: 'opus' }))
+    expect(fake.runs.map(recipe => recipe.labels['superagent.ticket'])).toEqual([fresh.ticket.id])
+    h!.runtime.engine.stopTicket(one!.id); await h!.runtime.idle()
+    await after(4 * 60_000)
+    expect(fake.runs).toHaveLength(1)
+    await after(6 * 60_000)
+    expect(fake.runs.map(recipe => recipe.labels['superagent.ticket'])).toEqual([fresh.ticket.id, two!.id])
+    expect(binding(one!)).toBeUndefined()
+    expect(stored(one!).ended?.outcome).toBe('stopped')
+    expect(worker()).toBe('No Assignment from before the start waits to launch')
+  })
+  it('launches at once after a start with dshd.resumeDelaySeconds 0, as upstream resumes', async () => {
+    await start({ resumeDelaySeconds: 0 })
+    const [one] = await waiting(request('1', { cwd: directory() }))
+    await h!.restart()
+    await h!.runtime.settings.pause(false, 'panel')
+    await after(10_000)
+    expect(fake.runs.map(recipe => recipe.labels['superagent.ticket'])).toEqual([one!.id])
+    expect(worker()).toBeUndefined()
+  })
+  it('records failed, not launched, work from before a start older than dshd.resumeMaxAgeHours, unless its launch was under way; a retry launches at once', async () => {
+    await start({ resumeMaxAgeHours: 1 })
+    const cut = request('1', { cwd: directory() }), waited = request('5', { cwd: directory() })
+    for (const trigger of [cut, waited]) { h!.runtime.receive(trigger); await h!.runtime.idle() }
+    // One launch is under way when the floor stops, so dshd may run its unit: it runs its frozen recipe again whatever its age.
+    fake.hold = deferred().promise
+    await h!.route({ kind: 'accept', trigger_id: cut.id, title: 'Fix', worktree_name: 'fix-cut', acknowledgement: '收到。' })
+    await waitUntil(() => fake.runs.length === 1)
+    await h!.runtime.settings.pause(true, 'panel')
+    const result = await h!.route({ kind: 'accept', trigger_id: waited.id, title: 'Old', worktree_name: 'fix-old', acknowledgement: '收到。' })
+    const old = h!.runtime.store.tickets.get((result.ticket as { ticket_id: string }).ticket_id)
+    await h!.restart()
+    fake.hold = undefined
+    await h!.runtime.settings.pause(false, 'panel')
+    await after(2 * 3_600_000)
+    expect(fake.runs).toHaveLength(2)
+    expect(fake.runs[1]).toEqual(fake.runs[0])
+    expect(binding(old!)).toBeUndefined()
+    expect(latestAssignment(stored(old!))!.report).toMatchObject({ state: 'failed',
+      summary: 'Not launched after the restart: this work waited 2 h, longer than dshd.resumeMaxAgeHours (1 h). Retry the ticket to launch it.' })
+    expect(waitsForPerson(stored(old!))).toBe(true)
+    h!.runtime.engine.retryTicket(old!.id); await h!.runtime.idle()
+    expect(fake.runs.at(-1)!.name).toBe(nameOf(old!, 2))
+  })
+  it('settles as lost, freeing the slot, a unit dshd reports orphaned at once, and one masked after dshd.uncertainWatchLimit looks', async () => {
+    await start({ uncertainWatchLimit: 3 })
+    const masked = await accepted(request('1', { cwd: directory(), pair: 'local' }))
+    const next = await accepted(request('5', { cwd: directory(), pair: 'local' }))
+    const orphaned = await accepted(request('9', { cwd: directory() }))
+    fake.instances.get(nameOf(masked.ticket))!.state = 'masked'
+    fake.instances.get(nameOf(orphaned.ticket))!.state = 'orphaned'
+    await later()
+    expect(binding(orphaned.ticket)).toMatchObject({ state: 'ended', ended: { verdict: 'lost' } })
+    expect(latestAssignment(stored(orphaned.ticket))!.report).toMatchObject({ state: 'failed', summary: expect.stringMatching(/^Unit \S+ ended lost\./) })
+    expect(binding(masked.ticket)!.state).toBe('running')
+    await later()
+    expect(binding(masked.ticket)!.state).toBe('running')
+    expect(fake.runs.map(recipe => recipe.labels['superagent.ticket'])).not.toContain(next.ticket.id)
+    await later(); await later()
+    expect(binding(masked.ticket)).toMatchObject({ state: 'ended', ended: { verdict: 'lost' } })
+    expect(waitsForPerson(stored(masked.ticket))).toBe(true)
+    expect(fake.runs.map(recipe => recipe.labels['superagent.ticket'])).toContain(next.ticket.id)
+    expect(fake.stops).toEqual([])
+  })
+  it('leaves PATH entries under /nix/store out of every unit\'s environment, and says so once in the log', async () => {
+    const path = process.env.PATH
+    try {
+      await start({ passEnv: ['PATH'] })
+      const warn = vi.spyOn(h!.ctx.logger, 'warn')
+      process.env.PATH = [workerBin(h!.directory), '/nix/store/0aaa-coreutils/bin', '/usr/local/bin', '/nix/store/1bbb-git/bin',
+        '/etc/profiles/per-user/agent/bin'].join(delimiter)
+      await accepted(request('1', { cwd: directory() }))
+      await accepted(request('5', { cwd: directory() }))
+      expect(fake.runs.map(recipe => recipe.env.PATH)).toEqual(Array(2).fill(['/usr/local/bin', '/etc/profiles/per-user/agent/bin'].join(delimiter)))
+      const logged = warn.mock.calls.filter(args => String(args[0]).includes('/nix/store'))
+      expect(logged).toEqual([[expect.stringContaining('give this process a PATH of profile links'), '/nix/store/0aaa-coreutils/bin:/nix/store/1bbb-git/bin']])
+    } finally { process.env.PATH = path }
   })
 })
 

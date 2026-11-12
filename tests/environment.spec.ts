@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SENSITIVE_ENV_PATTERN, type SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
-import { GIT_LOCATION, agentVariables, credentialHelper, runAsWorker, verifyDirectory, withoutDirectory, workerBin, workerGitConfig, writeEnvironment }
+import { GIT_LOCATION, agentVariables, credentialHelper, inherited, runAsWorker, verifyDirectory, withoutDirectory, workerBin, workerGitConfig, writeEnvironment }
   from '../src/infra/environment.ts'
 import { CliError } from '../src/infra/commands.ts'
 import { testDeployment } from './fixtures/deployment.ts'
@@ -182,5 +182,18 @@ describe('the repository the host\'s environment names', () => {
       for (const name of GIT_LOCATION) expect(env, name).not.toHaveProperty(name)
       expect(env.GIT_CEILING_DIRECTORIES).toBe(dir)
     } finally { vi.unstubAllEnvs() }
+  })
+})
+
+describe('the environment a dshd unit inherits', () => {
+  it('copies the names it is given, leaving out PATH entries under the Nix store and telling which', () => {
+    const dropped = vi.fn()
+    const env = { HOME: '/srv/agent', PATH: '/nix/store/0aaa-coreutils/bin:/usr/local/bin:/nix/store:/nix/storefront/bin', LANG: 'C.UTF-8' }
+    expect(inherited(['HOME', 'PATH', 'UNSET'], env, dropped)).toEqual({ HOME: '/srv/agent', PATH: '/usr/local/bin:/nix/storefront/bin' })
+    expect(dropped).toHaveBeenCalledExactlyOnceWith(['/nix/store/0aaa-coreutils/bin', '/nix/store'])
+    // A PATH with nothing outside the store is left out, so the unit starts with the service manager's own.
+    expect(inherited(['PATH'], { PATH: '/nix/store/0aaa-coreutils/bin' }, dropped)).toEqual({})
+    expect(inherited(['PATH'], { PATH: '/run/wrappers/bin' }, dropped)).toEqual({ PATH: '/run/wrappers/bin' })
+    expect(dropped).toHaveBeenCalledTimes(2)
   })
 })

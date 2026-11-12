@@ -124,9 +124,23 @@ export function applyEnvironment(variables: Record<string, string | undefined>, 
   return () => { apply(previous) }
 }
 
-/** The values of `names` in this process's environment, for a child that starts from an empty one; names that are not set are left out. */
-export function inherited(names: readonly string[], env: NodeJS.ProcessEnv = process.env): Record<string, string> {
-  return Object.fromEntries(names.flatMap(name => env[name] === undefined ? [] : [[name, env[name]]]))
+/** Whether a PATH entry lies in the Nix store, where each path holds one build that a garbage collection may delete. */
+const inStore = (entry: string): boolean => entry === '/nix/store' || entry.startsWith('/nix/store/')
+/**
+ * The values of `names` in this process's environment, for a child that starts from an empty one; names that are not set are
+ * left out. `PATH` keeps only its entries outside the Nix store, and none at all when every entry is in it: a dshd unit replays
+ * its recipe on every later start, long after a garbage collection may have deleted a store path, while a profile link follows
+ * each switch. `dropped` hears of the entries left out.
+ */
+export function inherited(names: readonly string[], env: NodeJS.ProcessEnv = process.env, dropped: (entries: string[]) => void = () => {}): Record<string, string> {
+  return Object.fromEntries(names.flatMap(name => {
+    const value = env[name]
+    if (value === undefined) return []
+    if (name !== 'PATH') return [[name, value]]
+    const entries = value.split(delimiter), kept = entries.filter(entry => !inStore(entry))
+    if (kept.length < entries.length) dropped(entries.filter(inStore))
+    return kept.length ? [[name, kept.join(delimiter)]] : []
+  }))
 }
 
 /** Spawns a command through the DSH subprocess runtime, which strips credential-shaped environment variables. */

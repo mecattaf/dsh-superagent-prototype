@@ -31,6 +31,8 @@ declare module '../app/effects.ts' {
 }
 
 const now = (): string => new Date().toISOString()
+/** A time of day as the panel shows one, `HH:MM` in this process's time zone. */
+const clock = (at: number): string => new Date(at).toTimeString().slice(0, 5)
 /** How an Assignment's unit ended, read from `dshd get` (see `verdictOf`). */
 export type Verdict = 'running' | 'completed' | 'task-failed' | 'killed' | 'never-ran' | 'stopped' | 'cut' | 'lost' | 'superseded' | 'unknown'
 /** The persisted owner of one Assignment's unit: where and as what it runs, and the recipe every launch attempt reuses. */
@@ -213,6 +215,14 @@ export class DshdExecutor implements ExecutorPort {
   private readonly launching = new Map<string, string>()
   /** Units whose Assignment the domain ended and whose stop has not recorded their end, by Assignment ID, with their pair: each holds its slot. */
   private readonly stopping = new Map<string, string>()
+  /** When this executor last resumed: work from before then waits `dshd.resumeDelaySeconds` from it (see `holdResumed`). */
+  private startedAt = Date.now()
+  /** Launches of work from before the start that wait for `dshd.resumeDelaySeconds`, by Assignment ID. */
+  private readonly held = new Set<string>()
+  /** Looks in a row that found a unit in a state dshd cannot tell an end from, by Assignment ID (see `watch`). */
+  private readonly uncertain = new Map<string, number>()
+  /** Whether `passEnv` has lost PATH entries under the Nix store, which is logged once. */
+  private warnedStore = false
   constructor(private readonly host: DshdExecutorHost) {
     this.dshd = host.dshd ?? new DshdCli(host.context.subprocess, host.machine.dshd.command)
     this.hostname = host.hostname ?? osHostname
@@ -252,10 +262,12 @@ export class DshdExecutor implements ExecutorPort {
   install(): void {}
   /**
    * Reconciles open Tickets oldest first after a start. A running Assignment whose unit may still run is adopted and watched
-   * again; one that ran in this process before a switch from the dsh executor is interrupted, as upstream does; pending ones launch.
-   * Under `dshd.removeEnded`, it then sweeps the ended units of Tickets that ended before (see `sweepEnded`).
+   * again; one that ran in this process before a switch from the dsh executor is interrupted, as upstream does; pending ones
+   * launch once `dshd.resumeDelaySeconds` have passed (see `holdResumed`). Under `dshd.removeEnded`, it then sweeps the ended
+   * units of Tickets that ended before (see `sweepEnded`).
    */
   resume(): void {
+    this.startedAt = Date.now()
     for (const ticket of this.host.store.tickets.open().sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
       const running = runningAssignment(ticket), latest = latestAssignment(ticket)
       if (running) {
@@ -305,6 +317,7 @@ export class DshdExecutor implements ExecutorPort {
     return { name, pair }
   }
   private async launchQueued({ ticketId, assignmentId }: { ticketId: string; assignmentId: string }): Promise<void> {
+    this.release(assignmentId)
     const ticket = this.host.store.tickets.get(ticketId)
     const assignment = ticket && latestAssignment(ticket)
     if (!ticket || !liveTicket(ticket) || assignment?.id !== assignmentId || assignment.state !== 'pending') {
@@ -315,6 +328,8 @@ export class DshdExecutor implements ExecutorPort {
     if (this.host.closing()) throw new Error('dsh-superagent is stopping')
     if (this.host.paused()) throw new Later('Processing is paused')
     const stored = this.host.store.get(BINDING(assignmentId))
+    try { this.holdResumed(ticket, assignment, stored) }
+    catch (error) { if (error instanceof LaunchRefused) { this.launchFailed(ticketId, assignmentId, error); return } throw error }
     let pair: { name: string; pair?: DshdPair }
     try { pair = stored ? { name: stored.pair, pair: this.host.machine.dshd.pairs[stored.pair] } : this.pairOf(ticket) }
     catch (error) { this.launchFailed(ticketId, assignmentId, error); return }
@@ -340,9 +355,52 @@ export class DshdExecutor implements ExecutorPort {
       if (unanswered) this.stopUnanswered(ticketId, assignmentId)
     } finally { this.launching.delete(assignmentId); this.slots.free(ticketId) }
   }
-  /** Queues the stop of a unit a launch that dshd did not answer may have started; it looks for the unit under the frozen name and labels. */
+  /**
+   * Queues the stop of a unit a launch that dshd did not answer may have started; it looks for the unit under the frozen name
+   * and labels, and holds its slot until the stop records its end, as any stop does.
+   */
   private stopUnanswered(ticketId: string, assignmentId: string): void {
-    this.host.effects.enqueue('dshd-stop', assignmentId, { ticketId, assignmentId, reason: 'dshd did not answer its launch' })
+    this.stopLater(ticketId, assignmentId, 'dshd did not answer its launch')
+  }
+  /**
+   * The Assignment from before this start that a launch of `assignment` resumes: itself when it was created before the start,
+   * or the one a restart replaced with it (upstream's `hostRestarted`, as for a unit a reboot cut) when that one was. Work
+   * created since the start has none.
+   */
+  private resumedFrom(ticket: Ticket, assignment: Assignment): Assignment | undefined {
+    const before = (item: Assignment | undefined): boolean => !!item && Date.parse(item.createdAt) < this.startedAt
+    if (before(assignment)) return assignment
+    const previous = ticket.assignments[ticket.assignments.findIndex(item => item.id === assignment.id) - 1]
+    return previous?.endedReason === 'hostRestarted' && before(previous) ? previous : undefined
+  }
+  /**
+   * Holds the launch of work from before this start (see `resumedFrom`) until `dshd.resumeDelaySeconds` after the start, so a
+   * person can look at it, and stop it, before any unit runs: a start with nobody watching, such as a supervisor's, launches
+   * nothing at once. It refuses work older than `dshd.resumeMaxAgeHours`, unless its launch was under way before the start
+   * (`stored`), whose frozen recipe dshd may already run. Work created since the start launches at once.
+   */
+  private holdResumed(ticket: Ticket, assignment: Assignment, stored: DshdBinding | undefined): void {
+    const resumed = this.resumedFrom(ticket, assignment)
+    if (!resumed) return
+    const { resumeDelaySeconds, resumeMaxAgeHours } = this.host.machine.dshd
+    const age = Date.now() - Date.parse(resumed.createdAt)
+    if (!stored && resumeMaxAgeHours && age > resumeMaxAgeHours * 3_600_000) {
+      throw new LaunchRefused(`Not launched after the restart: this work waited ${Math.floor(age / 3_600_000)} h, longer than dshd.resumeMaxAgeHours `
+        + `(${resumeMaxAgeHours} h). Retry the ticket to launch it.`)
+    }
+    const until = this.startedAt + resumeDelaySeconds * 1000
+    if (Date.now() >= until) return
+    this.held.add(assignment.id)
+    const count = this.held.size
+    this.host.health.set({ state: 'ready', at: now(),
+      detail: `${count} Assignment${count === 1 ? '' : 's'} from before the start launch${count === 1 ? 'es' : ''} at ${clock(until)}` })
+    throw new Later(`Work from before the start launches at ${new Date(until).toISOString()}`)
+  }
+  /** Lets go of a held launch, and says so on the worker health entry once none is held. */
+  private release(assignmentId: string): void {
+    if (this.held.delete(assignmentId) && !this.held.size) {
+      this.host.health.set({ state: 'ready', detail: 'No Assignment from before the start waits to launch', at: now() })
+    }
   }
   /** Whether the Assignment is still the live Ticket's pending one, which a launch may start. */
   private stillPending(ticketId: string, assignmentId: string): boolean {
@@ -412,11 +470,18 @@ export class DshdExecutor implements ExecutorPort {
       if (EXTRA_LABEL.test(label) && typeof value === 'string' && value.length <= 256 && !value.includes('\n')) labels[label] = value
     }
     Object.assign(labels, { [LABEL.orchestrator]: this.host.masterId, [LABEL.ticket]: ticket.id, [LABEL.assignment]: assignment.id, [LABEL.pair]: pair })
-    const env = { ...inherited(dshd.passEnv, this.host.environment?.()), ...dshd.env, ...config.env }
+    const env = { ...inherited(dshd.passEnv, this.host.environment?.(), entries => { this.storePathsLeft(entries) }), ...dshd.env, ...config.env }
     const binding: DshdBinding = { executor: 'dshd', host: this.hostname(), name, pair, state: 'launching', launchedAt: now(),
       recipe: { name, cwd, labels, profile: config.profile, args: [...dshd.args], task, env }, inputIds }
     store.atomic(() => { store.set(BINDING(assignment.id), binding) })
     return binding
+  }
+  /** Logs once that `passEnv` left PATH entries under the Nix store out of a unit's recipe (see `inherited`). */
+  private storePathsLeft(entries: string[]): void {
+    if (this.warnedStore) return
+    this.warnedStore = true
+    this.host.context.logger.warn('dsh-superagent leaves PATH entries under /nix/store out of every unit\'s environment, as a unit replays its recipe '
+      + 'on later starts and a garbage collection may delete them; give this process a PATH of profile links: %s', entries.join(':'))
   }
   /** A Trigger Input as the brief carries it, in full. */
   private inputCard(input: TicketInput): object | undefined {
@@ -452,7 +517,7 @@ export class DshdExecutor implements ExecutorPort {
   /** Follows a bound unit with `dshd wait` until it ends, then settles its Assignment from `dshd get` and its events. */
   private async watch({ ticketId, assignmentId }: { ticketId: string; assignmentId: string }): Promise<void> {
     let binding = this.host.store.get(BINDING(assignmentId))
-    if (!binding || binding.state !== 'running') return
+    if (!binding || binding.state !== 'running') { this.uncertain.delete(assignmentId); return }
     const { name } = binding
     this.sameHost(binding)
     const signal = this.host.lifetime
@@ -474,6 +539,7 @@ export class DshdExecutor implements ExecutorPort {
     }
     if (invocationOf(status) !== binding.invocationId) return this.settle(ticketId, assignmentId, 'superseded')
     if (RUNNING.has(status.state)) {
+      this.uncertain.delete(assignmentId)
       const waited = await this.dshd.wait(name, this.host.machine.dshd.watchSeconds, signal)
       if (waited !== 'not-found' && waited.outcome === 'still-running') throw new Later(`Unit ${name} still runs`)
       status = await this.dshd.get(name, signal)
@@ -482,10 +548,27 @@ export class DshdExecutor implements ExecutorPort {
     }
     const verdict = verdictOf(status)
     if (verdict === 'running') throw new Later(`Unit ${name} still runs`)
-    if (verdict === 'unknown') throw new Error(`Unit ${name} is ${status.state}: dsh-superagent keeps its Assignment until dshd can tell how it ended`)
+    if (verdict === 'unknown') return this.uncertainEnd(ticketId, assignmentId, name, status.state)
+    this.uncertain.delete(assignmentId)
     const events = await this.printed(name, binding.invocationId, signal)
     const child = status.lastRun?.child ?? {}
     this.settle(ticketId, assignmentId, verdict, { ...child, ending: status.lastRun?.ending ?? null }, events)
+  }
+  /**
+   * A look that found the unit in a state dshd cannot tell an end from. The Assignment keeps its slot while dshd may yet tell,
+   * for `dshd.uncertainWatchLimit` looks in a row (0: always), then settles as lost, as a stop of such a unit does; an orphaned
+   * unit, a unit dshd holds no record of, settles at once. Lost is a failed report: the Ticket waits for a person.
+   */
+  private uncertainEnd(ticketId: string, assignmentId: string, name: string, state: string): void {
+    const looks = (this.uncertain.get(assignmentId) ?? 0) + 1
+    const limit = this.host.machine.dshd.uncertainWatchLimit
+    if (state !== 'orphaned' && (limit === 0 || looks < limit)) {
+      this.uncertain.set(assignmentId, looks)
+      throw new Error(`Unit ${name} is ${state}: dsh-superagent keeps its Assignment until dshd can tell how it ended (look ${looks}${limit ? ` of ${limit}` : ''})`)
+    }
+    this.uncertain.delete(assignmentId)
+    this.host.context.logger.warn('dsh-superagent settles the Assignment of unit %s as lost: dshd reports it %s', name, state)
+    this.settle(ticketId, assignmentId, 'lost')
   }
   /**
    * What the bound run printed, from `dshd read`: its answer from the newest lines, and its Session from them or, when they do
