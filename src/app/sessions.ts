@@ -84,6 +84,15 @@ function noWait({ name, arguments: input }: { name: string; arguments: unknown }
   if (name === 'job_output' && args.wait === true && (typeof args.timeout_ms === 'number' ? args.timeout_ms > 5_000 : !routed())) return NO_WAIT
   return undefined
 }
+/**
+ * `schema` as the plain JSON a DSH tool definition's `parameters` must be. `z.toJSONSchema` (zod 4.4) adds a non-enumerable
+ * `~standard` property to its result, and the tool registry's `schemas()` projection refuses any value that does not survive a
+ * JSON round trip ("parameters must be lossless JSON"); a provider adapter that lists the tools through it would then fail every
+ * turn of the Session.
+ */
+function toolParameters(schema: z.ZodType): ReturnType<typeof z.toJSONSchema> {
+  return JSON.parse(JSON.stringify(z.toJSONSchema(schema))) as ReturnType<typeof z.toJSONSchema>
+}
 
 /**
  * Creates and decorates orchestrator and worker DSH `Agent` sessions with role models, system prompt sections from `Prompts`, runtime skills, and restricted tool sets.
@@ -205,7 +214,7 @@ export class Sessions {
   /** Returns a tool registrar for `agent` that renders tool output as JSON text and attaches `output.image` as an image when present. */
   private registerTool(agent: Agent, binding: SessionBinding): RegisterTool {
     return (name, description, schema, execute) => {
-      binding.disposers.push(agent.ctx.tools.register({ name, description, parameters: z.toJSONSchema(schema),
+      binding.disposers.push(agent.ctx.tools.register({ name, description, parameters: toolParameters(schema),
         output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => {
           const text = { type: 'text' as const, text: JSON.stringify(value) }
           const image = value && typeof value === 'object' && 'image' in value ? (value as { image: never }).image : undefined
