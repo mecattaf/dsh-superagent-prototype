@@ -37,7 +37,7 @@ The kind adds two main-Session tools. They reach the main Session when the plugi
 | Tool | Does |
 | --- | --- |
 | `orchestrator_workflow_start` | Starts `script` in the absolute directory `cwd` with `args` and `pair`. A repeated `trigger_id` with the same script, directory and arguments returns the run it started. It refuses a relative or missing directory, a script it cannot read, and a script whose `meta` is invalid |
-| `orchestrator_workflow_status` | One run, or the newest runs, with each node `waiting`, `offered`, `held`, `ticket`, `done` or `null`, and its latest Trigger and its Ticket once it has them. A node a resumed run answered from its journal is `done` or `null` as its journal line says |
+| `orchestrator_workflow_status` | One run, or the newest runs, with each node `waiting`, `offered`, `held`, `ticket`, `done` or `null`, and its latest Trigger and its Ticket once it has them. A node a resumed run answered from its journal is `done` or `null` as its journal line says. A node's `usage` and the run's `usage` give the tokens its workers used (see below) |
 
 ## The window
 
@@ -58,13 +58,14 @@ The main Session assesses node candidates as it assesses any inferred candidate.
 - A Ticket that ends otherwise, or whose worker reports `failed` or `blocked`, makes the node `null` with the reason in its journal line. A resumed run answers that line with the same `null`, and never raises the node again.
 - At start, the plugin resumes every run that has not ended. A node with a result or a failure in the journal answers from it. A node whose Trigger the Engine already has waits for that Trigger's Ticket, and one whose Trigger never reached the Engine raises it once.
 - When the plugin stops, every node that waits parks: its run writes nothing more until the next start.
+- A node's `usage` is what its workers used, in DSH's usage names (`inputTokens`, `outputTokens`, and `totalTokens`, `cacheReadTokens`, `cacheWriteTokens` or `reasoningTokens` when the provider reports them). The dshd Executor sums, once a unit ended, the usage on each `step_end` status its headless run printed, which dsh takes from the step's `assistant/message` in the worker's Session, and keeps it on the Assignment's binding. It is known only when the lines it reads reach back to the run's start and every step printed its usage. The run's `usage.total` sums the nodes measured, keeping a bucket only when each of them reports it, and `unmeasured_nodes` counts the nodes with an ended unit whose usage is not known, which is every node on an Executor that records none.
 - A run's journal reads back as one JSON line per record: `SELECT value FROM kv WHERE key LIKE 'workflow-journal:<run>:%' ORDER BY key`. The script it ran is the record `workflow-script:<sha256>`.
 
 ## Not supported
 
 | Not supported | Why |
 | --- | --- |
-| Token budgets and usage | The Executor reports no token counts |
+| Token budgets | Usage is measured, not limited: the interpreter's budget is not set, and a node's tokens are not journaled |
 | A call's `model` and `effort` | Recorded in the Trigger's `meta`; nodes run on their pair |
 | Nesting deeper than one `workflow()` | The interpreter's limit |
 | A run started by a Scheduled item's own key | A Scheduled nudge asks the main Session, which starts the run with the tool |

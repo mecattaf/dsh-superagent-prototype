@@ -4,6 +4,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { key, threadKey, type Thread, type Ticket } from '../core/index.ts'
+import { addUsage, type TokenUsage } from '../executor/dshd.ts'
 import { KV } from '../kv.ts'
 import { extractMeta, runWorkflow, type LoadedJournal, type RunResult, type WorkflowSource } from '../workflow/index.ts'
 import { health, sourceContext, type SourceContext, type SourceHost } from './host.ts'
@@ -22,9 +23,16 @@ export interface StartResult { run_id: string; state: 'started' | 'already-start
  * the Store has them, come with every state but `waiting`.
  */
 export type NodeState = 'waiting' | 'offered' | 'held' | 'ticket' | 'done' | 'null'
-export interface NodeStatus { node: string; label?: string; phase?: string; trigger_id?: string; ticket_id?: string; state: NodeState }
+/** A node's `usage` is the tokens its Tickets' workers used, once each of their units ended and every one printed its usage. */
+export interface NodeStatus { node: string; label?: string; phase?: string; trigger_id?: string; ticket_id?: string; state: NodeState; usage?: TokenUsage }
+/**
+ * What a run's nodes used: `total` sums the nodes measured, and `unmeasured_nodes` counts those with an ended unit whose usage
+ * is not known, such as one whose Executor reports none. A node whose units all still run is neither.
+ */
+export interface RunUsage { total: TokenUsage; measured_nodes: number; unmeasured_nodes: number }
 export interface RunStatus {
   run_id: string; name: string; state: WorkflowRun['state']; cwd: string; started_at: string; ended_at?: string; error?: string; nodes: NodeStatus[]
+  usage: RunUsage
 }
 /** At most this many runs, the newest, answer a status request that names none. */
 const STATUS_RUNS = 20
@@ -63,6 +71,25 @@ function latestAttempt(source: Pick<SourceContext, 'triggers'>, run: string, nod
     if (source.triggers.get(trigger)) return { trigger, thread: threadKey({ source: SOURCE, id: nodeThread(run, node) }) }
   }
   return undefined
+}
+/**
+ * The tokens every attempt's Ticket of a node used, from the binding the dshd Executor keeps for each of its Assignments:
+ * undefined while none of them ended, `unknown` once one ended with no usage recorded, else their sum.
+ */
+function nodeUsage(source: Pick<SourceContext, 'state' | 'threads' | 'tickets' | 'triggers'>, run: string, node: string, attempts: number): TokenUsage | 'unknown' | undefined {
+  const thread = threadKey({ source: SOURCE, id: nodeThread(run, node) })
+  let total: TokenUsage | undefined
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const trigger = nodeTriggerId(run, node, attempt)
+    const ticket = source.triggers.get(trigger) && ticketOf(source, trigger, thread)
+    for (const assignment of ticket?.assignments ?? []) {
+      const binding = source.state.get(KV.dshd.binding(assignment.id))
+      if (binding ? binding.state !== 'ended' : !assignment.endedAt) continue
+      if (!binding?.usage) return 'unknown'
+      total = total ? addUsage(total, binding.usage) : binding.usage
+    }
+  }
+  return total
 }
 function nodeState(thread: Thread | undefined, trigger: string, ticket: Ticket | undefined): NodeState {
   if (ticket) return 'ticket'
@@ -181,6 +208,7 @@ export class WorkflowFloor {
   }
   private runStatus(source: SourceContext, run: WorkflowRun): RunStatus {
     const journal = KvJournal.load(source, run.id)
+    const usage: RunUsage = { total: { inputTokens: 0, outputTokens: 0 }, measured_nodes: 0, unmeasured_nodes: 0 }
     const nodes = journal.startOrder.flatMap((started): NodeStatus[] => {
       const match = started.cid === undefined ? undefined : /^c1:([0-9a-f]{16})[0-9a-f]*#(\d+)$/.exec(started.cid)
       if (!match) return []
@@ -188,14 +216,17 @@ export class WorkflowFloor {
       const head = { node, ...started.label !== undefined && { label: started.label }, ...started.phase !== undefined && { phase: started.phase } }
       const latest = latestAttempt(source, run.id, node, this.config.maxAttempts)
       const ticket = latest && ticketOf(source, latest.trigger, latest.thread)
-      const traced = { ...head, ...latest && { trigger_id: latest.trigger }, ...ticket && { ticket_id: ticket.id } }
+      const used = latest && nodeUsage(source, run.id, node, this.config.maxAttempts)
+      if (used === 'unknown') usage.unmeasured_nodes++
+      else if (used) { usage.total = usage.measured_nodes ? addUsage(usage.total, used) : used; usage.measured_nodes++ }
+      const traced = { ...head, ...latest && { trigger_id: latest.trigger }, ...ticket && { ticket_id: ticket.id }, ...used && used !== 'unknown' && { usage: used } }
       if (journal.results.has(started.key)) return [{ ...traced, state: 'done' }]
       if (journal.lastFailed.has(started.key)) return [{ ...traced, state: 'null' }]
       if (!latest) return [{ ...head, state: 'waiting' }]
       return [{ ...traced, state: nodeState(source.threads.get(latest.thread), latest.trigger, ticket) }]
     })
     return { run_id: run.id, name: run.name, state: run.state, cwd: run.cwd, started_at: run.startedAt,
-      ...run.endedAt !== undefined && { ended_at: run.endedAt }, ...run.error !== undefined && { error: run.error }, nodes }
+      ...run.endedAt !== undefined && { ended_at: run.endedAt }, ...run.error !== undefined && { error: run.error }, nodes, usage }
   }
   private reportHealth(): void {
     const running = this.driving.size, waiting = this.waiter?.size ?? 0

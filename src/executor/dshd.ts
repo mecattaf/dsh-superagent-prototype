@@ -49,6 +49,8 @@ export interface DshdBinding {
   invocationId?: string
   /** The worker's DSH Session, from the unit's `session` event once read. */
   sessionId?: string
+  /** The tokens the worker's model calls used over the whole run, once it ended and when every step printed its usage. */
+  usage?: TokenUsage
   ended?: { at: string; verdict: Verdict; exitCode?: number; signal?: number; ending?: string | null }
 }
 /** The binding of each Assignment the dshd executor launched, by Assignment ID. */
@@ -65,8 +67,8 @@ const UNAVAILABLE_TRIES = 3
 /** Longest worker answer the summary of a unit that did not complete carries; a completed unit's answer is its whole result. */
 const FINAL_CHARS = 3800
 /**
- * Lines of the longer `dshd read` for a run whose newest 200 lines name no Session: a whole run at 256 bytes a line fills
- * `DshdCli`'s 16 MiB read cap. journalctl takes no more than a signed int.
+ * Lines of the longer `dshd read` for a run whose newest 200 lines do not reach back to its start: a whole run at 256 bytes a
+ * line fills `DshdCli`'s 16 MiB read cap. journalctl takes no more than a signed int.
  */
 const READ_RUN_LINES = 1 << 16
 const RETRIED = 'A person retried this ticket. Continue the assignment from the current directory and what it holds now.'
@@ -118,6 +120,9 @@ function summaryOf(name: string, verdict: Verdict, end: { exitCode?: number; sig
   const how = `Unit ${name} ended ${verdict}${end.exitCode !== undefined ? ` (exit ${end.exitCode})` : ''}${end.signal ? ` (signal ${end.signal})` : ''}.`
   return `${how}${answer ? `\n\n${answer}` : ''}\n\n${pointer}`
 }
+/** What a run printed that its end records: its Session, its final answer and the tokens it used. */
+type Printed = { sessionId?: string; final?: string; usage?: TokenUsage }
+const withUsage = (events: Printed, usage: TokenUsage | undefined): Printed => usage ? { ...events, usage } : events
 const SessionEvent = (line: string): Record<string, unknown> | undefined => {
   try { const value: unknown = JSON.parse(line); return value && typeof value === 'object' ? value as Record<string, unknown> : undefined }
   catch { return undefined /* A line dshd-run or dsh wrote that is not a headless event. */ }
@@ -135,6 +140,51 @@ export function eventsOf(read: Pick<DshdRead, 'lines'>): { sessionId?: string; f
   }
   sessionId ??= finalSessionId
   return { ...(sessionId !== undefined ? { sessionId } : {}), ...(final !== undefined ? { final } : {}) }
+}
+/**
+ * Tokens a worker's model calls used, in DSH's own usage names. `inputTokens` and `outputTokens` are always there; a provider
+ * reports the other buckets or not.
+ */
+export interface TokenUsage {
+  inputTokens: number
+  outputTokens: number
+  totalTokens?: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
+  reasoningTokens?: number
+}
+const BUCKETS = ['totalTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens'] as const
+const count = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0
+const usageValue = (value: unknown): TokenUsage | undefined => {
+  if (!value || typeof value !== 'object') return undefined
+  const usage = value as Record<string, unknown>
+  if (!count(usage.inputTokens) || !count(usage.outputTokens)) return undefined
+  const buckets = BUCKETS.flatMap(bucket => count(usage[bucket]) ? [[bucket, usage[bucket]] as const] : [])
+  return { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, ...Object.fromEntries(buckets) }
+}
+/**
+ * Adds two usages as DSH adds a step's attempts: an optional bucket stays only when both report it, so a sum never passes for
+ * a total it is not.
+ */
+export function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
+  const buckets = BUCKETS.flatMap(bucket => a[bucket] !== undefined && b[bucket] !== undefined ? [[bucket, a[bucket] + b[bucket]] as const] : [])
+  return { inputTokens: a.inputTokens + b.inputTokens, outputTokens: a.outputTokens + b.outputTokens, ...Object.fromEntries(buckets) }
+}
+/**
+ * The tokens a headless `--json` run used: the sum of the usage on each step's `step_end` status, which dsh prints from what
+ * the step's `assistant/message` recorded in its Session. It is known only for lines that reach back to the run's start in
+ * which every step printed its usage, as dsh leaves usage out of a step whose total it cannot know.
+ */
+export function usageOf(read: Pick<DshdRead, 'lines' | 'complete'>): TokenUsage | undefined {
+  if (!read.complete) return undefined
+  let total: TokenUsage | undefined
+  for (const event of read.lines.map(SessionEvent)) {
+    if (event?.type !== 'status' || event.phase !== 'step_end') continue
+    const usage = usageValue(event.usage)
+    if (!usage) return undefined
+    total = total ? addUsage(total, usage) : usage
+  }
+  return total
 }
 /**
  * Whether `assignmentId` is the latest Assignment of the live Ticket and the only one running, so its unit's end may settle it.
@@ -400,19 +450,21 @@ export class DshdExecutor implements ExecutorPort {
     this.settle(ticketId, assignmentId, verdict, { ...child, ending: status.lastRun?.ending ?? null }, events)
   }
   /**
-   * What the bound run printed, from `dshd read`: its answer from the newest lines, and its Session from them or, when they do
-   * not reach back to the run's start and name none, from a longer read. A longer read dshd does not answer readably, such as
-   * one past the read cap, leaves the Session unknown; the end settles either way.
+   * What the bound run printed, from `dshd read`: its answer from the newest lines, and its Session and its usage from them or,
+   * when they do not reach back to the run's start, from a longer read. A longer read dshd does not answer readably, such as
+   * one past the read cap, or one that still does not reach back, leaves the usage unknown, and the Session too when no line
+   * names it; the end settles either way.
    */
-  private async printed(name: string, invocationId: string | undefined, signal: AbortSignal): Promise<{ sessionId?: string; final?: string }> {
+  private async printed(name: string, invocationId: string | undefined, signal: AbortSignal): Promise<Printed> {
     const read = await this.dshd.read(name, signal)
     if (read === 'not-found' || read.invocationId !== invocationId) return {}
     const events = eventsOf(read)
-    if (events.sessionId !== undefined || read.complete) return events
+    if (read.complete) return withUsage(events, usageOf(read))
     try {
       const longer = await this.dshd.read(name, signal, READ_RUN_LINES)
-      const sessionId = longer !== 'not-found' && longer.invocationId === invocationId ? eventsOf(longer).sessionId : undefined
-      return sessionId === undefined ? events : { ...events, sessionId }
+      if (longer === 'not-found' || longer.invocationId !== invocationId) return events
+      const sessionId = events.sessionId ?? eventsOf(longer).sessionId
+      return withUsage({ ...events, ...(sessionId !== undefined ? { sessionId } : {}) }, usageOf(longer))
     } catch (error) {
       if (signal.aborted) throw error
       return events
@@ -424,13 +476,13 @@ export class DshdExecutor implements ExecutorPort {
    * that ended meanwhile, by a stop or an earlier run of this watch, is settled already and stays as it is.
    */
   private settle(ticketId: string, assignmentId: string, verdict: Verdict,
-    end: { exitCode?: number; signal?: number; ending?: string | null } = {}, events: { sessionId?: string; final?: string } = {}): void {
+    end: { exitCode?: number; signal?: number; ending?: string | null } = {}, events: Printed = {}): void {
     const { store, engine } = this.host
     store.atomic(() => {
       const binding = store.get(BINDING(assignmentId))
       if (!binding || binding.state === 'ended') return
       store.set(BINDING(assignmentId), { ...binding, state: 'ended', ended: { at: now(), verdict, ...end },
-        ...(events.sessionId ? { sessionId: events.sessionId } : {}) })
+        ...(events.sessionId ? { sessionId: events.sessionId } : {}), ...(events.usage ? { usage: events.usage } : {}) })
       const ticket = store.tickets.get(ticketId)
       // The end is recorded either way; the Engine hears of it only for the Assignment that still runs the Ticket.
       if (!ticket || !current(ticket, assignmentId)) return
