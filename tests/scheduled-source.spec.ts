@@ -12,6 +12,7 @@ import { sourceContextOf, type SourceContextDeps } from '../src/app/source-conte
 import { ticketEnvironment } from '../src/app/execution-environment.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { HealthBoard } from '../src/infra/health.ts'
+import { LOCK_STALE_MS } from '../src/infra/lock.ts'
 import { SettingsSchema, assessmentOutcome, settingsPolicy, type Assessment } from '../src/policy.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import * as scheduled from '../src/sources/scheduled.ts'
@@ -347,6 +348,38 @@ describe('scheduled Source', () => {
     expect(h.store.threads.get('scheduled:a2')?.meta).toMatchObject({ label: LABEL })
     expect(h.store.threads.get('scheduled:b1')).toBeUndefined()
     expect(h.done()).toEqual(['a2.json', 'a3.json', 'b1.json', 'b2.json'])
+  })
+
+  it('keeps superseded records until their item\'s live record is committed, so a cut round still counts them as missed', async () => {
+    const h = host()
+    const at = (hour: string) => record(h.work, { due: `2026-11-12T${hour}:00:00.000Z` })
+    drop(h.inbox, 'a.json', at('00')); drop(h.inbox, 'b.json', at('01')); drop(h.inbox, 'c.json', at('02'))
+    // The live record's receive fails after both superseded ones were committed: all three wait for the next round.
+    const real = h.receive.getMockImplementation()!
+    let fail = true
+    h.receive.mockImplementation(async trigger => {
+      if (trigger.meta.occurrence === 'c' && fail) { fail = false; throw new Error('database is locked') }
+      return real(trigger)
+    })
+    await expect(readInbox(h.ctx, h.inbox)).rejects.toThrow('database is locked')
+    expect(h.waiting()).toEqual(['a.json', 'b.json', 'c.json'])
+    expect(await readInbox(h.ctx, h.inbox)).toEqual({ read: 1, superseded: 2, invalid: 0, unreadable: 0 })
+    expect(h.store.triggers.get(idOf(at('02')))?.meta).toMatchObject({ missed: 2 })
+    expect(h.done()).toEqual(['a.json', 'b.json', 'c.json'])
+  })
+
+  it('leaves a superseded record in the inbox when a round is aborted before its item\'s live record, and counts it on the next round', async () => {
+    const h = host()
+    const at = (hour: string) => record(h.work, { due: `2026-11-12T${hour}:00:00.000Z` })
+    drop(h.inbox, 'a.json', at('00')); drop(h.inbox, 'b.json', at('01'))
+    const controller = new AbortController()
+    // The stop comes right after the superseded record is received, before the live one.
+    const receive = async (trigger: Trigger) => { const result = await h.ctx.receive(trigger); controller.abort(); return result }
+    expect(await readInbox({ threads: h.ctx.threads, triggers: h.ctx.triggers, receive }, h.inbox, controller.signal)).toMatchObject({ read: 0, superseded: 1 })
+    expect(h.waiting()).toEqual(['a.json', 'b.json'])
+    expect(await readInbox(h.ctx, h.inbox)).toEqual({ read: 1, superseded: 1, invalid: 0, unreadable: 0 })
+    expect(h.store.triggers.get(idOf(at('01')))?.meta).toMatchObject({ missed: 1 })
+    expect(h.done()).toEqual(['a.json', 'b.json'])
   })
 
   it('assesses a later occurrence of an item on its own Thread while a ticket of an earlier one is open, and gives that ticket nothing', async () => {
@@ -711,24 +744,57 @@ describe('scheduled plugin entry', () => {
     expect(h.receive).not.toHaveBeenCalled()
   })
 
-  it('stops reading and reports the error when its inbox lock is lost, and disposes cleanly', async () => {
+  // Reads every 20 s, so the lock's refresh, every 15 s, finds it lost while no round is in flight.
+  const SLOW = { sources: { scheduled: { enabled: true, config: { pollSeconds: 20 } } } }
+
+  it('reports a lost inbox lock, stops reading, and reads again once it takes the lock back', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
-      const h = host({ registered: false })
+      const h = host({ registered: false, settings: SLOW })
       drop(h.inbox, 'a.json', record(h.work))
       const stop = mount(h)
       await vi.waitFor(() => { expect(h.done()).toEqual(['a.json']) })
-      // Another process takes the lock away: proper-lockfile finds out when it next refreshes the lock, and calls onCompromised.
+      // The lock goes away: proper-lockfile finds out when it next refreshes the lock, half the stale time later, and calls onCompromised.
       rmSync(`${h.inbox}.lock`, { recursive: true })
-      await vi.advanceTimersByTimeAsync(15_000)
+      await vi.advanceTimersByTimeAsync(LOCK_STALE_MS / 2)
       await vi.waitFor(() => { expect(h.board.all.scheduled).toMatchObject({ state: 'error', detail: expect.stringContaining('The inbox lock was lost') }) })
+      // Past the next round it would have read, it reads nothing, and says why it stopped rather than that the release of the lost lock failed.
       drop(h.inbox, 'b.json', record(h.work, { item: 'weekly-report' }))
-      await vi.advanceTimersByTimeAsync(30_000)
+      await vi.advanceTimersByTimeAsync(10_000)
       expect(h.waiting()).toEqual(['b.json'])
       expect(h.receive).toHaveBeenCalledOnce()
-      // The lost lock is already released, and the Source says why it stopped rather than that the release failed.
       expect(h.board.all.scheduled).toMatchObject({ state: 'error', detail: expect.stringContaining('The inbox lock was lost') })
+      // Once the stale time is up, it takes the lock back and reads what waited; its counts carry on.
+      await vi.advanceTimersByTimeAsync(LOCK_STALE_MS)
+      await vi.waitFor(() => { expect(h.done()).toEqual(['a.json', 'b.json']) })
+      await vi.waitFor(() => { expect(h.board.all.scheduled).toMatchObject({ state: 'ready', detail: 'Read 2; superseded 0; invalid 0' }) })
+      expect(existsSync(`${h.inbox}.lock`)).toBe(true)
       await stop()
+      expect(existsSync(`${h.inbox}.lock`)).toBe(false)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('after a lost lock, reads nothing while another process holds it past lockWaitMs, and reports that as at the start', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const h = host({ registered: false, settings: SLOW })
+      h.deployment.lockWaitMs = 500
+      const stop = mount(h)
+      await vi.waitFor(() => { expect(h.board.all.scheduled).toMatchObject({ state: 'ready' }) })
+      // Another process takes the lock over: the lock directory carries its time, not this process's, which this one finds at its next refresh.
+      const lock = `${h.inbox}.lock`, theirs = new Date(statSync(lock).mtimeMs - 1_000)
+      rmSync(lock, { recursive: true }); mkdirSync(lock); utimesSync(lock, theirs, theirs)
+      await vi.advanceTimersByTimeAsync(LOCK_STALE_MS / 2)
+      await vi.waitFor(() => { expect(h.board.all.scheduled).toMatchObject({ state: 'error', detail: expect.stringContaining('The inbox lock was lost') }) })
+      drop(h.inbox, 'a.json', record(h.work))
+      // The other process still holds the lock when the stale time and lockWaitMs are up: one process reads one directory.
+      await vi.advanceTimersByTimeAsync(LOCK_STALE_MS)
+      await vi.waitFor(() => { expect(h.board.all.scheduled).toMatchObject({ state: 'error', detail: expect.stringContaining('already being held') }) }, { timeout: 4_000 })
+      expect(h.waiting()).toEqual(['a.json'])
+      expect(h.receive).not.toHaveBeenCalled()
+      await stop()
+      // This process does not release the lock it lost: the other one keeps it.
+      expect(existsSync(lock)).toBe(true)
     } finally { vi.useRealTimers() }
   })
 
