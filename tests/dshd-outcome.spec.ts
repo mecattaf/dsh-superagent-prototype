@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { latestAssignment, waitsForPerson, type Ticket, type Trigger } from '../src/core/index.ts'
 import { DshdCli, DshdUnavailable, invocationOf, type DshdLastRun, type DshdRecipe } from '../src/executor/dshd-cli.ts'
 import { BINDING, eventsOf, unitName, verdictOf, type Verdict } from '../src/executor/dshd.ts'
+import { isNoAnswer, noAnswerSummary } from '../src/executor/dshd-summary.ts'
 import { testDshd } from './fixtures/deployment.ts'
 import { FakeDshd, runLines } from './fixtures/fake-dshd.ts'
 import { GET_EXITED, READ_JSON_RUN, READ_LINES, RUN_CREATED, WAIT_ENDED_EXITED, WAIT_ENDED_FAILED, WAIT_STILL_RUNNING } from './fixtures/dshd-0.1.0.ts'
@@ -208,9 +209,7 @@ describe('the dshd executor on these outcomes', () => {
       expect(latestAssignment(stored(ticket))!.report).toMatchObject({ state: 'ready', summary: 'Done.' })
     })
   })
-  it('words only the summary of a unit that exited 0 with no final answer as the workflow Source\'s NO_ANSWER reads it', async () => {
-    // floor/workflow `src/sources/workflow-backend.ts` NO_ANSWER, copied: a change to either side must change the other in the same merge.
-    const NO_ANSWER = /^Unit [a-z0-9][a-z0-9_-]* exited 0\.$/
+  it('words only the summary of a unit that exited 0 with no final answer as isNoAnswer, which the workflow Source reads, recognises it', async () => {
     const fake = new FakeDshd()
     const ends: [Parameters<FakeDshd['end']>[1], boolean][] = [[{ lines: runLines('session-1') }, true], [{ lines: runLines('session-2', 'Done.') }, false],
       [{ lines: runLines('session-3', 'Unit sa-x-a1 exited 0. Then more.') }, false], [{ exitCode: 1, lines: runLines('session-4') }, false],
@@ -225,10 +224,10 @@ describe('the dshd executor on these outcomes', () => {
       summaries.push(latestAssignment(stored(ticket))!.report!.summary)
     }
     expect(summaries[0]).toBe(`Unit ${fake.runs[0]!.name} exited 0.`)
-    expect(summaries.map(summary => NO_ANSWER.test(summary))).toEqual(ends.map(([, none]) => none))
-    // Every name the executor gives a unit, named or not, is one NO_ANSWER's name pattern takes.
+    expect(summaries.map(isNoAnswer)).toEqual(ends.map(([, none]) => none))
+    // Every name the executor gives a unit, named or not, is one isNoAnswer's name pattern takes.
     for (const name of [...fake.runs.map(item => item.name), unitName('sa', 'x'.repeat(60), 'ticket-1', 1), unitName('sa', undefined, '0123456789abcdef', 999)]) {
-      expect(NO_ANSWER.test(`Unit ${name} exited 0.`)).toBe(true)
+      expect(isNoAnswer(noAnswerSummary(name))).toBe(true)
     }
   })
   it('records failed without retrying for every refusal of dshd run that dshd 0.1.0 lists, and tries only an unavailable dshd again', async () => {

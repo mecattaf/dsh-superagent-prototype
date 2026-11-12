@@ -95,7 +95,7 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 | `stateDir` | yes | Absolute path: the database, the lock, the command shims in `worker-bin`, the agent's git configuration and, by default, the Ticket directories in `work`. Back it up before upgrades |
 | `engine` | no | `true` by default. `false` keeps the entry inert in this process: no lock, database, environment change, route, tool or Session, and the Source entries wait. Set it where another process loads the same bundles, for example only for the agent presets, while one process owns `stateDir`. Changing it restarts dsh-superagent |
 | `executor` | no | `dsh` (default) runs each Ticket in a DSH Session of this process; `dshd` runs each Assignment as one dshd headless unit |
-| `dshd.*` | with `executor: dshd` | `pairs` (name → headless `profile`, `env`, `maxWorkers`), `defaultPair`, `cwd`, `env`, `passEnv`, `args`, `prefix`, `command`, `watchSeconds`, `briefArgvMaxChars` |
+| `dshd.*` | with `executor: dshd` | `pairs` (name → headless `profile`, `env`, `maxWorkers`), `defaultPair`, `cwd`, `env`, `passEnv`, `args`, `prefix`, `command`, `watchSeconds`, `briefArgvMaxChars` (bytes of UTF-8; Linux takes at most 131072 in one argument) |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
 
 With `executor: dshd`, a unit starts from an empty environment holding the `passEnv` names of this process, then `dshd.env`, then its pair's `env`; dshd records the values, so none may be a secret. Without a repository on the GitHub Source, setup then checks no account, writes no command shims and changes no process environment.
@@ -104,7 +104,7 @@ After the first start, edit machine limits in **Settings → Deployment** or the
 
 ### Scheduled occurrences
 
-The optional `dsh-superagent-scheduled` entry reads occurrence records that a scheduler outside dsh-superagent drops into one directory, and turns each into a Trigger. Enable it in the profile with `disabled: false`, as the example profile shows. dsh-superagent keeps no clock of its own: the scheduler decides when an occurrence is due and writes its record.
+The optional `dsh-superagent-scheduled` entry reads occurrence records that a scheduler outside dsh-superagent drops into one directory, and turns each into a Trigger. Enable it in the profile with `disabled: false`, as the example profile shows. dsh-superagent keeps no clock of its own: the scheduler decides when an occurrence is due and writes its record. With `executor: dshd`, the `DSH_SUPERAGENT_SCHEDULED_*` variables it declares, like every Source's execution variables, stay in this process: no prepare command runs, a unit's environment holds only the names the dshd configuration gives it, and the unit's brief carries the occurrence's Trigger in full instead, so the panel lists no variables on its Ticket.
 
 | Key | Required | Meaning |
 | --- | --- | --- |

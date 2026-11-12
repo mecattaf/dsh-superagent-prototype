@@ -17,6 +17,7 @@ import { LIMITS } from '../limits.ts'
 import { WorkerSlots, batchOf, inputMessage, sourceTrigger, ticketExecution } from './dsh.ts'
 import { DshdCli, DshdUnavailable, invocationOf, type DshdPort, type DshdRead, type DshdRecipe, type DshdStatus } from './dshd-cli.ts'
 import type { ExecutorPort } from './port.ts'
+import { noAnswerSummary } from './dshd-summary.ts'
 
 declare module '../app/effects.ts' {
   interface EffectPayloads {
@@ -112,7 +113,7 @@ export function composeBrief(ticket: Ticket, k: number, origin: Trigger | undefi
  * node parses as JSON; any other end says how the unit ended, then its answer and where its record is.
  */
 function summaryOf(name: string, verdict: Verdict, end: { exitCode?: number; signal?: number }, final?: string, sessionId?: string): string {
-  if (verdict === 'completed') return final ?? `Unit ${name} exited 0.`
+  if (verdict === 'completed') return final ?? noAnswerSummary(name)
   const answer = final === undefined ? undefined : `${final.slice(0, FINAL_CHARS)}${final.length > FINAL_CHARS ? '…' : ''}`
   const pointer = `Unit ${name}; session ${sessionId ?? 'unknown'}.`
   const how = `Unit ${name} ended ${verdict}${end.exitCode !== undefined ? ` (exit ${end.exitCode})` : ''}${end.signal ? ` (signal ${end.signal})` : ''}.`
@@ -250,11 +251,11 @@ export class DshdExecutor implements ExecutorPort {
     if (typeof cwd === 'string' && isAbsolute(cwd)) return cwd
     return this.host.machine.dshd.cwd || undefined
   }
-  /** The pair a Ticket runs on: its origin Trigger's `meta.pair`, else the default pair. */
+  /** The pair a Ticket runs on: its origin Trigger's `meta.pair`, else the default pair; an empty `meta.pair` names none. */
   private pairOf(ticket: Ticket): { name: string; pair: DshdPair } {
     const { pairs, defaultPair } = this.host.machine.dshd
     const named = sourceTrigger(this.host, ticket)?.meta.pair
-    const name = typeof named === 'string' ? named : defaultPair
+    const name = typeof named === 'string' && named !== '' ? named : defaultPair
     const pair = Object.hasOwn(pairs, name) ? pairs[name] : undefined
     if (!pair) throw new LaunchRefused(`unknown pair ${name}`)
     return { name, pair }
@@ -301,8 +302,9 @@ export class DshdExecutor implements ExecutorPort {
   }
   /**
    * Builds the recipe of an Assignment's first launch attempt and stores it as its binding before dshd runs anything, so every
-   * later attempt reuses it byte for byte. A brief longer than `briefArgvMaxChars` goes to a file under `stateDir/briefs`,
-   * which no unit can have read yet, as none runs without the binding.
+   * later attempt reuses it byte for byte. A brief of more than `briefArgvMaxChars` bytes of UTF-8 goes to a file under
+   * `stateDir/briefs`, which no unit can have read yet, as none runs without the binding: Linux takes one argument of at most
+   * 131072 bytes (`MAX_ARG_STRLEN`), and a character outside ASCII takes two to four.
    */
   private async bindingOf(ticket: Ticket, assignment: Assignment): Promise<DshdBinding> {
     const { machine: { dshd, stateDir }, store } = this.host
@@ -319,7 +321,7 @@ export class DshdExecutor implements ExecutorPort {
     })
     const brief = composeBrief(ticket, k, sourceTrigger(this.host, ticket), batchOf(this.host, ticket), inputs)
     let task = brief
-    if (brief.length > dshd.briefArgvMaxChars) {
+    if (Buffer.byteLength(brief) > dshd.briefArgvMaxChars) {
       const file = join(stateDir, 'briefs', `${assignment.id}.json`)
       await mkdir(join(stateDir, 'briefs'), { recursive: true, mode: 0o700 })
       await writeFile(file, brief, { mode: 0o600 })

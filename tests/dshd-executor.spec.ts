@@ -98,6 +98,13 @@ describe('launch and recipe', () => {
     expect(fake.runs[0]!.labels).not.toHaveProperty('other')
     expect(fake.runs[0]!.labels['superagent.ticket']).not.toBe('forged')
   })
+  it('runs the default pair for a Trigger whose meta.pair is empty, as for one that names none', async () => {
+    await start()
+    const { ticket } = await accepted(request('1', { cwd: directory(), pair: '' }))
+    expect(fake.runs.map(recipe => [recipe.profile, recipe.labels['superagent.pair']])).toEqual([['work-opus', 'opus']])
+    expect(binding(ticket)).toMatchObject({ pair: 'opus', state: 'running' })
+    expect(latestAssignment(stored(ticket))!.report).toBeUndefined()
+  })
   it('records failed without retrying for a pair the configuration does not name, or a directory that does not exist', async () => {
     await start()
     const unknown = await accepted(request('1', { cwd: directory(), pair: 'gpu' }))
@@ -125,6 +132,21 @@ describe('launch and recipe', () => {
     expect(fake.runs[0]!.task).toBe(`Read and follow the task in ${file}.`)
     expect(JSON.parse(readFileSync(file, 'utf8'))).toMatchObject({ ticket_id: ticket.id })
     expect(statSync(file).mode & 0o777).toBe(0o600)
+  })
+  it('measures the brief in bytes of UTF-8, as Linux limits one argument: a CJK brief within briefArgvMaxChars characters goes to the file, a longer ASCII one stays inline', async () => {
+    await start({ briefArgvMaxChars: 2000 })
+    const cjk = await accepted({ ...request('1', { cwd: directory() }), text: `@bot ${'整理日志。'.repeat(150)}` })
+    const ascii = await accepted({ ...request('5', { cwd: directory() }), text: `@bot ${'Tidy logs. '.repeat(90)}` })
+    const run = (ticket: Ticket) => fake.runs.find(recipe => recipe.labels['superagent.ticket'] === ticket.id)!
+    const file = join(h!.directory, 'briefs', `${stored(cjk.ticket).assignments[0]!.id}.json`)
+    expect(run(cjk.ticket).task).toBe(`Read and follow the task in ${file}.`)
+    const written = readFileSync(file, 'utf8')
+    expect(written.length).toBeLessThanOrEqual(2000)
+    expect(Buffer.byteLength(written)).toBeGreaterThan(2000)
+    const inline = run(ascii.ticket).task
+    expect(JSON.parse(inline)).toMatchObject({ ticket_id: ascii.ticket.id })
+    expect(inline.length).toBeGreaterThan(written.length)
+    expect(Buffer.byteLength(inline)).toBeLessThanOrEqual(2000)
   })
 })
 

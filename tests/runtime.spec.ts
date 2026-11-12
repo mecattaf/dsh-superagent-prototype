@@ -227,6 +227,8 @@ it('relays an explicit member mention as a candidate and creates the ticket, ack
   // The ticket's execution environment is fixed at accept time: its directory under the execution root, and the Sources' values from its Trigger.
   expect(ticket.execution!.directory).toBe(join(directory, 'work', ticket.execution!.name))
   expect(Object.fromEntries(runtime.ticketEnvironment(ticket).map(variable => [variable.key, variable.value]))).toMatchObject({ DSH_SUPERAGENT_DIR: ticket.execution!.directory, DSH_SUPERAGENT_NAME: ticket.execution!.name, DSH_SUPERAGENT_TICKET: ticket.id, DSH_SUPERAGENT_FEISHU_CHAT: CHAT, DSH_SUPERAGENT_GITHUB_REPOSITORY: 'acme/widgets', DSH_SUPERAGENT_GITHUB_ACCOUNT: 'agent-bot', DSH_SUPERAGENT_GITHUB_NUMBER: '' })
+  // The panel's Ticket page lists them, as the dsh executor gives them to the prepare command and the worker.
+  expect((await api('GET', `tickets/${ticket.id}`)).body).toMatchObject({ environment: runtime.ticketEnvironment(ticket) })
   expect(ticket.assignments).toEqual([expect.objectContaining({ state: 'running', startedAt: expect.any(String) })])
   expect(sessionId).toBe(`worker-${ticket.id}`)
   expect(runtime.store.threads.get(`feishu:${CHAT}:om_1`)?.subscriptions).toEqual([ticket.id])

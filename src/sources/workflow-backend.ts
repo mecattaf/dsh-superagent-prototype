@@ -1,5 +1,6 @@
 /** The interpreter's Backend over the Engine: a call becomes a Trigger, and its answer is the result of the Ticket accepted from it. */
 import { latestAssignment, threadKey, type Ticket } from '../core/index.ts'
+import { isNoAnswer } from '../executor/dshd-summary.ts'
 import { retryableFailure, type AgentCall, type AgentOutcome, type Backend } from '../workflow/index.ts'
 import type { SourceContext } from './host.ts'
 import type { WorkflowRun } from './workflow-store.ts'
@@ -16,11 +17,6 @@ export function parseJsonReply(text: string): { object?: unknown; text?: string 
   try { return { object: JSON.parse(stripFence(text)) } } catch { return { text } }
 }
 /**
- * The whole summary of a completed Ticket whose worker gave no final answer, as the dshd Executor words it for a unit that
- * exited 0 without one. It is not a result: the node has no answer.
- */
-export const NO_ANSWER = /^Unit [a-z0-9][a-z0-9_-]* exited 0\.$/
-/**
  * What a node's Ticket answers once it settled, or undefined while it has not: the summary of its `ready` report, verbatim,
  * once it ended completed; no answer when that summary only says the unit exited 0, which the interpreter, as for any empty
  * answer, tries again while attempts remain and otherwise journals as the node's null; or a failure once the Ticket ended
@@ -31,7 +27,7 @@ export function settle(ticket: Ticket | undefined, structured: boolean): AgentOu
   const report = latestAssignment(ticket)?.report
   const outcome = ticket.ended?.outcome
   if (outcome === 'completed' && report?.state === 'ready') {
-    if (NO_ANSWER.test(report.summary)) return { agentId: ticket.id }
+    if (isNoAnswer(report.summary)) return { agentId: ticket.id }
     return { ...structured ? parseJsonReply(report.summary) : { text: report.summary }, agentId: ticket.id }
   }
   const state = outcome ?? (report?.state === 'failed' || report?.state === 'blocked' ? report.state : undefined)
