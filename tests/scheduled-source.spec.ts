@@ -340,10 +340,12 @@ describe('scheduled Source', () => {
     const turn = () => { if (running) { turns += 1; setImmediate(turn) } }
     setImmediate(turn)
     const round = readInbox(h.ctx, h.inbox)
-    // Nothing is read, quarantined or moved before the round first yields.
-    expect(h.waiting()).toHaveLength(21)
+    // What the round has left in place by the time it first yields; checked after it ends, so a failure leaves no round running.
+    const before = h.waiting()
     expect(await round).toEqual({ read: 20, superseded: 0, invalid: 1, unreadable: 0, lastInvalid: 'x-bad.json' })
     running = false
+    // Nothing is read, quarantined or moved before the round first yields.
+    expect(before).toHaveLength(21)
     expect(turns).toBeGreaterThan(0)
     expect(h.done()).toHaveLength(20)
     expect(readdirSync(join(h.inbox, '.bad')).sort()).toEqual(['x-bad.json', 'x-bad.json.error'])
