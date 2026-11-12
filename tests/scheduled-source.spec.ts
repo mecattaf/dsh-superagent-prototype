@@ -1,6 +1,6 @@
 /** The scheduled Source: occurrence records in an inbox directory become Triggers, read on a real Store through a `SourceContext`. */
 import { Context } from '@deepseek-ai/cordis'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
@@ -185,6 +185,8 @@ describe('scheduled Source', () => {
     expect(h.store.triggers.disposition(idOf(at('02')))?.filtered).toBeUndefined()
     expect(await h.receive.mock.results[3]!.value).toBe('duplicate')
     expect(h.store.triggers.get(idOf(manual(h.work, RUN_A)))?.meta).not.toHaveProperty('superseded')
+    // The superseded schedule records count toward the live schedule record only, never toward a manual run of the item.
+    expect(h.store.triggers.get(idOf(manual(h.work, RUN_A)))?.meta).toMatchObject({ missed: 0 })
     expect(h.store.triggers.get(idOf(record(h.work, { item: 'weekly-report', due: '2026-11-11T00:00:00.000Z' })))?.meta).toMatchObject({ missed: 0 })
     expect(h.done()).toEqual(['a.json', 'b.json', 'c-copy.json', 'c.json', 'd.json', 'e.json'])
     // A filtered Trigger opens no Thread; each stored occurrence has its own, all labelled with their item.
@@ -192,6 +194,39 @@ describe('scheduled Source', () => {
     expect(h.store.threads.get('scheduled:b')).toBeUndefined()
     expect(h.store.threads.get('scheduled:c-copy')?.meta).toMatchObject({ label: LABEL, facts: { due: { value: '2026-11-12T02:00:00.000Z' } } })
     expect(h.store.threads.get('scheduled:d')?.meta).toMatchObject({ label: LABEL })
+  })
+
+  it('supersedes only within one item of one working directory', async () => {
+    const h = host()
+    const other = join(h.work, 'other')
+    mkdirSync(other)
+    drop(h.inbox, 'a.json', record(h.work, { due: '2026-11-12T01:00:00.000Z' }))
+    drop(h.inbox, 'b.json', record(other, { due: '2026-11-12T02:00:00.000Z' }))
+    expect(await readInbox(h.ctx, h.inbox)).toEqual({ read: 2, superseded: 0, invalid: 0, unreadable: 0 })
+    expect(h.store.triggers.get(idOf(record(h.work, { due: '2026-11-12T01:00:00.000Z' })))?.meta).toMatchObject({ cwd: h.work, missed: 0 })
+  })
+
+  it('writes the reason of a record whose cwd holds a line break on one line', async () => {
+    const h = host()
+    drop(h.inbox, 'a.json', record(`${h.work}/two\nlines`))
+    expect(await readInbox(h.ctx, h.inbox)).toMatchObject({ invalid: 1 })
+    expect(readFileSync(join(h.inbox, '.bad', 'a.json.error'), 'utf8')).toBe(`cwd is not a directory: ${h.work}/two lines\n`)
+  })
+
+  it('takes a record its producer withdrew while it was received as read, and ends the round at a record it cannot move into .done', async () => {
+    const h = host()
+    drop(h.inbox, 'a.json', record(h.work))
+    h.receive.mockImplementationOnce(async trigger => { rmSync(join(h.inbox, 'a.json')); return h.engine.receive(trigger) })
+    expect(await readInbox(h.ctx, h.inbox)).toMatchObject({ read: 1 })
+    expect(h.store.triggers.get(idOf(record(h.work)))).toBeDefined()
+    // A .done the move cannot write is a fault for a person, not a record read again in silence every round.
+    drop(h.inbox, 'b.json', record(h.work, { item: 'weekly-report' }))
+    chmodSync(join(h.inbox, '.done'), 0o500)
+    try { await expect(readInbox(h.ctx, h.inbox)).rejects.toThrow(/EACCES|EPERM/) } finally { chmodSync(join(h.inbox, '.done'), 0o700) }
+    expect(h.waiting()).toEqual(['b.json'])
+    expect(await readInbox(h.ctx, h.inbox)).toMatchObject({ read: 1 })
+    expect(await h.receive.mock.results.at(-1)!.value).toBe('duplicate')
+    expect(h.done()).toEqual(['b.json'])
   })
 
   it('assesses a later occurrence of an item on its own Thread while a ticket of an earlier one is open, and gives that ticket nothing', async () => {
@@ -420,6 +455,27 @@ describe('scheduled plugin entry', () => {
     expect(h.receive).not.toHaveBeenCalled()
   })
 
+  it('stops reading and reports the error when its inbox lock is lost, and disposes cleanly', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const h = host({ registered: false })
+      drop(h.inbox, 'a.json', record(h.work))
+      const stop = mount(h)
+      await vi.waitFor(() => { expect(h.done()).toEqual(['a.json']) })
+      // Another process takes the lock away: proper-lockfile finds out when it next refreshes the lock, and calls onCompromised.
+      rmSync(`${h.inbox}.lock`, { recursive: true })
+      await vi.advanceTimersByTimeAsync(15_000)
+      await vi.waitFor(() => { expect(h.board.all.scheduled).toMatchObject({ state: 'error', detail: expect.stringContaining('The inbox lock was lost') }) })
+      drop(h.inbox, 'b.json', record(h.work, { item: 'weekly-report' }))
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(h.waiting()).toEqual(['b.json'])
+      expect(h.receive).toHaveBeenCalledOnce()
+      // The lost lock is already released, and the Source says why it stopped rather than that the release failed.
+      expect(h.board.all.scheduled).toMatchObject({ state: 'error', detail: expect.stringContaining('The inbox lock was lost') })
+      await stop()
+    } finally { vi.useRealTimers() }
+  })
+
   it('reports a round that fails as an error at once, and ready again after the next round succeeds', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
@@ -432,6 +488,11 @@ describe('scheduled plugin entry', () => {
       await vi.advanceTimersByTimeAsync(10_000)
       await vi.waitFor(() => { expect(h.board.all.scheduled).toMatchObject({ state: 'ready', detail: 'Read 1; superseded 0; invalid 0' }) })
       expect(h.done()).toEqual(['a.json'])
+      // A round that succeeded starts the count again.
+      drop(h.inbox, 'b.json', record(h.work, { item: 'weekly-report' }))
+      h.receive.mockRejectedValueOnce(new Error('database is locked'))
+      await vi.advanceTimersByTimeAsync(10_000)
+      await vi.waitFor(() => { expect(h.board.all.scheduled).toMatchObject({ state: 'error', code: 'pollFailures', values: { count: '1' } }) })
       await stop()
     } finally { vi.useRealTimers() }
   })
