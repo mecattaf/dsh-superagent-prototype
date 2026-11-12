@@ -3,26 +3,32 @@ import type { Volatile } from '@deepseek-ai/cordis'
 import { createHash, randomBytes } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import { UserError, key, threadKey, type Thread, type Ticket } from '../core/index.ts'
+import { UserError, key, reasonText, threadKey, type Ticket } from '../core/index.ts'
 import { KV } from '../kv.ts'
 import { extractMeta, runWorkflow, type LoadedJournal, type RunResult, type WorkflowSource } from '../workflow/index.ts'
 import { health, sourceContext, type SourceContext, type SourceHost } from './host.ts'
-import { retriedOnResume, TicketBackend, ticketOf, TicketWaiter } from './workflow-backend.ts'
+import { retriedOnResume, TicketBackend, ticketOf, TicketWaiter, untaken, type Waited } from './workflow-backend.ts'
 import { KvJournal, type WorkflowRun, type WorkflowState } from './workflow-store.ts'
 import { MAX_ATTEMPTS, nodeThread, nodeTriggerId, SOURCE } from './workflow-trigger.ts'
 
+/** What the workflow Source logs through: the plugin's Cordis logger. */
+export interface FloorLogger { info(format: string, ...args: unknown[]): void; warn(format: string, ...args: unknown[]): void }
 /** The workflow Source's machine settings, as the plugin's Config declares them; `pollMs` is read at each use. */
 export interface FloorConfig { pollMs: Volatile<number>; concurrency: number; maxAttempts: number; pair: string }
 export interface StartRequest { script: string; cwd: string; args?: unknown; pair?: string; trigger_id?: string }
 export interface StartResult { run_id: string; state: 'started' | 'already-started'; script_sha256: string; name: string }
 /**
- * Where a node is: `waiting` before its Trigger exists, `offered` while it waits for or is in an Eval, `held` once an Eval
- * decided it without a Ticket, `ticket` while its Ticket works, and `done` or `null` once its result or failure is journaled.
- * A node answered from the journal on a resume is `done` or `null` as its line says. Its latest Trigger and its Ticket, when
- * the Store has them, come with every state but `waiting`.
+ * Where a node is: `waiting` before its Trigger exists, `offered` while it waits for or is in an Eval, `held` once the main
+ * Session or a person decided it without a Ticket, `unavailable` once its Eval ended without an assessment, as when the main
+ * Session did not answer in time, `ticket` while its Ticket works, and `done` or `null` once its result or failure is
+ * journaled. A held or unavailable node waits, and is offered again once its Trigger is requeued. A node answered from the
+ * journal on a resume is `done` or `null` as its line says. Its latest Trigger and its Ticket, when the Store has them, come
+ * with every state but `waiting`; a held or unavailable node also gives when its Decision was recorded and why.
  */
-export type NodeState = 'waiting' | 'offered' | 'held' | 'ticket' | 'done' | 'null'
-export interface NodeStatus { node: string; label?: string; phase?: string; trigger_id?: string; ticket_id?: string; state: NodeState }
+export type NodeState = 'waiting' | 'offered' | 'held' | 'unavailable' | 'ticket' | 'done' | 'null'
+export interface NodeStatus {
+  node: string; label?: string; phase?: string; trigger_id?: string; ticket_id?: string; state: NodeState; decided_at?: string; reason?: string
+}
 export interface RunStatus {
   run_id: string; name: string; state: WorkflowRun['state']; cwd: string; started_at: string; ended_at?: string; error?: string; nodes: NodeStatus[]
 }
@@ -67,10 +73,6 @@ function latestAttempt(source: Pick<SourceContext, 'triggers'>, run: string, nod
   }
   return undefined
 }
-function nodeState(thread: Thread | undefined, trigger: string, ticket: Ticket | undefined): NodeState {
-  if (ticket) return 'ticket'
-  return thread && (thread.pending.includes(trigger) || thread.evaluating?.triggerIds.includes(trigger)) ? 'offered' : 'held'
-}
 
 /**
  * The workflow Source at work: it starts runs on request, drives each one with the interpreter, journals it in the Store, and
@@ -81,12 +83,12 @@ export class WorkflowFloor {
   private waiter: TicketWaiter | undefined
   private readonly stopped = new AbortController()
   private readonly driving = new Set<string>()
-  constructor(private readonly host: SourceHost, private readonly config: FloorConfig) {}
+  constructor(private readonly host: SourceHost, private readonly config: FloorConfig, private readonly logger?: FloorLogger) {}
 
   /** Waits for setup, then resumes every run that had not ended; it resolves once they are under way, not once they end. */
   async start(): Promise<void> {
     const source = this.source = sourceContext(this.host, { kind: SOURCE, health: [SOURCE] })
-    this.waiter = new TicketWaiter(source, () => this.config.pollMs.get())
+    this.waiter = new TicketWaiter(source, () => this.config.pollMs.get(), node => { this.observed(node) })
     // A stop while setup is still running ends the start at once, so the plugin's disposal never waits for setup.
     const stopped = new Promise<void>(resolve => { this.stopped.signal.addEventListener('abort', () => { resolve() }, { once: true }) })
     await Promise.race([source.ready, stopped])
@@ -202,13 +204,32 @@ export class WorkflowFloor {
       if (journal.results.has(started.key)) return [{ ...traced, state: 'done' }]
       if (journal.lastFailed.has(started.key)) return [{ ...traced, state: 'null' }]
       if (!latest) return [{ ...head, state: 'waiting' }]
-      return [{ ...traced, state: nodeState(source.threads.get(latest.thread), latest.trigger, ticket) }]
+      if (ticket) return [{ ...traced, state: 'ticket' }]
+      const { state, decision } = untaken(source, latest.trigger, latest.thread)
+      return [{ ...traced, state, ...decision && { decided_at: decision.at, reason: reasonText(decision.reason) } }]
     })
     return { run_id: run.id, name: run.name, state: run.state, cwd: run.cwd, started_at: run.startedAt,
       ...run.endedAt !== undefined && { ended_at: run.endedAt }, ...run.error !== undefined && { error: run.error }, nodes }
   }
+  /**
+   * A waiting node came to be held or unavailable, or left that state: the log says which once, and the health counts them, so
+   * a node that waits on the main Session's absence reads apart from one it decided to hold. Neither is offered again here.
+   */
+  private observed({ trigger, state, decision }: Waited): void {
+    if (state) {
+      const meta = this.source?.triggers.get(trigger)?.meta ?? {}
+      const node = String(meta.label ?? meta.node ?? trigger), why = decision ? reasonText(decision.reason) : 'no Decision recorded'
+      const waits = 'it waits until its trigger %s is requeued'
+      if (state === 'unavailable') this.logger?.warn(`workflow run %s: node %s was not assessed (%s); ${waits}`, meta.run, node, why, trigger)
+      else this.logger?.info(`workflow run %s: node %s is held (%s); ${waits}`, meta.run, node, why, trigger)
+    }
+    this.reportHealth()
+  }
   private reportHealth(): void {
     const running = this.driving.size, waiting = this.waiter?.size ?? 0
-    this.source?.report(SOURCE, { state: 'ready', detail: `${running} runs under way, ${waiting} nodes waiting for their tickets`, at: new Date().toISOString() })
+    const held = this.waiter?.count('held') ?? 0, unassessed = this.waiter?.count('unavailable') ?? 0
+    const decided = [...held ? [`${held} held`] : [], ...unassessed ? [`${unassessed} not assessed (the main Session was unavailable)`] : []]
+    const detail = `${running} runs under way, ${waiting} nodes waiting for their tickets${decided.length ? `: ${decided.join(', ')}` : ''}`
+    this.source?.report(SOURCE, { state: 'ready', detail, at: new Date().toISOString() })
   }
 }

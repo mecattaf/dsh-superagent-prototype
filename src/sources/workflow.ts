@@ -48,7 +48,7 @@ function checked(config: WorkflowConfig): WorkflowConfig {
 export function apply(ctx: Context, config: WorkflowConfig): void {
   checked(config)
   ctx.effect(() => {
-    const floor = new WorkflowFloor(ctx.orchestrator, config)
+    const floor = new WorkflowFloor(ctx.orchestrator, config, ctx.logger)
     const unregister = ctx.orchestrator.sources.register(workflowKind(floor))
     // DSH ends its process on an unhandled rejection, so a failure that escapes the start becomes the Source's health.
     const running = floor.start().catch((error: unknown) => { ctx.orchestrator.context({ kind: SOURCE, health: [SOURCE] }).report(SOURCE, { state: 'error', detail: String(error) }) })
