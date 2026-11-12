@@ -16,7 +16,7 @@ import { KV } from '../../src/kv.ts'
 import { SettingsSchema, settingsPolicy } from '../../src/policy.ts'
 import { SourceRegistry } from '../../src/sources/registry.ts'
 import { workflowKind } from '../../src/sources/workflow.ts'
-import { WorkflowFloor, type FloorConfig } from '../../src/sources/workflow-floor.ts'
+import { WorkflowRuns, type RunsConfig } from '../../src/sources/workflow-runs.ts'
 import { KvJournal } from '../../src/sources/workflow-store.ts'
 import { testDeployment } from './deployment.ts'
 
@@ -32,11 +32,14 @@ export const newDirectory = (): string => mkdtempSync(join(tmpdir(), 'workflow-'
 /**
  * One process's worth of the workflow Source on the Store in `directory`, with `slots` workers. `settings` replaces the seeded
  * settings of a new Store, and `config` the Source's machine settings, polling every 5 ms unless it names its own `pollMs`.
+ * `ready` and `configured` stand for setup, which has ended and resolved the accounts unless they say otherwise.
  */
-export function workflowHost(directory: string, options: { slots?: number; config?: Partial<FloorConfig>; now?: () => string; settings?: unknown } = {}) {
+export function workflowHost(directory: string, options: { slots?: number; config?: Partial<RunsConfig>; now?: () => string; settings?: unknown
+  ready?: Promise<void>; configured?: () => boolean } = {}) {
   const store = new Store(join(directory, 'orchestrator.sqlite'))
   if (store.get(KV.settings.revision) === undefined) store.saveSettings(SettingsSchema.parse(options.settings ?? WORKFLOW_SETTINGS))
-  const sources = new SourceRegistry(() => store.settings(), new HealthBoard())
+  const board = new HealthBoard()
+  const sources = new SourceRegistry(() => store.settings(), board)
   const candidates: Candidate[] = []
   const launches: string[] = [], pending: { ticket: string; assignment: string }[] = [], running = new Set<string>()
   type Call = (ticket: Ticket, assignment: Assignment) => void
@@ -61,9 +64,14 @@ export function workflowHost(directory: string, options: { slots?: number; confi
   }
   const receive = vi.fn<(trigger: Trigger) => ReceiveResult | Promise<ReceiveResult>>(trigger => { const result = engine.receive(trigger); engine.evaluateDue(); return result })
   const deps: SourceContextDeps = { store, engine, outbox: { send: () => {} }, commands: new Commands(() => testDeployment(), {}, new AbortController().signal),
-    sources, deployment: testDeployment(), ready: Promise.resolve(), configured: () => true, receive }
+    sources, deployment: testDeployment(), ready: options.ready ?? Promise.resolve(), configured: options.configured ?? (() => true), receive }
   const host = { sources, context: (kind: { kind: string; health: readonly string[] }) => sourceContextOf(deps, kind) }
-  const floor = new WorkflowFloor(host, { pollMs: { get: () => 5 }, concurrency: 16, maxAttempts: 1, pair: '', ...options.config })
+  // The Ticket waiter reads pollMs each time it schedules a poll, so counting the reads counts the polls it scheduled.
+  let polls = 0
+  const logger = { info: vi.fn<(format: string, ...args: unknown[]) => void>(), warn: vi.fn<(format: string, ...args: unknown[]) => void>() }
+  // A test clock may run hours behind the wall clock the Source's threshold reads, so only a test that sets the threshold has one.
+  const floor = new WorkflowRuns(host, { pollMs: { get: () => { polls += 1; return 5 } }, offeredWarnSeconds: { get: () => Infinity }, concurrency: 16,
+    maxAttempts: 1, pair: '', ...options.config }, logger)
   const unregister = sources.register(workflowKind(floor))
   const started = floor.start()
 
@@ -95,15 +103,15 @@ export function workflowHost(directory: string, options: { slots?: number; confi
     launch()
     return ended
   }
-  /** Stops this host as a killed process would leave the Store: the floor parks its calls and the Store closes. */
+  /** Stops this host as a killed process would leave the Store: the Source parks its calls and the Store closes. */
   async function stop() {
     unregister(); floor.stop(); await started; store.close()
   }
   const context = host.context({ kind: 'workflow', health: ['workflow'] })
   const run = (id: string) => store.get(KV.workflow.run(id))
   const journal = (id: string) => KvJournal.text(context, id)
-  return { store, engine, sources, floor, executor, receive, candidates, offered, accept, hold, report, launch, launches, stop, run, journal,
-    context, label, started }
+  return { store, engine, sources, board, logger, floor, executor, receive, candidates, offered, accept, hold, report, launch, launches, stop, run,
+    journal, context, label, started, polls: () => polls }
 }
 export type WorkflowHost = ReturnType<typeof workflowHost>
 /** Requeues a held node's Trigger, as `orchestrator_trigger_requeue` does, and runs the pass that offers it again. */

@@ -1,4 +1,4 @@
-/** The thin dshd client: argv for `dshd run`, `get`, `wait`, `read` and `stop`, and the JSON they print. */
+/** The thin dshd client: argv for `dshd run`, `get`, `wait`, `read`, `stop` and `rm` (and `rm --help`), and the JSON they print. */
 import type { SubprocessOutputReader, SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { z } from 'zod'
 
@@ -13,7 +13,10 @@ export type DshdRefusal = { refused: string; exit: number; message: string }
 export type DshdRunResult = ({ outcome: 'created' | 'started' | 'already-running' } & DshdStatus) | DshdRefusal
 export type DshdWaitResult = { outcome: 'ended'; exitCode?: number; signal?: number | null; reason?: string } | { outcome: 'still-running' }
 export interface DshdRead { invocationId: string; complete: boolean; lines: string[] }
-/** The thin dshd client. Production: DshdCli over ctx.subprocess. Tests: FakeDshd. Exit 7 throws DshdUnavailable. */
+/**
+ * The thin dshd client. Production: DshdCli over ctx.subprocess. Tests: FakeDshd. Exit 7 throws DshdUnavailable; a call that ended
+ * before dshd answered throws DshdUnanswered.
+ */
 export interface DshdPort {
   run(recipe: DshdRecipe, signal: AbortSignal): Promise<DshdRunResult>
   get(name: string, signal: AbortSignal): Promise<DshdStatus | 'not-found'>
@@ -21,9 +24,22 @@ export interface DshdPort {
   /** The newest `lines` journal lines of the unit's current or last run (`-n`), by default dshd's 200. */
   read(name: string, signal: AbortSignal, lines?: number): Promise<DshdRead | 'not-found'>
   stop(name: string, signal: AbortSignal): Promise<DshdStatus | 'not-found'>
+  /**
+   * Removes an instance that does not run and answers its status before the removal; dshd refuses a running one. DSH's Sessions
+   * stay. With `invocationId` (`dshd rm --invocation`), dshd removes it only when its last run was that one, and answers its
+   * refusal otherwise: `not-running` (exit 5) for another run or none, `instance-running` (exit 4) while that run still runs.
+   */
+  rm(name: string, signal: AbortSignal, invocationId?: string): Promise<DshdStatus | 'not-found' | DshdRefusal>
+  /** Whether this dshd's `rm` takes `--invocation ID`; a dshd before it removes by name only. */
+  removesByInvocation(signal: AbortSignal): Promise<boolean>
 }
 /** dshd cannot reach systemd or its own parts (exit 7: systemd-unavailable, tool-missing, template-missing); a later try may succeed. */
 export class DshdUnavailable extends Error {}
+/**
+ * A call that its timeout, a signal or the caller's abort ended before dshd answered. dshd may have acted all the same, as a
+ * `run --bg` that created and started its unit; asking again tells.
+ */
+export class DshdUnanswered extends Error {}
 
 /** The invocation a status names: the current run's, or the last run's once the unit ended (dshd then reports `invocationId: null`). */
 export const invocationOf = (status: Pick<DshdStatus, 'invocationId' | 'lastRun'>): string | undefined =>
@@ -43,9 +59,9 @@ const Refusal = z.object({ error: z.object({ kind: z.string(), message: z.string
 
 /** One finished dshd call: its exit code (null when a signal or our abort ended it), stdout and stderr. */
 interface Exit { exitCode: number | null; stdout: string; stderr: string }
-/** Calls that may end before dshd answers, such as one cut by the host's stop; `wait` gets its own timeout on top. */
+/** Calls that may end before dshd answers, such as one cut by the host's stop; `wait` gets its own timeout on top. Fixed: a bound on a local call, not a tunable. */
 const CALL_TIMEOUT_MS = 60_000
-/** `read --json` may carry a long stretch of a run's journal, so it may be large. */
+/** `read --json` may carry a long stretch of a run's journal, so it may be large. Fixed: a memory bound on one reply, not a tunable. */
 const READ_MAX_BYTES = 1 << 24
 const lastLine = (text: string): string => text.trim().split('\n').at(-1) ?? ''
 function json(text: string): unknown {
@@ -57,6 +73,7 @@ function json(text: string): unknown {
  * environment (`env -i`) holding only the recipe's entries, which dshd captures for every later start of the unit.
  */
 export class DshdCli implements DshdPort {
+  private rmByInvocation?: boolean
   constructor(private readonly subprocess: SubprocessRuntime, private readonly command: string) {}
   async run(recipe: DshdRecipe, signal: AbortSignal): Promise<DshdRunResult> {
     const env = Object.entries(recipe.env).sort(([a], [b]) => a.localeCompare(b)).map(([name, value]) => `${name}=${value}`)
@@ -90,6 +107,22 @@ export class DshdCli implements DshdPort {
     if (exit.exitCode !== 0) return this.missing('stop', name, exit)
     return this.parse('stop', name, Status, exit)
   }
+  async rm(name: string, signal: AbortSignal, invocationId?: string): Promise<DshdStatus | 'not-found' | DshdRefusal> {
+    const argv = [this.command, 'rm', '--json', ...invocationId === undefined ? [] : ['--invocation', invocationId], name]
+    const exit = await this.call(argv, '/', signal)
+    // `--invocation` refuses with exit 5 (another run, or none) or exit 4 (that run still runs), and the instance stays.
+    if (invocationId !== undefined && (exit.exitCode === 5 || exit.exitCode === 4)) return this.refusal('rm', name, exit)
+    if (exit.exitCode !== 0) return this.missing('rm', name, exit)
+    return this.parse('rm', name, Status, exit)
+  }
+  /** Read once from `dshd rm --help`, whose usage line names `[--invocation ID]` where dshd takes it; a call cut off is read again. */
+  async removesByInvocation(signal: AbortSignal): Promise<boolean> {
+    if (this.rmByInvocation !== undefined) return this.rmByInvocation
+    const exit = await this.call([this.command, 'rm', '--help'], '/', signal)
+    const takes = exit.exitCode === 0 && /\brm \[--invocation ID\]/.test(exit.stdout)
+    if (exit.exitCode !== null) this.rmByInvocation = takes
+    return takes
+  }
   private async call(argv: string[], cwd: string, signal: AbortSignal, timeoutMs = CALL_TIMEOUT_MS, maxBytes = 1 << 20): Promise<Exit> {
     const handle = this.subprocess.spawn({ argv, cwd, graceMs: 2000, signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
       stdio: { stdin: 'ignore', stdout: { maxBytes }, stderr: { maxBytes: 1 << 16 } } })
@@ -97,13 +130,12 @@ export class DshdCli implements DshdPort {
     const read = (reader: SubprocessOutputReader | undefined): string => reader?.readFrom(0).text ?? ''
     return { exitCode, stdout: read(handle.collected.stdout), stderr: read(handle.collected.stderr) }
   }
-  /** dshd's refusal of `run`, or DshdUnavailable for exit 7; anything that is not dshd's error object throws. */
+  /** dshd's refusal of `run`, DshdUnavailable for exit 7 or DshdUnanswered for no answer; anything that is not dshd's error object throws. */
   private refusal(verb: string, name: string, exit: Exit): DshdRefusal {
     const error = Refusal.safeParse(json(lastLine(exit.stderr)))
     if (exit.exitCode === 7) throw new DshdUnavailable(`dshd ${verb} ${name}: ${error.success ? `${error.data.error.kind}: ${error.data.error.message}` : exit.stderr.trim()}`)
-    if (exit.exitCode === null || !error.success) {
-      throw new Error(`dshd ${verb} ${name} ${exit.exitCode === null ? 'was stopped before it finished' : `exited with ${exit.exitCode}`}: ${exit.stderr.trim().slice(0, 500)}`)
-    }
+    if (exit.exitCode === null) throw new DshdUnanswered(`dshd ${verb} ${name} was stopped before it finished: ${exit.stderr.trim().slice(0, 500)}`)
+    if (!error.success) throw new Error(`dshd ${verb} ${name} exited with ${exit.exitCode}: ${exit.stderr.trim().slice(0, 500)}`)
     return { refused: error.data.error.kind, exit: exit.exitCode, message: error.data.error.message }
   }
   /** `not-found` (exit 3) for a verb that names an instance; any other refusal throws. */

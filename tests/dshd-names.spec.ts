@@ -20,9 +20,9 @@ const ticketId = (n: number) => key('ticket', String(n))
 describe('unit names', () => {
   it('names the kth Assignment <prefix>-<execution name>-a<k>, the same name each time, and dshd accepts it', () => {
     const id = ticketId(1)
-    expect(unitName('sa', executionName('journal-day', id), id, 1)).toBe(`sa-journal-day-${id.slice(0, 12)}-a1`)
-    expect(unitName('sa', executionName('journal-day', id), id, 2)).toBe(`sa-journal-day-${id.slice(0, 12)}-a2`)
-    expect(unitName('sa', executionName('journal-day', id), id, 1)).toBe(unitName('sa', executionName('journal-day', id), id, 1))
+    expect(unitName('sa', executionName('nightly-digest', id), id, 1)).toBe(`sa-nightly-digest-${id.slice(0, 12)}-a1`)
+    expect(unitName('sa', executionName('nightly-digest', id), id, 2)).toBe(`sa-nightly-digest-${id.slice(0, 12)}-a2`)
+    expect(unitName('sa', executionName('nightly-digest', id), id, 1)).toBe(unitName('sa', executionName('nightly-digest', id), id, 1))
     // The longest prefix and execution name leave room for 999 Assignments within 61 characters.
     expect(LONGEST).toHaveLength(32)
     const longest = unitName('abcdefghij', executionName(LONGEST, id), id, 999)
@@ -33,13 +33,13 @@ describe('unit names', () => {
   it('falls back to <prefix>-t<first 12 characters of the ticket id>-a<k> when the Ticket has no execution name or dshd would refuse the one it makes', () => {
     const id = ticketId(2)
     const fallback = `sa-t${id.slice(0, 12)}-a3`
-    for (const name of [undefined, '', 'Journal-Day', 'journal.day', 'journal day', 'x'.repeat(58)]) {
+    for (const name of [undefined, '', 'Nightly-Digest', 'nightly.digest', 'nightly digest', 'x'.repeat(58)]) {
       expect(unitName('sa', name, id, 3)).toBe(fallback)
     }
     expect(dshdAccepts(fallback)).toBe(true)
   })
   it('never gives two Assignments the same name, and dshd accepts every name', () => {
-    const words = ['fix', 'journal-day', 'fix-regression', 'nightly-sweep-of-logs', 'a', LONGEST]
+    const words = ['fix', 'nightly-digest', 'fix-regression', 'nightly-sweep-of-logs', 'a', LONGEST]
     for (const prefix of ['sa', 'x', 'abcdefghij']) {
       const names = new Set<string>()
       let count = 0

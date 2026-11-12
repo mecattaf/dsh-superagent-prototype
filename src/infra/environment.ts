@@ -124,11 +124,6 @@ export function applyEnvironment(variables: Record<string, string | undefined>, 
   return () => { apply(previous) }
 }
 
-/** The values of `names` in this process's environment, for a child that starts from an empty one; names that are not set are left out. */
-export function inherited(names: readonly string[], env: NodeJS.ProcessEnv = process.env): Record<string, string> {
-  return Object.fromEntries(names.flatMap(name => env[name] === undefined ? [] : [[name, env[name]]]))
-}
-
 /** Spawns a command through the DSH subprocess runtime, which strips credential-shaped environment variables. */
 export async function runAsWorker(subprocess: SubprocessRuntime, argv: string[], cwd: string, signal: AbortSignal, env?: Record<string, string>): Promise<string> {
   const handle = subprocess.spawn({ argv, cwd, graceMs: 2000, signal, ...env ? { env } : {}, stdio: { stdin: 'ignore', stdout: { maxBytes: 1 << 20 }, stderr: { maxBytes: 1 << 16 } } })

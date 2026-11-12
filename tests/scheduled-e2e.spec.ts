@@ -12,11 +12,11 @@ import { SettingsSchema } from '../src/policy.ts'
 import * as scheduled from '../src/sources/scheduled.ts'
 import { Config, inboxOf, readInbox, scheduledKind, scheduledTrigger, type OccurrenceRecord } from '../src/sources/scheduled.ts'
 import { deferred, waitUntil } from './fixtures/async.ts'
-import { acceptCandidate, later as pass, runArgv, startFloor, type FloorOptions } from './fixtures/dshd-floor.ts'
+import { acceptCandidate, later as pass, runArgv, startDshdHost, type DshdHostOptions } from './fixtures/dshd-host.ts'
 import { FakeDshd, runLines } from './fixtures/fake-dshd.ts'
 import type { Host } from './fixtures/host.ts'
 
-/** The rule a deployment seeds for scheduled occurrences, as scheduled-source §10 words its first sentence. */
+/** The rule a deployment seeds for scheduled occurrences (docs/006-deployment.md, Scheduled occurrences, Admission). */
 const RULE = { id: 'scheduled', name: 'Scheduled items', enabled: true,
   instruction: 'A Trigger of the scheduled Source whose first line starts with [Scheduled occurrence] or [Scheduled item, run now] is an implementation request by the owner of the working directory it names.' }
 const TEXT = 'Summarize the pull requests merged yesterday into notes/digest.md, then commit it.'
@@ -41,9 +41,9 @@ async function mount(): Promise<void> {
   unmount = async () => { for (const dispose of disposers.reverse()) await dispose() }
   await waitUntil(() => h!.runtime.health.scheduled?.state === 'ready')
 }
-/** The floor with the `scheduled` rule and admission cell seeded and, unless `mounted: false`, the plugin mounted. */
-async function start(options: FloorOptions & { mounted?: false } = {}): Promise<Host> {
-  ({ h, fake } = await startFloor({ rule: RULE, source: 'scheduled', row: 'occurrence' }, options))
+/** The host with the `scheduled` rule and admission cell seeded and, unless `mounted: false`, the plugin mounted. */
+async function start(options: DshdHostOptions & { mounted?: false } = {}): Promise<Host> {
+  ({ h, fake } = await startDshdHost({ rule: RULE, source: 'scheduled', row: 'occurrence' }, options))
   if (options.mounted !== false) await mount()
   return h
 }
@@ -101,7 +101,7 @@ describe('scheduled occurrences on the dshd executor', () => {
     expect(h!.runtime.store.tickets.list()).toHaveLength(1)
     expect(ticket.mandate).toMatchObject({ strength: 'inferred', basis: expect.objectContaining({ rules: ['scheduled'] }) })
 
-    // One unit, run exactly as executor.md §5 builds it.
+    // One unit, run exactly as `DshdCli.run` builds it.
     expect(fake.runs).toHaveLength(1)
     const assignment = stored(ticket).assignments[0]!
     const name = `sa-nightly-digest-${ticket.id.slice(0, 12)}-a1`
@@ -201,7 +201,7 @@ describe('scheduled occurrences on the dshd executor', () => {
     for (const before of ['runs on', 'ended'] as const) {
       await start()
       const cwd = agency()
-      // The CLI's answer to the first `dshd run` never arrives: the floor crashes after dshd created the unit.
+      // The CLI's answer to the first `dshd run` never arrives: the host crashes after dshd created the unit.
       const gate = deferred()
       fake.hold = gate.promise
       const [id] = drop(record(cwd))
@@ -209,12 +209,12 @@ describe('scheduled occurrences on the dshd executor', () => {
       const ticket = await accept(id!, 'nightly-digest', { wait: false })
       await waitUntil(() => fake.runs.length === 1)
       if (before === 'ended') fake.end(fake.runs[0]!.name, { lines: runLines('session-1', 'Digest written.') })
-      // The call in flight still waits for the gate; the restarted floor's call does not.
+      // The call in flight still waits for the gate; the restarted host's call does not.
       fake.hold = undefined
       await restart()
       await h!.runtime.idle()
       await later()
-      // The restarted floor launched the same Assignment again with its frozen recipe, byte for byte.
+      // The restarted host launched the same Assignment again with its frozen recipe, byte for byte.
       expect(fake.runs).toHaveLength(2)
       expect(fake.runs[1]).toEqual(fake.runs[0])
       expect(fake.instances.size).toBe(1)
@@ -255,7 +255,7 @@ describe('scheduled occurrences on the dshd executor', () => {
   })
 
   it('T-SETUP-noaccount: under executor dshd with no GitHub repository the runtime reaches ready, configured() is true, and the scheduled Source leaves setupPending', async () => {
-    // A floor with no account Source at all: no GitHub repository, no Feishu bot.
+    // A deployment with no account Source at all: no GitHub repository, no Feishu bot.
     await start({ seed: store => { store.saveSettings(SettingsSchema.parse({ ...store.settings(), sources: {} })) } })
     expect(h!.runtime.configured()).toBe(true)
     expect(h!.runtime.deployment).toMatchObject({ repository: '', github: { cli: '', login: '', noreply: '' } })
@@ -268,6 +268,41 @@ describe('scheduled occurrences on the dshd executor', () => {
     await round()
     await accept(id!)
     expect(fake.runs.map(recipe => recipe.cwd)).toEqual([cwd])
+  })
+
+  it('lists no execution variables on a scheduled Ticket\'s page under executor dshd, whose unit receives none of them', async () => {
+    await start()
+    const [id] = drop(record(agency()))
+    await round()
+    const ticket = await accept(id!)
+    // The Source still declares its variables; they stay in this process, and the brief carries the occurrence.
+    expect(h!.runtime.ticketEnvironment(stored(ticket)).map(variable => variable.key)).toContain('DSH_SUPERAGENT_SCHEDULED_ITEM')
+    expect(Object.keys(fake.runs[0]!.env).filter(key => key.startsWith('DSH_SUPERAGENT_'))).toEqual([])
+    expect(await h!.api('GET', `tickets/${ticket.id}`)).toMatchObject({ status: 200, body: { environment: [] } })
+  })
+
+  it('an occurrence the main Session never decides, as when its orchestrator tools fail, is offered three times, then recorded unavailable (timeout) and offered no more; the same record read again starts no Eval', async () => {
+    await start()
+    const cwd = agency()
+    const [id] = drop(record(cwd))
+    await round()
+    const thread = threadKey(h!.runtime.store.triggers.get(id!)!.threads[0]!)
+    expect(h!.candidates()).toEqual([id])
+    // Each look comes past the Eval's deadline: the first two expiries queue the Trigger again, the third records it.
+    for (let look = 0; look < 6; look++) await later()
+    expect(h!.candidates()).toEqual([id, id, id])
+    expect(h!.runtime.store.decisions.byThread(thread)).toEqual([expect.objectContaining({ kind: 'unavailable', reason: [{ code: 'timeout' }] })])
+    expect(h!.runtime.engine.candidate(id!)).toBeUndefined()
+    expect(h!.runtime.store.threads.get(thread)).toMatchObject({ pending: [] })
+    // The producer drops the same record again, as a crash between its write and the move to .done leaves it: equal records
+    // give equal Trigger ids, so the Source receives a duplicate and the main Session is not offered it a fourth time.
+    expect(drop(record(cwd))).toEqual([id])
+    await round()
+    await later()
+    expect(h!.candidates()).toEqual([id, id, id])
+    expect(h!.runtime.store.decisions.byThread(thread)).toHaveLength(1)
+    expect(h!.runtime.store.tickets.list()).toEqual([])
+    expect(fake.runs).toEqual([])
   })
 
   it('an undelivered machine Input does not keep an ended unit\'s Ticket from completing', async () => {

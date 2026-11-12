@@ -15,7 +15,7 @@ flowchart TB
   engine -->|Policy| policy[Policy]
   engine -->|SourceScope| registry[SourceRegistry]
   engine -->|Assessor| assessor[MasterAssessor]
-  engine -->|Executor| executor[DshExecutor]
+  engine -->|Executor| executor[DshExecutor or DshdExecutor]
   assessor -->|decide| engine
   engine -->|Outbox| outbox[Outbox]
   executor -->|assignmentStarted, inputsDelivered, report| engine
@@ -28,7 +28,7 @@ flowchart TB
 
 ### Runtime
 
-`Runtime` is the composition root; it contains no domain rules. Its constructor locks the state directory, opens the Store and builds each component. If construction fails, it closes the Store and releases the lock.
+`Runtime` is the composition root; it contains no domain rules. Its constructor locks the state directory, opens the Store and builds each component. The entry first waits, within `lockWaitMs`, for a lock that a process killed before its shutdown left to go stale. If construction fails, it closes the Store and releases the lock.
 
 Startup registers management routes and runs Setup. After setup resolves, it installs Session and Executor hooks, ensures the main Session exists, starts Policy syncs, resumes interrupted Assignments, and starts passes and effects. `ready` marks completion of startup.
 
@@ -172,19 +172,23 @@ Failures retry with exponential backoff. Throwing `Later` defers work without co
 | Kind | Handler | Does | At once | Retry |
 | --- | --- | --- | --- | --- |
 | `assessment` | MasterAssessor | Steers an Eval's candidate card into the main Session's turn, then tells the Engine it was delivered, which starts the Eval's deadline | 4, none while paused | 2 s doubling to 60 s |
-| `launch` | DshExecutor | Launches a pending Assignment: prepare command, Executor Session, assignment message | The free worker slots, none while paused | A passing failure of the model provider or the network runs again after 5 s doubling to 300 s, three times; any other failure, and a failed prepare command, fails its Ticket. One held by a pause or by full worker slots tries again after 5 s |
-| `delivery` | DshExecutor | Hands a Ticket's waiting Inputs to its running Assignment, in order | 4, none while paused | 2 s doubling to 60 s; one that waits for a worker slot tries again after 2 s |
+| `launch` | DshExecutor, DshdExecutor | Launches a pending Assignment: prepare command, Executor Session, assignment message; or, with the dshd executor, the unit's `dshd run` | The free worker slots, none while paused | A passing failure of the model provider or the network runs again after 5 s doubling to 300 s, three times; any other failure, and a failed prepare command, fails its Ticket. One held by a pause or by full worker slots tries again after 5 s |
+| `delivery` | DshExecutor | Hands a Ticket's waiting Inputs to its running Assignment, in order; the dshd executor ends each at once, as a unit reads only its brief | 4, none while paused | 2 s doubling to 60 s; one that waits for a worker slot tries again after 2 s |
 | `relay` | Sessions | Steers a worker's report or question, or a person's follow-up, into the main Session's turn | 1, in queue order | 2 s doubling to 60 s |
 | `notice` | Sessions | Injects a notice into the main Session without waking it | 1, in queue order | 2 s doubling to 60 s |
+| `dshd-watch` | DshdExecutor | Follows a running unit with `dshd wait` for `watchSeconds`, then reads how it ended and its final answer, and settles its Assignment | `LIMITS.maxWorkers.max` | 2 s doubling to 60 s; one whose unit still runs looks again after 2 s |
+| `dshd-stop` | DshdExecutor | Stops the unit of an Assignment the domain ended, while the unit's current run is the bound one | 4 | 2 s doubling to 60 s |
 | `reply` | Outbox | Sends a message for a Channel through its Source, after the earlier messages of its Ticket to its conversation that have not failed three times; withdrawing the message cancels it | 1, none while paused | 5 s doubling to 300 s; one whose Source is off, or behind an earlier message, tries again after 5 s |
 
 Each kind has a health entry under its name. It reports an error once one of its effects failed three times in a row, except `delivery`, whose failures show on their Ticket instead. Relays keep their order, and so do notices; a failed one holds back the later ones of its kind.
 
+With the dshd executor, a `launch` held by a pair at its own `maxWorkers` tries again after 5 s, as does one of work from before the start until `dshd.resumeDelaySeconds` after it; dshd's refusal fails its Ticket at once, and a dshd that cannot be reached fails it after three tries. `dshd-watch` and `dshd-stop` come from module augmentation of `EffectPayloads` in `src/executor/dshd.ts`, so `src/app/effects.ts` is unchanged.
+
 ### Sources
 
-Sources extend the host through `SourceKind`, defined in `src/sources/kind.ts`. A kind declares its identity, title, description, configuration `schema` and `fields`, derived `facts`, and `health` entries. Optional behavior includes `scope`, a `channel` (`allowed`, `send`, `link`), `threadContext`, `find`, `policy`, `environment`, `refreshLabels` and `tools`.
+Sources extend the host through `SourceKind`, defined in `src/sources/kind.ts`. A kind declares its identity, title, description, configuration `schema` and `fields`, derived `facts`, and `health` entries. Optional behavior includes `scope`, a `channel` (`allowed`, `send`, `link`), `threadContext`, `find`, `policy`, `environment`, `refreshLabels`, `tools` and `ticketEnded`.
 
-`tools` is this fork's one addition to upstream's Source protocol: main-Session tools that a kind adds while it is registered, each typed with `sourceTool` and named `orchestrator_<kind>_…`. It exists because the main Session receives tools only from `mainTools` when it is decorated, and then restricts what it inherits, while a Source plugin registers its kind only once dsh-superagent is ready, after that decoration. The hook is these four changes to upstream files, and touches nothing under `src/core`:
+`tools` is the first of this fork's two additions to upstream's Source protocol: main-Session tools that a kind adds while it is registered, each typed with `sourceTool` and named `orchestrator_<kind>_…`. It exists because the main Session receives tools only from `mainTools` when it is decorated, and then restricts what it inherits, while a Source plugin registers its kind only once dsh-superagent is ready, after that decoration. The hook is these four changes to upstream files, and touches nothing under `src/core`:
 
 | File | Change |
 | --- | --- |
@@ -195,15 +199,17 @@ Sources extend the host through `SourceKind`, defined in `src/sources/kind.ts`. 
 
 The prefix keeps a kind's tools apart from the host's and each other's, and inside the `orchestrator_` names that bridges to other agent runtimes pass. The workflow Source is the one kind that uses it.
 
+`ticketEnded` is the fork's second addition: the Runtime's handler of the Engine's domain events, which already words a ticket's pull request end for its conversations, also hands every ended Ticket to `SourceRegistry.ticketEnded`, which calls each kind that declares the hook. It runs once the transaction that ended the Ticket commits, through the Store's `afterCommit`, so an end that a rollback undid reaches no kind, and a kind that throws fails no end; the Store reports what it throws. The workflow Source settles a node as its Ticket ends with it, instead of at its next poll; it still polls for a worker's failed or blocked report, which ends nothing, because no domain event tells of a report. The hook changes `src/sources/kind.ts`, `src/sources/registry.ts` and `src/app/runtime.ts`, and nothing under `src/core`.
+
 `SourceRegistry` (`registry.ts`) owns registered kinds and stored instances, and implements the Engine's `SourceScope`. Registration claims health entries on `HealthBoard`; duplicate claims and reserved `sync:` names are refused. A SourceContext writes only through its registration's claimed entries, so reports after unregistration do nothing.
 
-Registry configuration methods include `kind`, `instances`, `instance`, `validate`, `validatePolicy`, `policyPart`, `channelAllowed`, `declarations`, `environments`, `find` and `scope`. `find` asks each kind that supports search.
+Registry configuration methods include `kind`, `instances`, `instance`, `validate`, `validatePolicy`, `policyPart`, `channelAllowed`, `declarations`, `environments`, `find`, `scope` and `ticketEnded`. `find` asks each kind that supports search, and `ticketEnded` tells each kind that hears of ended Tickets.
 
 Generic code accesses Source behavior through the registry. `send(message, commands)` calls the kind's Channel and returns `sent`, `gone` or `waiting` if the kind is not installed. `link` resolves its Channel link. `threadContext` pairs a kind's reader with its configuration, or returns nothing when the kind has no reader. Invalid stored configuration disables the instance.
 
 Plugins receive `SourceHost`: the registry and `context(kind)`. The kind itself uses a narrower `SourceContext`, built by `sourceContextOf` in `src/app/source-context.ts`.
 
-That context supplies deployment and commands, setup readiness (`ready`, `configured`, `problem`), configuration, `receive`, `atomic`, and typed `state`. It also exposes Thread reads and metadata writes, Ticket reads and binding/closure commands, Trigger reads, `notify` through Outbox, and `report` for declared health entries.
+That context supplies deployment and commands, setup readiness (`ready`, `configured`, `problem`), configuration, `receive`, `atomic`, and typed `state`. It also exposes Thread reads and metadata writes, Ticket reads and binding/closure commands, Trigger reads, `notify` through Outbox, and `report` for declared health entries. Its Trigger reads include `triggers.decision`, the fork's one addition to the context: the Decision that last decided a Trigger, read through the disposition the core already records, which the workflow Source uses to tell a held node from one whose Eval went unassessed. It changes `src/sources/host.ts` and `src/app/source-context.ts`, and nothing under `src/core`.
 
 ### DshExecutor
 
@@ -211,15 +217,19 @@ That context supplies deployment and commands, setup readiness (`ready`, `config
 
 `prepare(ticket, outcome)` supplies the Engine's `prepareTicket` hook: short name, directory and `ticketExecution` assignment text. `workerSessionId(ticket.id)` derives the Session id.
 
-### DshdExecutor
-
-`DshdExecutor` (`src/executor/dshd.ts`), chosen with `executor: dshd`, runs each Assignment as one dshd headless unit. Runtime holds either Executor as an `ExecutorPort` (`src/executor/port.ts`). A launch stores the unit's recipe as the Assignment's `DshdBinding` before `dshd run`, so every later attempt repeats it and dshd's same-name rule keeps one unit per Assignment. A `dshd-watch` effect follows the unit with `dshd wait` until it ends, and the end settles the Assignment through `report` or `assignmentInterrupted`. `stop` enqueues a `dshd-stop` effect, which stops the unit only while its current run is the bound one. `deliver` queues nothing: a headless unit reads only its brief.
-
 `WorkerSlots` reserves capacity before a launch or a delivery that wakes an idle worker. A human message can use one slot beyond `maxWorkers`, and wakes have priority over launches. `activeCount` supplies panel load.
 
 Transient provider and network failures get three retries. Launches use effect backoff; failed turns receive continuation messages after 15, 30 and 60 seconds. `inputMessage` renders each Input from current Ticket state, and `mandateInstructions` adds the matched-rule limits for inferred work.
 
 `install` subscribes to Session events; `dispose` unsubscribes. A turn end normally reports waiting, except after readiness or while human action is required. Errors report failed. At startup, `resume` reports interrupted Assignments through `assignmentInterrupted` and requeues pending launches that do not wait for a person, oldest Ticket first.
+
+### DshdExecutor
+
+`DshdExecutor` (`src/executor/dshd.ts`), chosen with `executor: dshd`, runs each Assignment as one dshd headless unit. Runtime holds either Executor as an `ExecutorPort` (`src/executor/port.ts`), and only one is built. `DshdCli` (`src/executor/dshd-cli.ts`) calls dshd through DeepSeek Harness's subprocess service, and every `dshd run` starts from `env -i` with the recipe's environment.
+
+A launch stores the unit's recipe as the Assignment's `DshdBinding` before `dshd run`, so every later attempt repeats it byte for byte and dshd's same-name rule keeps one unit per Assignment. The binding records the host, the pair, the unit's invocation and, once read, its Session. A `dshd-watch` effect follows the unit with `dshd wait` until it ends, then `dshd get` and `dshd read` give how it ended and its last final answer, and the end settles the Assignment through `report` or `assignmentInterrupted`. `stop` enqueues a `dshd-stop` effect, which stops the unit only while its current run is the bound one. With `dshd.removeEnded`, a `dshd-stop` of a Ticket that has ended enqueues a `dshd-rm` effect for each of its ended units, which removes the unit's dshd record once its binding records its Session (with `dshd rm --invocation` where dshd takes it, recording a refusal as `kept`), and records `removedAt` on the binding, which stays; `resume` sweeps the bindings of this host for ended Tickets' units with no `removedAt` and enqueues at most 64 of them. A `dshd run` that its timeout or a signal ended before dshd answered may still have started the unit: the launch is tried again with the frozen recipe, so dshd answers for that unit and it is adopted, three times as for an unavailable dshd. When no further try follows, because the tries ran out or the Assignment ended meanwhile (also across a restart), the launch is recorded failed and a `dshd-stop` looks for the unit under the frozen name and its Assignment label, so no unit runs unwatched. `deliver` queues nothing: a headless unit reads only its brief, and Inputs that arrive while it runs wait for its end.
+
+`prepare` sets the Ticket's directory to its Trigger's `meta.cwd`, else `dshd.cwd`, else upstream's directory under the Execution directory; the pair is the Trigger's `meta.pair`, else `dshd.defaultPair`. The same `WorkerSlots` caps running units at `maxWorkers`, and a pair's own `maxWorkers` holds its launches. At startup, `resume` adopts each running Assignment whose binding has not ended and watches its unit again, interrupts one that has no binding because it ran under the dsh executor, and launches pending ones, oldest Ticket first; [003 Execution](003-execution.md) states this restart rule. `shutdown` leaves units running.
 
 ### MasterAssessor
 
@@ -255,6 +265,8 @@ Each model request binds the Session to the current prompt revision. The revisio
 
 `status` and `promptVersion` serve prompt pages. Saves go through `Prompts.save` and notify the main Session. `modelRetry` exposes model-budget retry state. `addMainTools` gives the main Session the tools of a registered Source kind, as described under Sources.
 
+This fork registers every main and worker Session tool's parameters through `toolParameters`, a JSON round trip of `z.toJSONSchema(schema)`, where upstream passes `z.toJSONSchema(schema)` itself. zod 4.4 adds a non-enumerable `~standard` property to that result, and DSH's tool registry refuses parameters that are not lossless JSON when `schemas()` projects them, so a provider adapter that lists the tools through it, such as a Claude Code bridge, fails every turn of the Session. Keep the round trip on a rebase until upstream's registration produces plain JSON.
+
 ### Glue
 
 | Glue | Translates |
@@ -270,7 +282,7 @@ Each model request binds the Session to the current prompt revision. The revisio
 ## Dependency rules
 
 - **Explicit, narrow dependencies.** Each class receives an interface that names what it uses, mostly as `Pick` types of other classes: `ExecutorHost`, `AssessorHost`, `SessionsHost`, `SettingsHost`, `SetupHost`, `PassesHost` and `OutboxHost` for the core classes, and `HttpHost`, `MainToolsHost`, `ExecutorToolsHost`, `ResourceHost`, `LinkHost` and `SourceContextDeps` for the glue, with the Engine as the `Pick` of the role that calls it. The Runtime passes itself only behind such an interface. A Source plugin injects the `orchestrator` service, which its type names as a `SourceHost`: the registry and `context(kind)`; its kind's code sees only its `SourceContext`.
-- **What may import what.** `src/core` imports nothing outside itself apart from Node's hashing, and does no I/O. `src/sources` imports nothing from `src/app`. `src/workflow` imports nothing outside itself apart from Node, `effect` and `ajv`, and only the workflow Source, `src/sources/workflow*.ts`, imports it. The panel imports only types from the host side, and the plain values of `src/admission.ts`, `src/limits.ts`, `src/setup.ts`, `src/navigation.ts`, `src/sources/host.ts`, `src/core/errors.ts`, `src/core/reasons.ts` and the filter lists of `src/app/api.ts`.
+- **What may import what.** `src/core` imports nothing outside itself apart from Node's hashing, and does no I/O. `src/sources` imports nothing from `src/app`, and from `src/executor` only `src/executor/dshd-summary.ts`, which the workflow Source reads and which imports nothing. `src/workflow` imports nothing outside itself apart from Node, `effect` and `ajv`, and only the workflow Source, `src/sources/workflow*.ts`, imports it. The panel imports only types from the host side, and the plain values of `src/admission.ts`, `src/limits.ts`, `src/setup.ts`, `src/navigation.ts`, `src/sources/host.ts`, `src/core/errors.ts`, `src/core/reasons.ts` and the filter lists of `src/app/api.ts`.
 - **One writer per state.** Each kind of state has one writer, and the others read it or ask that writer.
 
   | State | Writer |
@@ -368,15 +380,18 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/views/overview.ts` | The overview: Tickets that need a person, problems, the last day's flow and the Executor's load |
 | `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
 | `src/executor/port.ts` | `ExecutorPort`, what Runtime uses of its Executor, picked from `DshExecutor` |
-| `src/executor/dshd.ts` | The DshdExecutor, one dshd headless unit per Assignment: `DshdBinding`, `unitName`, `composeBrief`, `verdictOf` and `eventsOf` |
+| `src/executor/dshd-config.ts` | The `dshd` block of the entry's Config: `DshdSchema`, `DshdConfig`, `DshdPair`, and `dshdOf`, the checks `machineOf` makes of it |
+| `src/executor/dshd.ts` | The DshdExecutor, one dshd headless unit per Assignment: `DshdBinding`, `unitName`, `composeBrief`, `verdictOf`, `eventsOf`, and `usageOf` with `addUsage`, which the workflow Source also uses to sum a node's usage |
 | `src/executor/dshd-cli.ts` | `DshdCli`, the dshd client over DSH's subprocess service, and the `DshdPort` it implements |
+| `src/executor/dshd-summary.ts` | `noAnswerSummary` and `isNoAnswer`: the summary of a unit that exited 0 without a final answer, which the DshdExecutor writes and the workflow Source reads as no result |
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
 | `src/infra/commands.ts` | `Commands`, the CLI transport: `run`; `api` and `pages`, limited to the configured repository and validated; `lark` as the bot; `git`. `CliError` carries the code a command's output reports, such as a GitHub HTTP status, and a command that prints nothing fails with how it ended, never with its arguments; `validItems` skips and counts the malformed items of a list |
 | `src/infra/environment.ts` | The agent's process environment: command shims, the git configuration and credential helper, `runAsWorker`, and the checks of the environment and of a Ticket's directory |
 | `src/infra/paths.ts` | The package's root, where packaged files are |
 | `src/infra/text.ts` | Word counts and the chat message limit, `fill` and `sameName` |
 | `src/infra/health.ts` | The `HealthBoard`, every part's health entry, each claimed by its one writer |
-| `src/sources/kind.ts` | The `SourceKind` protocol, with `tools`, the fork's one addition to it |
+| `src/infra/lock.ts` | The staleness of the state directory and inbox locks, and `lockReleased`, the bounded wait for a lock a process killed before its shutdown left |
+| `src/sources/kind.ts` | The `SourceKind` protocol, with `tools` and `ticketEnded`, the fork's two additions to it |
 | `src/sources/registry.ts` | `SourceRegistry` |
 | `src/sources/host.ts` | `SourceHost`, `SourceContext`, `Health`, `health` and the fixed health texts |
 | `src/sources/poll.ts` | What GitHub and Feishu polling share: `POLL_HORIZON_MS`, `polled`, `cursorAt`, and `pollThreads`, which keeps a failure on its Thread as `pollError` |
@@ -396,8 +411,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/workflow.ts` | The workflow kind and plugin entry, exported as `./workflow`: its Config, and the effect that registers the kind and starts and stops the runs |
 | `src/sources/workflow-trigger.ts` | A workflow node as a Trigger: one per attempt of each `agent()` call, on the node's own Thread, its text the prompt and the schema instruction |
 | `src/sources/workflow-store.ts` | A run's records in the kv area, and `KvJournal`, its journal one line per record |
-| `src/sources/workflow-backend.ts` | `TicketBackend`, the interpreter's Backend that raises a node's Trigger and answers with its Ticket's result; `TicketWaiter`, `settle`, `parseJsonReply`, and `NO_ANSWER`, the summary of a unit that gave no final answer |
-| `src/sources/workflow-floor.ts` | `WorkflowFloor`: starting a run, driving and resuming it from its journal, its status node by node, and `pinnedResolver` for `workflow()` |
+| `src/sources/workflow-backend.ts` | `TicketBackend`, the interpreter's Backend that raises a node's Trigger and answers with its Ticket's result; `TicketWaiter`, `settle` and `parseJsonReply` |
+| `src/sources/workflow-runs.ts` | `WorkflowRuns`: starting a run, driving and resuming it from its journal, its status node by node, and `pinnedResolver` for `workflow()` |
 | `src/sources/workflow-tools.ts` | The main Session's `orchestrator_workflow_start` and `orchestrator_workflow_status` |
 | `src/workflow/README.md` | Where `src/workflow` comes from: Substrate's interpreter at a fixed commit, vendored unchanged, every deviation with its reason, and the contract it keeps |
 | `src/workflow/index.ts` | The interpreter's exports |
@@ -443,8 +458,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/stage.spec.ts` | The Ticket stages, row by row |
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |
 | `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
-| `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health; and a kind's main-Session tools |
-| `tests/scheduled-source.spec.ts` | Scheduled occurrence records into Triggers: the read round, superseded records, quarantine, the gate, the environment and the plugin entry |
+| `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |
+| `tests/kind-tools.spec.ts` | A Source kind's main-Session tools: the `orchestrator_<kind>_` prefix, and which Sessions get them as the kind registers and unregisters and DSH creates the main Session again |
+| `tests/scheduled-source.spec.ts` | Scheduled occurrence records into Triggers: the read round, superseded records, quarantine, `.done` retention, the gate, the environment and the plugin entry |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
@@ -473,6 +489,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/cards.spec.ts` | The rules the built-in text must state, file by file |
 | `tests/model-surface.spec.ts` | Everything models read: tools, prompts, skills and inputs, checked against the tool schemas, the execution environment and the glossary, within a size budget per role |
 | `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts`, `tests/engine.spec.ts` | The plugin configuration and setup, the agent's process environment, the plugin entry, and the entry on a Cordis context with its engine off and on |
+| `tests/dshd-briefs.spec.ts` | The dshd executor's long briefs under `stateDir/briefs`: kept while their Ticket is open, removed by the stop its end queues, other files left alone |
+| `tests/dshd-cleanup.spec.ts` | The dshd executor's opt-in `dshd.removeEnded`: which ended units it removes with `dshd rm`, when (including the sweep at a start), and which it keeps |
 | `tests/dshd-cli.spec.ts` | The dshd client's argv and the JSON and error objects of dshd it reads |
 | `tests/dshd-executor.spec.ts` | The dshd executor on the simulated host with an in-memory dshd: recipe, idempotent launches, slots, settlement, restart and stop |
 | `tests/dshd-names.spec.ts` | Unit names stay inside dshd's name rule and apart for distinct Assignments |
@@ -491,12 +509,12 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/workflow-window.spec.ts` | A run's window: a held node waits and the same Trigger proceeds when requeued, other work goes first, and an Eval nobody answers |
 | `tests/workflow-start.spec.ts` | `orchestrator_workflow_start` and `_status`: idempotence, the pinned script and `workflow()` children, the refusals, and the plugin entry, which waits for the `orchestrator` service and unregisters its kind when disposed |
 | `tests/workflow-zero-dispatch.spec.ts` | A finished run's exported journal replays with no dispatch |
-| `tests/scheduled-e2e.spec.ts` | Scheduled occurrences end to end on the simulated host with the dshd executor: a record becomes one accepted Ticket and one unit, each occurrence has its own Thread, a stop reaches only the bound unit, a launch repeated after a crash, slots, setup without an account, and an end while a machine Input waits |
+| `tests/scheduled-e2e.spec.ts` | Scheduled occurrences end to end on the simulated host with the dshd executor: a record becomes one accepted Ticket and one unit, each occurrence has its own Thread, a stop reaches only the bound unit, a launch repeated after a crash, slots, setup without an account, a Ticket page that lists no variables, and an end while a machine Input waits |
 | `tests/workflow-dshd-e2e.spec.ts` | Workflow nodes end to end on the dshd executor: each node one unit whose final answer is its result, the three-node fixture, a restart that adopts a running node's unit, and the nodes that return null |
 | `tests/class-docs.spec.ts` | Every class in `src`, apart from the vendored `src/workflow`, has a JSDoc block before it |
-| `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
+| `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, every document that lists the node states of `orchestrator_workflow_status` lists those of `NodeState`, and this document's tables list every module and every test |
 
-`tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `fake-dshd.ts`, an in-memory dshd; `dshd-0.1.0.ts`, lines dshd 0.1.0 printed; `dshd-floor.ts`, the simulated host as a floor on the dshd executor, seeded through the management API, with the main Session as a scripted assessor; `git.ts`, the environment of every git the tests start, which names no repository; `workflow.ts`, the workflow Source on a real Store and Engine with a stand-in Executor, and `fixture-3.workflow.js`, the three-node workflow its tests and the live check run; `async.ts`; and `scheduled-occurrence-v1.json`, the occurrence record format a scheduler writes. `tests/workflow/helpers.ts` is the interpreter tests' own helper.
+`tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `fake-dshd.ts`, an in-memory dshd; `dshd-0.1.0.ts`, lines dshd 0.1.0 printed; `dshd-host.ts`, the simulated host on the dshd executor, seeded through the management API, with the main Session as a scripted assessor; `git.ts`, the environment of every git the tests start, which names no repository; `workflow.ts`, the workflow Source on a real Store and Engine with a stand-in Executor, and `fixture-3.workflow.js`, the three-node workflow its tests and the live check run; `async.ts`; and `scheduled-occurrence-v1.json`, the occurrence record format a scheduler writes. `tests/workflow/helpers.ts` is the interpreter tests' own helper.
 
 ## Persistence
 
@@ -527,12 +545,16 @@ A generated column is computed from its row's JSON and is empty outside its set,
 | Session prompt history | `session-prompts:<session id>` |
 | Source state | Read positions such as `github-cursor:<number>`, PR CI fingerprints and seen Feishu-topic messages; keys begin with the kind or `thread-` plus a Thread key |
 | Display names | `source-labels:<source id>` |
+| dshd units | `dshd-binding:<Assignment id>`: the unit's host, name, pair, recipe, invocation, Session and how it ended |
+| Workflow runs | `workflow-run:<run>`, the run; `workflow-journal:<run>:<seq>`, one journal line each; `workflow-script:<sha256>`, each script and `workflow()` child a run read; `workflow-nested:<run>:<reference>`, which child a reference resolved to |
 
 Dismissal is stored on its Decision. Input text is rendered from the Ticket when read, so neither needs a separate key-value record.
 
+Beside the database, `stateDir` holds the briefs too long for a unit's argument, in `briefs/`, and the scheduled Source's default inbox, `inbox/scheduled/`, with its `.done/` and `.bad/` records.
+
 Read caches use bounded in-memory `TextCache` instances and are lost on restart. A Session paging through an original Source record or prompt preview must reread offset 0 after a restart. Feishu links resolved after intake are cached the same way; link-based search finds them only after that link has been read during the current process lifetime.
 
-Nothing deletes old records yet, so these grow without bound: the `trigger`, `disposition` and `decision` rows; ended Tickets and their Threads; the outbox's receipts; and in `kv`, every saved settings revision and prompt version, the prompt revisions each Session worked under, and the Sources' records per Thread and per Issue or pull request.
+Nothing deletes old records yet, so these grow without bound: the `trigger`, `disposition` and `decision` rows; ended Tickets and their Threads; the outbox's receipts; and in `kv`, every saved settings revision and prompt version, the prompt revisions each Session worked under, the Sources' records per Thread and per Issue or pull request, the dshd bindings, and the workflow runs, journals and scripts. The briefs files and the inbox's `.done/` and `.bad/` records grow too, and dshd keeps every ended unit until someone removes it.
 
 `SCHEMA_VERSION` only increases. A database of a newer version refuses to start; `src/app/migration.ts` upgrades a database of the pre-release schema 10 once, at start, and refuses an older one.
 
@@ -656,7 +678,7 @@ Most built-in instructions live in `prompts/*.md`, with one sentence per line jo
 
 ## Configuration reload
 
-Every plugin configuration key except `stateDir`, `engine`, `executor` and the `dshd` block is volatile; changing one of those remounts dsh-superagent. The panel's Deployment settings and DeepSeek Harness's Plugin Manager edit them through DeepSeek Harness's configuration form; the host writes `cordis.patch.yml` and updates the values in place, and dsh-superagent reads each limit when it uses it, so a change applies without a restart.
+Every plugin configuration key except `stateDir`, `engine`, `executor` and the `dshd` block is volatile; changing one of those remounts dsh-superagent. The scheduled Source's `inbox` and every key of the workflow Source but `pollMs` and `offeredWarnSeconds` remount their own entry. The panel's Deployment settings and DeepSeek Harness's Plugin Manager edit them through DeepSeek Harness's configuration form; the host writes `cordis.patch.yml` and updates the values in place, and dsh-superagent reads each limit when it uses it, so a change applies without a restart.
 
 A settings save that changes a Source field setup reads, such as an account's CLI, and any save while setup waits, restarts dsh-superagent. DeepSeek Harness's settings service does not serve the entry during that restart, so after its own restart dsh-superagent asks it to read the entry again, and an open form becomes editable again.
 

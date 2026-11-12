@@ -6,18 +6,27 @@ import { expect, it } from 'vitest'
 import { ROUTER_PRESET, WORKER_PRESET } from '../src/app/sessions.ts'
 
 interface Row { id?: string; name: string; disabled?: unknown; config?: Record<string, unknown> & { plugins?: Row[] } | Row[] }
-/** The patch as DSH reads it: Cordis's include plugin parses `!!js` scalars, and applies the inserts to an entry list. */
-async function patched(): Promise<Row[]> {
-  const cordis = createRequire(createRequire(import.meta.url).resolve('@deepseek-ai/cordis/package.json'))
-  const include = cordis.resolve('@deepseek-ai/cordis-plugin-include')
+const cordis = createRequire(createRequire(import.meta.url).resolve('@deepseek-ai/cordis/package.json'))
+const include = cordis.resolve('@deepseek-ai/cordis-plugin-include')
+/** The patch as DSH reads it: Cordis's include plugin parses `!!js` scalars, and applies the inserts to an entry list. A later layer,
+ * such as a profile's `cordis.patch.yml`, applies to the result the same way. */
+async function patched(...layers: unknown[][]): Promise<Row[]> {
   const { entryListSchema, applyEntryPatches } = await import(include) as {
     entryListSchema: unknown; applyEntryPatches(data: Row[], patches: unknown[], warn: (message: string) => void): Row[] }
   const yaml = await import(createRequire(include).resolve('js-yaml')) as { load(text: string, options: { schema: unknown }): unknown }
   const patches = yaml.load(readFileSync(join(import.meta.dirname, '..', 'cordis.patch.yml'), 'utf8'), { schema: entryListSchema }) as unknown[]
   const warnings: string[] = []
-  const rows = applyEntryPatches([], patches, message => { warnings.push(message) })
+  const rows = [patches, ...layers].reduce<Row[]>((data, layer) => applyEntryPatches(data, layer, message => { warnings.push(message) }), [])
   expect(warnings).toEqual([])
   return rows
+}
+/** Whether DSH's Loader starts a row: a `!!js` `disabled` evaluates against the row's entry context, as `Entry.disabled` does. */
+async function disabled(row: Row): Promise<boolean> {
+  const { Context } = await import('@deepseek-ai/cordis')
+  const { Entry, evaluate, isJsExpr } = await import(createRequire(include).resolve('@deepseek-ai/cordis-plugin-loader')) as {
+    Entry: { key: symbol }; evaluate(ctx: object, expr: string): unknown; isJsExpr(value: unknown): value is { __jsExpr: string } }
+  const ctx = new Context().extend({ [Entry.key]: { options: row } })
+  return isJsExpr(row.disabled) ? Boolean(evaluate(ctx, row.disabled.__jsExpr)) : Boolean(row.disabled)
 }
 /** Every plugin row of a preset, those inside groups too. */
 const flat = (rows: readonly Row[]): Row[] => rows.flatMap(row => [row, ...Array.isArray(row.config) ? flat(row.config) : []])
@@ -74,4 +83,18 @@ it('defines the router preset the main Session runs under: the worker\'s 5-secon
     '@deepseek-ai/dsh-tool-todo', '@deepseek-ai/dsh-tool-ask-user', '@deepseek-ai/dsh-tool-present', '@deepseek-ai/dsh-plan-mode',
     '@deepseek-ai/dsh-plugin-manager/tools', '@deepseek-ai/dsh-plugin-market/tools', '@deepseek-ai/dsh-tool-schedule', '@deepseek-ai/dsh-tool-goal',
     '@deepseek-ai/dsh-command-goal', '@deepseek-ai/dsh-tool-workflow', '@deepseek-ai/dsh-workflow-ptc']) expect(names, name).not.toContain(name)
+})
+
+it('leaves the main entry off while the profile sets engine: false, so a headless app reports no entry waiting for a web app', async () => {
+  const main = async (...layers: unknown[][]) => (await patched(...layers)).find(row => row.id === 'dsh-superagent')!
+  const profile = (config: Record<string, unknown>, row: Record<string, unknown> = {}) => [{ id: 'dsh-superagent', config, ...row }]
+  // The entry's services include a web app's (index.ts `inject`): in DSH's headless app it would wait for them on every start.
+  expect(await disabled(await main(profile({ stateDir: '/srv/state', engine: false })))).toBe(true)
+  // With the engine on, or left at its default, the entry starts, and DSH still reports a service it waits for.
+  expect(await disabled(await main(profile({ stateDir: '/srv/state', engine: true })))).toBe(false)
+  expect(await disabled(await main(profile({ stateDir: '/srv/state' })))).toBe(false)
+  expect(await disabled(await main())).toBe(false)
+  // A profile that sets the row's own switch decides; the entry's `engine` gate then keeps it inert.
+  expect(await disabled(await main(profile({ stateDir: '/srv/state', engine: false }, { disabled: false })))).toBe(false)
+  expect(await disabled(await main(profile({ stateDir: '/srv/state', engine: true }, { disabled: true })))).toBe(true)
 })

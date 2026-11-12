@@ -78,16 +78,6 @@ const SLEEP = /(?:^|[;&|({!`\n]|\b(?:do|then|else|elif|if|while|until|time|exec|
  * a command 60 seconds and a job wait lasts 30 seconds by default, so a command needs a timeout or the background, and a
  * job wait its timeout; the router preset ends both after 5 seconds.
  */
-/**
- * `schema` as the plain JSON a DSH tool definition's `parameters` must be. `z.toJSONSchema` (zod 4.4) adds a non-enumerable
- * `~standard` property to its result, and the tool registry's `schemas()` projection refuses any value that does not survive a
- * JSON round trip ("parameters must be lossless JSON"); a provider adapter that lists the tools through it, such as a Claude
- * Code bridge, would then fail every turn of the Session.
- */
-function toolParameters(schema: z.ZodType): ReturnType<typeof z.toJSONSchema> {
-  return JSON.parse(JSON.stringify(z.toJSONSchema(schema))) as ReturnType<typeof z.toJSONSchema>
-}
-
 function noWait({ name, arguments: input }: { name: string; arguments: unknown }, routed: () => boolean): string | undefined {
   const args = (input ?? {}) as { command?: unknown; timeoutMs?: unknown; run_in_background?: unknown; wait?: unknown; timeout_ms?: unknown }
   if (name === 'bash') {
@@ -97,6 +87,17 @@ function noWait({ name, arguments: input }: { name: string; arguments: unknown }
   }
   if (name === 'job_output' && args.wait === true && (typeof args.timeout_ms === 'number' ? args.timeout_ms > 5_000 : !routed())) return NO_WAIT
   return undefined
+}
+
+/**
+ * `schema` as the plain JSON a DSH tool definition's `parameters` must be. `z.toJSONSchema` (zod 4.4) adds a non-enumerable
+ * `~standard` property to its result, and the tool registry's `schemas()` projection refuses any value that does not survive a
+ * JSON round trip ("parameters must be lossless JSON"); a provider adapter that lists the tools through it, such as a Claude
+ * Code bridge, would then fail every turn of the Session.
+ */
+function toolParameters(schema: z.ZodType): ReturnType<typeof z.toJSONSchema> {
+  // What the model must send: the input side, so an argument with a default is optional, as `schema.parse` supplies it.
+  return JSON.parse(JSON.stringify(z.toJSONSchema(schema, { io: 'input' }))) as ReturnType<typeof z.toJSONSchema>
 }
 
 /**

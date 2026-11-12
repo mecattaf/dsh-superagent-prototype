@@ -86,11 +86,137 @@ describe('the window of a workflow run', () => {
       h.engine.evaluateDue()
     }
     const a1 = h.floor.status(run)[0]!.nodes.find(node => node.label === 'a1')!
-    expect(a1.state).toBe('held')
+    expect(a1).toMatchObject({ state: 'unavailable', reason: 'Assessment timed out', decided_at: new Date(clock).toISOString() })
     expect(h.store.decisions.byThread(h.store.triggers.get(a1.trigger_id!)!.threads.map(ref => `${ref.source}:${ref.id}`)[0]!).at(-1)?.kind).toBe('unavailable')
-    await new Promise(resolve => setTimeout(resolve, 30))
+    // Five polls of the waiting nodes later, the held node has still not failed.
+    const from = h.polls()
+    await until(() => h.polls() > from + 5)
     expect(h.journal(run)).not.toContain('"type":"failed"')
     requeue(h, a1.trigger_id!)
+    h.accept('a1'); h.report('a1', 'DONE'); h.report('a2', 'DONE')
+    await finishRun(h, run)
+    expect(h.run(run)).toMatchObject({ state: 'completed', result: { a1: 'DONE', a2: 'DONE' } })
+  })
+  it('status says waiting before a node\'s Trigger reaches the Engine and offered while it is queued for an Eval', async () => {
+    const { h, directory } = start()
+    await h.started
+    // a1 is on its way to the Engine and never arrives; a2 arrives, and no Eval has started for it yet.
+    h.receive.mockImplementation(trigger => trigger.meta.label === 'a1' ? new Promise<never>(() => {}) : h.engine.receive(trigger))
+    const { run_id: run } = h.floor.startRun({ script: FIXTURE, cwd: directory, args: { tag: 't' } })
+    await until(() => h.receive.mock.calls.length === 2)
+    const nodes = h.floor.status(run)[0]!.nodes
+    expect(nodes.map(node => [node.label, node.state])).toEqual([['a1', 'waiting'], ['a2', 'offered']])
+    expect(nodes[0]).not.toHaveProperty('trigger_id')
+    expect(h.store.threads.get(`workflow:${String(h.store.triggers.get(nodes[1]!.trigger_id!)!.threads[0]!.id)}`)?.evaluating).toBeUndefined()
+  })
+  it('W2e an unavailable node raises no other attempt: with maxAttempts 3 its one Trigger is offered three times, then no more', async () => {
+    let clock = Date.parse('2026-11-12T01:00:00Z')
+    const { h, directory } = start({ now: () => new Date(clock).toISOString(), config: { maxAttempts: 3 } })
+    await h.started
+    const { run_id: run } = h.floor.startRun({ script: FIXTURE, cwd: directory, args: { tag: 't' } })
+    await until(() => h.offered().length === 2)
+    h.accept('a2')
+    // The main Session never decides a1, as when its orchestrator tools fail: each look comes past the Eval's deadline.
+    for (let look = 0; look < 6; look++) {
+      const candidate = h.offered().find(item => h.label(item.triggers[0]!.id) === 'a1')
+      if (candidate) h.engine.candidateDelivered(candidate.evalId)
+      clock += 121_000
+      h.engine.evaluateDue()
+      await new Promise(resolve => setTimeout(resolve, 15))
+    }
+    const a1 = h.floor.status(run)[0]!.nodes.find(node => node.label === 'a1')!
+    // An attempt follows only a Ticket that settled, which an unavailable Decision never gives. Its Eval expired three times,
+    // so the node reads unavailable for a timeout, not held: nobody decided to hold it.
+    expect(a1).toMatchObject({ state: 'unavailable', reason: 'Assessment timed out', trigger_id: expect.stringMatching(/-a1$/) })
+    expect(h.context.triggers.decision(a1.trigger_id!)).toMatchObject({ kind: 'unavailable', reason: [{ code: 'timeout' }] })
+    expect(h.candidates.filter(item => h.label(item.triggers[0]!.id) === 'a1').map(item => item.triggers[0]!.id))
+      .toEqual([a1.trigger_id, a1.trigger_id, a1.trigger_id])
+    expect(h.journal(run)).not.toContain('"type":"failed"')
+    expect(h.run(run)?.state).toBe('running')
+  })
+  it('W2c a held node and one whose Eval went unassessed read apart in status, health and log, and both still wait', async () => {
+    let clock = Date.parse('2026-11-12T01:00:00Z')
+    const { h, directory } = start({ now: () => new Date(clock).toISOString() })
+    await h.started
+    const { run_id: run } = h.floor.startRun({ script: FIXTURE, cwd: directory, args: { tag: 't' } })
+    await until(() => h.offered().length === 2)
+    const a2 = h.hold('a2')
+    for (let round = 0; round < 3; round++) {
+      const candidate = h.offered().find(item => h.label(item.triggers[0]!.id) === 'a1')!
+      h.engine.candidateDelivered(candidate.evalId)
+      clock += 121_000
+      h.engine.evaluateDue()
+    }
+    const node = (label: string) => h.floor.status(run)[0]!.nodes.find(item => item.label === label)!
+    const a1 = node('a1').trigger_id!
+    // The fixture holds as a card does, so the core records that beside the reason given.
+    expect(node('a2')).toMatchObject({ state: 'held', trigger_id: a2, reason: expect.stringContaining('hold: a2 waits') })
+    expect(node('a1')).toMatchObject({ state: 'unavailable', trigger_id: a1, reason: 'Assessment timed out' })
+    // The waiting nodes' poll tells the Source's health and the log which wait on a decision and which on the main Session.
+    await until(() => String(h.board.all.workflow?.detail).includes('not assessed'))
+    expect(h.board.all.workflow).toMatchObject({ state: 'ready',
+      detail: '1 runs under way, 2 nodes waiting for their tickets: 1 held, 1 not assessed' })
+    await new Promise(resolve => setTimeout(resolve, 30))
+    // Each line names the plugin first, as the other entries' lines do.
+    expect(h.logger.warn.mock.calls).toEqual([[expect.stringMatching(/^dsh-superagent-workflow: run %s: node %s was not assessed/), run, 'a1',
+      'Assessment timed out', a1]])
+    expect(h.logger.info.mock.calls).toEqual([[expect.stringMatching(/^dsh-superagent-workflow: run %s: node %s is held/), run, 'a2',
+      expect.stringContaining('hold: a2 waits'), a2]])
+    // Neither is a failure, and nothing is offered again until a requeue.
+    expect(h.journal(run)).not.toContain('"type":"failed"')
+    expect(h.offered()).toHaveLength(0)
+    requeue(h, a1)
+    expect(node('a1').state).toBe('offered')
+    await until(() => !String(h.board.all.workflow?.detail).includes('not assessed'))
+    expect(h.board.all.workflow?.detail).toBe('1 runs under way, 2 nodes waiting for their tickets: 1 held')
+    expect(h.logger.warn).toHaveBeenCalledTimes(1)
+    // Held again after a requeue that no poll saw is a new Decision, which the log tells again.
+    clock += 1000
+    requeue(h, a2); h.hold('a2')
+    await until(() => h.logger.info.mock.calls.length === 2)
+    expect(node('a2')).toMatchObject({ state: 'held', decided_at: new Date(clock).toISOString() })
+  })
+  it('W2d a node whose Eval never reaches the main Session gives offered_since, and past the threshold the log warns once and the health counts it', async () => {
+    // The threshold reads the wall clock, and the Engine's clock starts two hours behind it, so each Eval is two hours old at once.
+    let clock = Date.now() - 2 * 3600_000, threshold = 3 * 3600
+    const { h, directory } = start({ now: () => new Date(clock).toISOString(), config: { offeredWarnSeconds: { get: () => threshold } } })
+    await h.started
+    const { run_id: run } = h.floor.startRun({ script: FIXTURE, cwd: directory, args: { tag: 't' } })
+    await until(() => h.offered().length === 2)
+    const since = new Date(clock).toISOString()
+    const node = (label: string) => h.floor.status(run)[0]!.nodes.find(item => item.label === label)!
+    const [a1, a2] = [node('a1').trigger_id!, node('a2').trigger_id!]
+    expect(node('a1')).toMatchObject({ state: 'offered', offered_since: since })
+    // No candidate reached the main Session, so no deadline passes and nothing expires, however long it waits.
+    clock += 3 * 121_000
+    h.engine.evaluateDue()
+    expect(node('a1')).toMatchObject({ state: 'offered', offered_since: since })
+    // Under the threshold the polls tell nothing.
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(h.logger.warn).not.toHaveBeenCalled()
+    expect(String(h.board.all.workflow?.detail)).not.toContain('offered for more than')
+    // The threshold applies at the next poll, without a restart.
+    threshold = 3600
+    await until(() => String(h.board.all.workflow?.detail).includes('offered for more than'))
+    expect(h.board.all.workflow).toMatchObject({ state: 'ready', detail: '1 runs under way, 2 nodes waiting for their tickets: 2 offered for more than 1 h' })
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(h.logger.warn.mock.calls).toHaveLength(2)
+    expect(h.logger.warn.mock.calls).toEqual(expect.arrayContaining([[expect.stringContaining('offered since'), run, 'a1', since, '1 h', a1],
+      [expect.stringContaining('offered since'), run, 'a2', since, '1 h', a2]]))
+    // Nothing expires, fails or is offered again: both Evals still wait for the main Session.
+    expect(h.journal(run)).not.toContain('"type":"failed"')
+    expect(h.offered()).toHaveLength(2)
+    expect(h.offered().flatMap(candidate => h.store.decisions.byThread(candidate.thread.key))).toHaveLength(0)
+    // A candidate that reached the main Session is being assessed, and its Eval expires on its own deadline, so a1 leaves the
+    // count and is not told again, though its Eval is as old as before.
+    h.engine.candidateDelivered(h.offered().find(item => h.label(item.triggers[0]!.id) === 'a1')!.evalId)
+    await until(() => h.board.all.workflow?.detail === '1 runs under way, 2 nodes waiting for their tickets: 1 offered for more than 1 h')
+    expect(node('a1')).toMatchObject({ state: 'offered', offered_since: since })
+    // A node accepted at last leaves the count, and nothing is told again.
+    h.accept('a2')
+    await until(() => h.board.all.workflow?.detail === '1 runs under way, 2 nodes waiting for their tickets')
+    expect(h.logger.warn).toHaveBeenCalledTimes(2)
+    expect(node('a2').offered_since).toBeUndefined()
     h.accept('a1'); h.report('a1', 'DONE'); h.report('a2', 'DONE')
     await finishRun(h, run)
     expect(h.run(run)).toMatchObject({ state: 'completed', result: { a1: 'DONE', a2: 'DONE' } })

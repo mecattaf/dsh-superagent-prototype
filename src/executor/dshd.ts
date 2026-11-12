@@ -1,22 +1,22 @@
 /** dshd executor: runs each Assignment as one dshd headless unit and settles it from the way the unit ended. */
 import type { Context } from '@deepseek-ai/cordis'
-import { mkdir, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { hostname as osHostname } from 'node:os'
-import { isAbsolute, join } from 'node:path'
-import { latestAssignment, liveTicket, runningAssignment, waitsForPerson } from '../core/index.ts'
+import { delimiter, isAbsolute, join } from 'node:path'
+import { key, latestAssignment, liveTicket, runningAssignment, waitsForPerson } from '../core/index.ts'
 import type { AssessmentOutcome, Assignment, EngineForExecutor, Ticket, TicketInput, Trigger } from '../core/index.ts'
 import type { DshdPair, Machine } from '../deployment.ts'
 import type { Store } from '../app/store.ts'
 import { Later, type Effects } from '../app/effects.ts'
 import type { Sessions } from '../app/sessions.ts'
 import { reportRelay } from '../app/notices.ts'
-import { inherited } from '../infra/environment.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { KV } from '../kv.ts'
 import { LIMITS } from '../limits.ts'
 import { WorkerSlots, batchOf, inputMessage, sourceTrigger, ticketExecution } from './dsh.ts'
-import { DshdCli, DshdUnavailable, invocationOf, type DshdPort, type DshdRead, type DshdRecipe, type DshdStatus } from './dshd-cli.ts'
-import type { ExecutorPort } from './port.ts'
+import { DshdCli, DshdUnanswered, DshdUnavailable, invocationOf, type DshdPort, type DshdRead, type DshdRecipe, type DshdStatus } from './dshd-cli.ts'
+import type { ExecutorPort, WorkerEnvironment } from './port.ts'
+import { noAnswerSummary } from './dshd-summary.ts'
 
 declare module '../app/effects.ts' {
   interface EffectPayloads {
@@ -24,10 +24,14 @@ declare module '../app/effects.ts' {
     'dshd-watch': { ticketId: string; assignmentId: string }
     /** Stop the dshd unit of an Assignment the domain ended; the key is the Assignment ID. */
     'dshd-stop': { ticketId: string; assignmentId: string; reason: string }
+    /** Remove the dshd record of an ended unit whose Ticket ended (`dshd.removeEnded`); the key is the Assignment ID. */
+    'dshd-rm': { ticketId: string; assignmentId: string }
   }
 }
 
 const now = (): string => new Date().toISOString()
+/** A time of day as the panel shows one, `HH:MM` in this process's time zone. */
+const clock = (at: number): string => new Date(at).toTimeString().slice(0, 5)
 /** How an Assignment's unit ended, read from `dshd get` (see `verdictOf`). */
 export type Verdict = 'running' | 'completed' | 'task-failed' | 'killed' | 'never-ran' | 'stopped' | 'cut' | 'lost' | 'superseded' | 'unknown'
 /** The persisted owner of one Assignment's unit: where and as what it runs, and the recipe every launch attempt reuses. */
@@ -49,7 +53,13 @@ export interface DshdBinding {
   invocationId?: string
   /** The worker's DSH Session, from the unit's `session` event once read. */
   sessionId?: string
+  /** The tokens the worker's model calls used over the whole run, once it ended, when a read reached back to its start (see `usageOf`). */
+  usage?: TokenUsage
   ended?: { at: string; verdict: Verdict; exitCode?: number; signal?: number; ending?: string | null }
+  /** Since when dshd holds no record of the unit, under `dshd.removeEnded`: `dshd rm` removed it, or dshd no longer knew it. */
+  removedAt?: string
+  /** When and why `dshd rm --invocation` last kept the unit: dshd's refusal, as `<kind>: <message>`. */
+  kept?: { at: string; reason: string }
 }
 /** The binding of each Assignment the dshd executor launched, by Assignment ID. */
 export const BINDING = KV.dshd.binding
@@ -60,19 +70,43 @@ const EXTRA_LABEL = /^superagent\.[a-z0-9._-]+$/
 const UNIT_NAME = /^[a-z0-9]([a-z0-9_-]{0,61}[a-z0-9])?$/
 const RUNNING = new Set(['running', 'starting', 'stopping'])
 const UNCERTAIN = new Set(['masked', 'orphaned', 'inconsistent', 'unknown'])
-/** Tries of a launch while dshd is unavailable (exit 7) before the Assignment is recorded failed. */
+/** Tries of a launch while dshd is unavailable (exit 7) or does not answer before the Assignment is recorded failed; fixed, as the effect's own retry spaces them. */
 const UNAVAILABLE_TRIES = 3
-/** Longest worker answer the summary of a unit that did not complete carries; a completed unit's answer is its whole result. */
+/**
+ * Longest worker answer the summary of a unit that did not complete carries; a completed unit's answer is its whole result. Fixed:
+ * such a summary only points at the failure, and the unit's Session log keeps the whole answer.
+ */
 const FINAL_CHARS = 3800
 /**
  * Lines of the longer `dshd read` for a run whose newest 200 lines name no Session: a whole run at 256 bytes a line fills
- * `DshdCli`'s 16 MiB read cap. journalctl takes no more than a signed int.
+ * `DshdCli`'s 16 MiB read cap. journalctl takes no more than a signed int. Fixed, as it follows from that cap.
  */
 const READ_RUN_LINES = 1 << 16
+/** Most `dshd-rm` effects one start queues for Tickets that ended before `dshd.removeEnded` reached them; later starts take the rest. */
+const SWEEP_UNITS = 64
+/** Whether a PATH entry lies in the Nix store, where each path holds one build that a garbage collection may delete. */
+const inStore = (entry: string): boolean => entry === '/nix/store' || entry.startsWith('/nix/store/')
+/**
+ * The values of `names` in this process's environment, for a unit that starts from an empty one; names that are not set are
+ * left out. `PATH` keeps only its entries outside the Nix store, and none at all when every entry is in it: a dshd unit replays
+ * its recipe on every later start, long after a garbage collection may have deleted a store path, while a profile link follows
+ * each switch. `dropped` hears of the entries left out.
+ */
+export function inherited(names: readonly string[], env: NodeJS.ProcessEnv = process.env, dropped: (entries: string[]) => void = () => {}): Record<string, string> {
+  return Object.fromEntries(names.flatMap(name => {
+    const value = env[name]
+    if (value === undefined) return []
+    if (name !== 'PATH') return [[name, value]]
+    const entries = value.split(delimiter), kept = entries.filter(entry => !inStore(entry))
+    if (kept.length < entries.length) dropped(entries.filter(inStore))
+    return kept.length ? [[name, kept.join(delimiter)]] : []
+  }))
+}
 const RETRIED = 'A person retried this ticket. Continue the assignment from the current directory and what it holds now.'
 const DSHD_WORKER_NOTE = 'You are one headless task that dsh-superagent started. Work in the current directory. Nothing reaches you after this '
   + 'message and there is no report tool: when the work is done, end with a short final answer. Your session log is the record. '
-  + 'If the task asks for a JSON-only reply, your final answer is that JSON value and nothing else.'
+  + 'A request in the inputs to report means: say it in your final answer. Earlier attempts of this ticket were given '
+  + 'earlier_inputs. If the task asks for a JSON-only reply, your final answer is that JSON value and nothing else.'
 
 /** The unit name of the `k`th Assignment (1-based) of a Ticket: `<prefix>-<execution name>-a<k>`, or `<prefix>-t<ticket id>-a<k>` when that name is unusable. */
 export function unitName(prefix: string, executionName: string | undefined, ticketId: string, k: number): string {
@@ -96,15 +130,16 @@ export function verdictOf(status: Pick<DshdStatus, 'state' | 'lastRun'>): Verdic
 /** A Trigger as a dshd worker reads it: who wrote what, and when, in full. */
 const triggerCard = (trigger: Trigger) => ({ trigger_id: trigger.id, from: trigger.actor.id, at: trigger.at, text: trigger.text })
 /**
- * The whole first and only message of a unit: the Ticket, its assignment and source Trigger in full, the waiting Inputs, and
- * how the worker ends. Every Assignment gets it whole, since each unit is a fresh process with a fresh Session.
+ * The whole first and only message of a unit: the Ticket, its assignment and source Trigger in full, the Inputs earlier units'
+ * briefs carried, the waiting Inputs, and how the worker ends. Every Assignment gets it whole, since each unit is a fresh
+ * process with a fresh Session.
  */
-export function composeBrief(ticket: Ticket, k: number, origin: Trigger | undefined, batch: Trigger[], inputs: string[]): string {
+export function composeBrief(ticket: Ticket, k: number, origin: Trigger | undefined, batch: Trigger[], inputs: string[], earlier: string[] = []): string {
   const assignment = ticket.execution?.assignment
   const previous = ticket.assignments.at(k - 2)
   // The framing comes first and the request last, so a schema the request ends with is the last thing the worker reads.
   return JSON.stringify({ note: DSHD_WORKER_NOTE, ticket_id: ticket.id, title: ticket.title, attempt: k, ...(assignment ? { assignment } : {}),
-    ...(inputs.length ? { inputs } : {}), ...(batch.length ? { batch: batch.map(triggerCard) } : {}),
+    ...(earlier.length ? { earlier_inputs: earlier } : {}), ...(inputs.length ? { inputs } : {}), ...(batch.length ? { batch: batch.map(triggerCard) } : {}),
     ...(k > 1 && previous?.endedReason === 'retried' ? { retried: RETRIED } : {}), ...(origin ? { trigger: triggerCard(origin) } : {}) })
 }
 /**
@@ -112,12 +147,15 @@ export function composeBrief(ticket: Ticket, k: number, origin: Trigger | undefi
  * node parses as JSON; any other end says how the unit ended, then its answer and where its record is.
  */
 function summaryOf(name: string, verdict: Verdict, end: { exitCode?: number; signal?: number }, final?: string, sessionId?: string): string {
-  if (verdict === 'completed') return final ?? `Unit ${name} exited 0.`
+  if (verdict === 'completed') return final ?? noAnswerSummary(name)
   const answer = final === undefined ? undefined : `${final.slice(0, FINAL_CHARS)}${final.length > FINAL_CHARS ? '…' : ''}`
   const pointer = `Unit ${name}; session ${sessionId ?? 'unknown'}.`
   const how = `Unit ${name} ended ${verdict}${end.exitCode !== undefined ? ` (exit ${end.exitCode})` : ''}${end.signal ? ` (signal ${end.signal})` : ''}.`
   return `${how}${answer ? `\n\n${answer}` : ''}\n\n${pointer}`
 }
+/** What a run printed that its end records: its Session, its final answer and the tokens it used. */
+type Printed = { sessionId?: string; final?: string; usage?: TokenUsage }
+const withUsage = (events: Printed, usage: TokenUsage | undefined): Printed => usage ? { ...events, usage } : events
 const SessionEvent = (line: string): Record<string, unknown> | undefined => {
   try { const value: unknown = JSON.parse(line); return value && typeof value === 'object' ? value as Record<string, unknown> : undefined }
   catch { return undefined /* A line dshd-run or dsh wrote that is not a headless event. */ }
@@ -137,6 +175,51 @@ export function eventsOf(read: Pick<DshdRead, 'lines'>): { sessionId?: string; f
   return { ...(sessionId !== undefined ? { sessionId } : {}), ...(final !== undefined ? { final } : {}) }
 }
 /**
+ * Tokens a worker's model calls used, in DSH's own usage names. `inputTokens` and `outputTokens` are always there; a provider
+ * reports the other buckets or not.
+ */
+export interface TokenUsage {
+  inputTokens: number
+  outputTokens: number
+  totalTokens?: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
+  reasoningTokens?: number
+}
+const BUCKETS = ['totalTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens'] as const
+const count = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0
+const usageValue = (value: unknown): TokenUsage | undefined => {
+  if (!value || typeof value !== 'object') return undefined
+  const usage = value as Record<string, unknown>
+  if (!count(usage.inputTokens) || !count(usage.outputTokens)) return undefined
+  const buckets = BUCKETS.flatMap(bucket => count(usage[bucket]) ? [[bucket, usage[bucket]] as const] : [])
+  return { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, ...Object.fromEntries(buckets) }
+}
+/**
+ * Adds two usages as DSH adds a step's attempts: an optional bucket stays only when both report it, so a sum never passes for
+ * a total it is not.
+ */
+export function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
+  const buckets = BUCKETS.flatMap(bucket => a[bucket] !== undefined && b[bucket] !== undefined ? [[bucket, a[bucket] + b[bucket]] as const] : [])
+  return { inputTokens: a.inputTokens + b.inputTokens, outputTokens: a.outputTokens + b.outputTokens, ...Object.fromEntries(buckets) }
+}
+/**
+ * The tokens a headless `--json` run used: the sum of the usage on each step's `step_end` status, which dsh prints from what
+ * the step's `assistant/message` recorded in its Session. It is known only for lines that reach back to the run's start in
+ * which every step printed its usage, as dsh leaves usage out of a step whose total it cannot know.
+ */
+export function usageOf(read: Pick<DshdRead, 'lines' | 'complete'>): TokenUsage | undefined {
+  if (!read.complete) return undefined
+  let total: TokenUsage | undefined
+  for (const event of read.lines.map(SessionEvent)) {
+    if (event?.type !== 'status' || event.phase !== 'step_end') continue
+    const usage = usageValue(event.usage)
+    if (!usage) return undefined
+    total = total ? addUsage(total, usage) : usage
+  }
+  return total
+}
+/**
  * Whether `assignmentId` is the latest Assignment of the live Ticket and the only one running, so its unit's end may settle it.
  * After jason261014 `isCurrentRunningAssignment`, kept here so src/core stays untouched.
  */
@@ -153,9 +236,9 @@ export interface DshdExecutorHost {
   /** DSH Cordis context, whose subprocess service runs the dshd CLI. */
   readonly context: Context
   readonly engine: Pick<EngineForExecutor, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'report' | 'assignmentInterrupted'>
-  readonly store: Pick<Store, 'tickets' | 'triggers' | 'get' | 'set' | 'settings' | 'atomic' | 'afterCommit'>
+  readonly store: Pick<Store, 'tickets' | 'triggers' | 'get' | 'set' | 'keys' | 'settings' | 'atomic' | 'afterCommit'>
   /** Durable effect queue through which launches, watches and stops run. */
-  readonly effects: Pick<Effects, 'enqueue' | 'handle'>
+  readonly effects: Pick<Effects, 'enqueue' | 'handle' | 'pending'>
   /** The `worker` health entry. */
   readonly health: HealthEntry
   readonly machine: Pick<Machine, 'stateDir' | 'dshd'>
@@ -170,32 +253,56 @@ export interface DshdExecutorHost {
   /** The dshd client; `DshdCli` over the context's subprocess service by default. */
   readonly dshd?: DshdPort
   readonly hostname?: () => string
+  /**
+   * The environment `passEnv` names are read from: this process's as it was before Setup changed it (`Setup.hostEnvironment`),
+   * so no unit inherits the in-process executor's command shims; `process.env` by default.
+   */
+  readonly environment?: () => NodeJS.ProcessEnv
 }
 
 /**
  * Executes each Assignment as one dshd headless unit (`dshd@<name>.service`) in the Ticket's directory, under the profile of its
  * provider-harness pair. Launches go through the `launch` effect and `WorkerSlots`; a `dshd-watch` effect follows each unit until
  * it ends, and its end settles the Assignment: exit 0 reports ready, any other end failed, and a unit a reboot cut restarts as
- * upstream restarts interrupted work. A unit outlives this process, so a restart adopts the units that still run.
+ * upstream restarts interrupted work. A unit outlives this process, so a restart adopts the units that still run. With
+ * `dshd.removeEnded`, a `dshd-rm` effect removes the units of a Ticket that ended once their bindings record their Sessions.
  */
 export class DshdExecutor implements ExecutorPort {
+  /** A unit starts from its own environment, so it needs no account unless the deployment names a repository. */
+  readonly needsAccount: boolean = false
+  readonly workerEnvironment: WorkerEnvironment = 'own'
+  /** A unit reads only its brief, see `deliver`. */
+  readonly takesInput = false
   private readonly slots: WorkerSlots
   private readonly dshd: DshdPort
   private readonly hostname: () => string
-  /** Launch attempts made so far while dshd was unavailable, by Assignment ID. */
+  /** Launch attempts made so far while dshd was unavailable or did not answer, by Assignment ID. */
   private readonly unavailable = new Map<string, number>()
   /** Launches under way, by Assignment ID, with their pair, which per-pair limits and stops consult. */
   private readonly launching = new Map<string, string>()
+  /** Units whose Assignment the domain ended and whose stop has not recorded their end, by Assignment ID, with their pair: each holds its slot. */
+  private readonly stopping = new Map<string, string>()
+  /** When this executor last resumed: work from before then waits `dshd.resumeDelaySeconds` from it (see `holdResumed`). */
+  private startedAt = Date.now()
+  /** Launches of work from before the start that wait for `dshd.resumeDelaySeconds`, by Assignment ID. */
+  private readonly held = new Set<string>()
+  /** Looks in a row that found a unit in a state dshd cannot tell an end from, by Assignment ID (see `watch`). */
+  private readonly uncertain = new Map<string, number>()
+  /** Whether `passEnv` has lost PATH entries under the Nix store, which is logged once. */
+  private warnedStore = false
   constructor(private readonly host: DshdExecutorHost) {
     this.dshd = host.dshd ?? new DshdCli(host.context.subprocess, host.machine.dshd.command)
     this.hostname = host.hostname ?? osHostname
-    this.slots = new WorkerSlots(() => this.runningTickets().map(({ ticket }) => ticket.id), () => host.store.settings().executor.maxWorkers)
+    this.slots = new WorkerSlots(() => [...this.runningTickets().map(({ ticket }) => ticket.id), ...this.stopping.keys()],
+      () => host.store.settings().executor.maxWorkers)
     host.effects.handle('launch', payload => this.launchQueued(payload), { limit: () => host.paused() ? 0 : this.slots.launches(),
       retry: [5000, 300_000] })
     // A headless unit takes no Input after its brief; rows an in-process Executor queued before a switch are drained.
     host.effects.handle('delivery', async () => {}, { quiet: true })
     host.effects.handle('dshd-watch', payload => this.watch(payload), { limit: () => LIMITS.maxWorkers.max, retry: [2000, 60_000] })
+    // Fixed: a bound on `dshd stop` calls in flight at once, which are short, not a deployment tunable.
     host.effects.handle('dshd-stop', payload => this.stopQueued(payload), { limit: () => 4, retry: [2000, 60_000] })
+    host.effects.handle('dshd-rm', payload => this.removeQueued(payload), { limit: () => 4, retry: [2000, 60_000] })
   }
   /** The Ticket's execution attributes, with the directory its unit runs in (see `cwdOf`). */
   prepare(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Ticket {
@@ -210,15 +317,24 @@ export class DshdExecutor implements ExecutorPort {
   /** Queues the stop of the Assignment's unit, which the domain already ended. */
   stop(ticket: Ticket, assignment: Assignment, reason: string): void {
     this.unavailable.delete(assignment.id)
-    this.host.effects.enqueue('dshd-stop', assignment.id, { ticketId: ticket.id, assignmentId: assignment.id, reason })
+    this.stopLater(ticket.id, assignment.id, reason)
+  }
+  /** Queues the stop of a unit; one that may still run holds its slot until the stop records its end. */
+  private stopLater(ticketId: string, assignmentId: string, reason: string): void {
+    const binding = this.host.store.get(BINDING(assignmentId))
+    if (binding && binding.state !== 'ended') this.host.store.afterCommit(() => { this.stopping.set(assignmentId, binding.pair) })
+    this.host.effects.enqueue('dshd-stop', assignmentId, { ticketId, assignmentId, reason })
   }
   /** Nothing to listen to: the workers run outside this process. */
   install(): void {}
   /**
    * Reconciles open Tickets oldest first after a start. A running Assignment whose unit may still run is adopted and watched
-   * again; one that ran in this process before a switch from the dsh executor is interrupted, as upstream does; pending ones launch.
+   * again; one that ran in this process before a switch from the dsh executor is interrupted, as upstream does; pending ones
+   * launch once `dshd.resumeDelaySeconds` have passed (see `holdResumed`). Under `dshd.removeEnded`, it then sweeps the ended
+   * units of Tickets that ended before (see `sweepEnded`).
    */
   resume(): void {
+    this.startedAt = Date.now()
     for (const ticket of this.host.store.tickets.open().sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
       const running = runningAssignment(ticket), latest = latestAssignment(ticket)
       if (running) {
@@ -227,6 +343,14 @@ export class DshdExecutor implements ExecutorPort {
         else if (binding.state !== 'ended') this.watchLater(ticket.id, running.id)
       } else if (latest?.state === 'pending' && !waitsForPerson(ticket)) this.start(ticket, latest)
     }
+    // A stop still queued from before the restart holds its unit's slot until it records the unit's end.
+    for (const name of this.host.store.keys(BINDING)) {
+      const assignmentId = name.slice(BINDING.prefix.length)
+      if (!this.host.effects.pending('dshd-stop', assignmentId)) continue
+      const binding = this.host.store.get(name)
+      if (binding && binding.state !== 'ended') this.stopping.set(assignmentId, binding.pair)
+    }
+    this.sweepEnded()
   }
   /** Units keep running when this process stops; the dshd calls under way end with the host's lifetime. */
   async shutdown(): Promise<void> {}
@@ -250,47 +374,120 @@ export class DshdExecutor implements ExecutorPort {
     if (typeof cwd === 'string' && isAbsolute(cwd)) return cwd
     return this.host.machine.dshd.cwd || undefined
   }
-  /** The pair a Ticket runs on: its origin Trigger's `meta.pair`, else the default pair. */
+  /** The pair a Ticket runs on: its origin Trigger's `meta.pair`, else the default pair; an empty `meta.pair` names none. */
   private pairOf(ticket: Ticket): { name: string; pair: DshdPair } {
     const { pairs, defaultPair } = this.host.machine.dshd
     const named = sourceTrigger(this.host, ticket)?.meta.pair
-    const name = typeof named === 'string' ? named : defaultPair
+    const name = typeof named === 'string' && named !== '' ? named : defaultPair
     const pair = Object.hasOwn(pairs, name) ? pairs[name] : undefined
     if (!pair) throw new LaunchRefused(`unknown pair ${name}`)
     return { name, pair }
   }
   private async launchQueued({ ticketId, assignmentId }: { ticketId: string; assignmentId: string }): Promise<void> {
+    this.release(assignmentId)
     const ticket = this.host.store.tickets.get(ticketId)
     const assignment = ticket && latestAssignment(ticket)
-    if (!ticket || !liveTicket(ticket) || assignment?.id !== assignmentId || assignment.state !== 'pending') return
+    if (!ticket || !liveTicket(ticket) || assignment?.id !== assignmentId || assignment.state !== 'pending') {
+      // An earlier try that ended before dshd answered, as a restart cuts one, may have started the unit of this ended Assignment.
+      if (this.host.store.get(BINDING(assignmentId))?.state === 'launching') this.stopUnanswered(ticketId, assignmentId)
+      return
+    }
     if (this.host.closing()) throw new Error('dsh-superagent is stopping')
     if (this.host.paused()) throw new Later('Processing is paused')
     const stored = this.host.store.get(BINDING(assignmentId))
+    try { this.holdResumed(ticket, assignment, stored) }
+    catch (error) { if (error instanceof LaunchRefused) { this.launchFailed(ticketId, assignmentId, error); return } throw error }
     let pair: { name: string; pair?: DshdPair }
     try { pair = stored ? { name: stored.pair, pair: this.host.machine.dshd.pairs[stored.pair] } : this.pairOf(ticket) }
     catch (error) { this.launchFailed(ticketId, assignmentId, error); return }
     const max = pair.pair?.maxWorkers
     const ofPair = this.runningTickets().filter(({ binding }) => binding.pair === pair.name).length
-      + [...this.launching.values()].filter(name => name === pair.name).length
+      + [...this.launching.values(), ...this.stopping.values()].filter(name => name === pair.name).length
     if (max !== undefined && ofPair >= max) throw new Later(`No slot for pair ${pair.name}`)
     this.slots.reserve(ticketId, 'launch')
     this.launching.set(assignmentId, pair.name)
     try { await this.launch(ticket, assignment, stored); this.unavailable.delete(assignmentId) }
     catch (error) {
       if (this.host.closing() || error instanceof Later) throw error
-      if (error instanceof DshdUnavailable) {
+      // A run dshd did not answer may have started the unit: the next try repeats the frozen recipe, which dshd answers for that unit.
+      const unanswered = error instanceof DshdUnanswered
+      if (error instanceof DshdUnavailable || unanswered) {
         const tries = (this.unavailable.get(assignmentId) ?? 0) + 1
         this.unavailable.set(assignmentId, tries)
-        if (tries < UNAVAILABLE_TRIES) throw error
+        if (tries < UNAVAILABLE_TRIES && this.stillPending(ticketId, assignmentId)) throw error
       }
       this.unavailable.delete(assignmentId)
       this.launchFailed(ticketId, assignmentId, error)
+      // No later try binds a unit that run may have started.
+      if (unanswered) this.stopUnanswered(ticketId, assignmentId)
     } finally { this.launching.delete(assignmentId); this.slots.free(ticketId) }
   }
+  /**
+   * Queues the stop of a unit a launch that dshd did not answer may have started; it looks for the unit under the frozen name
+   * and labels, and holds its slot until the stop records its end, as any stop does.
+   */
+  private stopUnanswered(ticketId: string, assignmentId: string): void {
+    this.stopLater(ticketId, assignmentId, 'dshd did not answer its launch')
+  }
+  /**
+   * The Assignment from before this start that a launch of `assignment` resumes: itself when it was created before the start,
+   * or the one a restart replaced with it (upstream's `hostRestarted`, as for a unit a reboot cut) when that one was. Work
+   * created since the start has none.
+   */
+  private resumedFrom(ticket: Ticket, assignment: Assignment): Assignment | undefined {
+    const before = (item: Assignment | undefined): boolean => !!item && Date.parse(item.createdAt) < this.startedAt
+    if (before(assignment)) return assignment
+    const previous = ticket.assignments[ticket.assignments.findIndex(item => item.id === assignment.id) - 1]
+    return previous?.endedReason === 'hostRestarted' && before(previous) ? previous : undefined
+  }
+  /**
+   * Holds the launch of work from before this start (see `resumedFrom`) until `dshd.resumeDelaySeconds` after the start, so a
+   * person can look at it, and stop it, before any unit runs: a start with nobody watching, such as a supervisor's, launches
+   * nothing at once. It refuses work older than `dshd.resumeMaxAgeHours`, unless its launch was under way before the start
+   * (`stored`), whose frozen recipe dshd may already run. Work created since the start launches at once.
+   */
+  private holdResumed(ticket: Ticket, assignment: Assignment, stored: DshdBinding | undefined): void {
+    const resumed = this.resumedFrom(ticket, assignment)
+    if (!resumed) return
+    const { resumeDelaySeconds, resumeMaxAgeHours } = this.host.machine.dshd
+    const age = Date.now() - Date.parse(resumed.createdAt)
+    if (!stored && resumeMaxAgeHours && age > resumeMaxAgeHours * 3_600_000) {
+      throw new LaunchRefused(`Not launched after the restart: this work waited ${Math.floor(age / 3_600_000)} h, longer than dshd.resumeMaxAgeHours `
+        + `(${resumeMaxAgeHours} h). Retry the ticket to launch it.`)
+    }
+    const until = this.startedAt + resumeDelaySeconds * 1000
+    if (Date.now() >= until) return
+    this.held.add(assignment.id)
+    const count = this.held.size
+    this.host.health.set({ state: 'ready', at: now(),
+      detail: `${count} Assignment${count === 1 ? '' : 's'} from before the start launch${count === 1 ? 'es' : ''} at ${clock(until)}` })
+    throw new Later(`Work from before the start launches at ${new Date(until).toISOString()}`)
+  }
+  /** Lets go of a held launch, and says so on the worker health entry once none is held. */
+  private release(assignmentId: string): void {
+    if (this.held.delete(assignmentId) && !this.held.size) {
+      this.host.health.set({ state: 'ready', detail: 'No Assignment from before the start waits to launch', at: now() })
+    }
+  }
+  /** Whether the Assignment is still the live Ticket's pending one, which a launch may start. */
+  private stillPending(ticketId: string, assignmentId: string): boolean {
+    const ticket = this.host.store.tickets.get(ticketId)
+    const assignment = ticket && latestAssignment(ticket)
+    return !!ticket && liveTicket(ticket) && assignment?.id === assignmentId && assignment.state === 'pending'
+  }
   private async launch(ticket: Ticket, assignment: Assignment, stored: DshdBinding | undefined): Promise<void> {
-    const binding = stored ?? await this.bindingOf(ticket, assignment)
+    let binding = stored
+    // A launch recorded failed with no unit made launches again on what waits now, such as the person's message that launched it.
+    if (binding?.state === 'launching' && assignment.report?.state === 'failed' && assignment.report.at >= binding.launchedAt
+      && await this.dshd.get(binding.name, this.host.lifetime) === 'not-found') binding = undefined
+    if (!binding) {
+      const cwd = ticket.execution?.directory ?? ''
+      if (!this.cwdOf(ticket) && cwd) await mkdir(cwd, { recursive: true })
+      // The directory is checked before the recipe is frozen, so a person who makes it launches the Ticket again afresh.
+      await this.directory(cwd)
+      binding = await this.bindingOf(ticket, assignment)
+    } else await this.directory(binding.recipe.cwd)
     const { recipe } = binding
-    if (!await stat(recipe.cwd).then(info => info.isDirectory(), () => false)) throw new LaunchRefused(`cwd ${recipe.cwd} does not exist`)
     const result = await this.dshd.run(recipe, this.host.lifetime)
     let status: DshdStatus | 'not-found'
     if (!('refused' in result)) status = result
@@ -299,10 +496,16 @@ export class DshdExecutor implements ExecutorPort {
     if (status === 'not-found') throw new LaunchRefused(`dshd refused ${recipe.name}: task-already-ran, then no longer knew it`)
     this.bind(ticket.id, assignment.id, binding, status)
   }
+  private async directory(cwd: string): Promise<void> {
+    if (!await stat(cwd).then(info => info.isDirectory(), () => false)) throw new LaunchRefused(`cwd ${cwd} does not exist`)
+  }
   /**
    * Builds the recipe of an Assignment's first launch attempt and stores it as its binding before dshd runs anything, so every
-   * later attempt reuses it byte for byte. A brief longer than `briefArgvMaxChars` goes to a file under `stateDir/briefs`,
-   * which no unit can have read yet, as none runs without the binding.
+   * later attempt reuses it byte for byte. A brief of more than `briefArgvMaxChars` bytes of UTF-8 goes to a file under
+   * `stateDir/briefs`, which no unit can have read yet, as none runs without the binding: Linux takes one argument of at most
+   * 131072 bytes (`MAX_ARG_STRLEN`), and a character outside ASCII takes two to four. The file stays after the binding ends:
+   * the unit's Session names only its path, so it is the record of that task (docs/006 says `briefs/` grows until an operator
+   * clears it).
    */
   private async bindingOf(ticket: Ticket, assignment: Assignment): Promise<DshdBinding> {
     const { machine: { dshd, stateDir }, store } = this.host
@@ -310,16 +513,19 @@ export class DshdExecutor implements ExecutorPort {
     const k = ticket.assignments.findIndex(item => item.id === assignment.id) + 1
     const name = unitName(dshd.prefix, ticket.execution?.name, ticket.id, k)
     const cwd = ticket.execution?.directory ?? ''
-    if (!this.cwdOf(ticket) && cwd) await mkdir(cwd, { recursive: true })
     const inputIds = [...ticket.undelivered]
-    const inputs = inputIds.flatMap(id => {
+    const messages = (ids: string[]) => ids.flatMap(id => {
       const input = ticket.inputs.find(item => item.id === id)
       const message = input && inputMessage(input, this.inputCard(input))
       return message === undefined ? [] : [message]
     })
-    const brief = composeBrief(ticket, k, sourceTrigger(this.host, ticket), batchOf(this.host, ticket), inputs)
+    // Each unit is a fresh Session, so a recovery or retry gets again what earlier units' briefs carried, without their restart notes.
+    const earlier = ticket.assignments.slice(0, k - 1).flatMap(previous => previous.deliveredAt ? store.get(BINDING(previous.id))?.inputIds ?? [] : [])
+    const restarts = new Set(ticket.assignments.map(item => key('input', ticket.id, 'restart', item.id)))
+    const carried = [...new Set(earlier)].filter(id => !inputIds.includes(id) && !restarts.has(id))
+    const brief = composeBrief(ticket, k, sourceTrigger(this.host, ticket), batchOf(this.host, ticket), messages(inputIds), messages(carried))
     let task = brief
-    if (brief.length > dshd.briefArgvMaxChars) {
+    if (Buffer.byteLength(brief) > dshd.briefArgvMaxChars) {
       const file = join(stateDir, 'briefs', `${assignment.id}.json`)
       await mkdir(join(stateDir, 'briefs'), { recursive: true, mode: 0o700 })
       await writeFile(file, brief, { mode: 0o600 })
@@ -331,11 +537,18 @@ export class DshdExecutor implements ExecutorPort {
       if (EXTRA_LABEL.test(label) && typeof value === 'string' && value.length <= 256 && !value.includes('\n')) labels[label] = value
     }
     Object.assign(labels, { [LABEL.orchestrator]: this.host.masterId, [LABEL.ticket]: ticket.id, [LABEL.assignment]: assignment.id, [LABEL.pair]: pair })
-    const env = { ...inherited(dshd.passEnv), ...dshd.env, ...config.env }
+    const env = { ...inherited(dshd.passEnv, this.host.environment?.(), entries => { this.storePathsLeft(entries) }), ...dshd.env, ...config.env }
     const binding: DshdBinding = { executor: 'dshd', host: this.hostname(), name, pair, state: 'launching', launchedAt: now(),
       recipe: { name, cwd, labels, profile: config.profile, args: [...dshd.args], task, env }, inputIds }
     store.atomic(() => { store.set(BINDING(assignment.id), binding) })
     return binding
+  }
+  /** Logs once that `passEnv` left PATH entries under the Nix store out of a unit's recipe (see `inherited`). */
+  private storePathsLeft(entries: string[]): void {
+    if (this.warnedStore) return
+    this.warnedStore = true
+    this.host.context.logger.warn('dsh-superagent leaves PATH entries under /nix/store out of every unit\'s environment, as a unit replays its recipe '
+      + 'on later starts and a garbage collection may delete them; give this process a PATH of profile links: %s', entries.join(':'))
   }
   /** A Trigger Input as the brief carries it, in full. */
   private inputCard(input: TicketInput): object | undefined {
@@ -352,10 +565,8 @@ export class DshdExecutor implements ExecutorPort {
     const bound: DshdBinding = { ...binding, state: 'running', ...(status.id ? { instanceId: status.id } : {}), ...(invocationId ? { invocationId } : {}) }
     store.atomic(() => {
       store.set(BINDING(assignmentId), bound)
-      const ticket = store.tickets.get(ticketId)
-      const assignment = ticket && latestAssignment(ticket)
-      if (!ticket || !liveTicket(ticket) || assignment?.id !== assignmentId || assignment.state !== 'pending') {
-        this.host.effects.enqueue('dshd-stop', assignmentId, { ticketId, assignmentId, reason: 'The Assignment ended while its unit started' })
+      if (!this.stillPending(ticketId, assignmentId)) {
+        this.stopLater(ticketId, assignmentId, 'The Assignment ended while its unit started')
         return
       }
       engine.assignmentStarted(ticketId, assignmentId)
@@ -373,7 +584,7 @@ export class DshdExecutor implements ExecutorPort {
   /** Follows a bound unit with `dshd wait` until it ends, then settles its Assignment from `dshd get` and its events. */
   private async watch({ ticketId, assignmentId }: { ticketId: string; assignmentId: string }): Promise<void> {
     let binding = this.host.store.get(BINDING(assignmentId))
-    if (!binding || binding.state !== 'running') return
+    if (!binding || binding.state !== 'running') { this.uncertain.delete(assignmentId); return }
     const { name } = binding
     this.sameHost(binding)
     const signal = this.host.lifetime
@@ -381,11 +592,21 @@ export class DshdExecutor implements ExecutorPort {
     if (status === 'not-found') return this.settle(ticketId, assignmentId, 'lost')
     if (status.labels[LABEL.orchestrator] !== this.host.masterId) return this.settle(ticketId, assignmentId, 'superseded')
     if (!binding.invocationId && invocationOf(status)) {
-      binding = { ...binding, invocationId: invocationOf(status)! }
-      this.host.store.set(BINDING(assignmentId), binding)
+      const invocationId = invocationOf(status)!
+      // A stop may have recorded the end during the get: the fresh row is the one to keep.
+      const fresh = this.host.store.atomic(() => {
+        const latest = this.host.store.get(BINDING(assignmentId))
+        if (!latest || latest.state === 'ended') return undefined
+        const next = { ...latest, invocationId }
+        this.host.store.set(BINDING(assignmentId), next)
+        return next
+      })
+      if (!fresh) return
+      binding = fresh
     }
     if (invocationOf(status) !== binding.invocationId) return this.settle(ticketId, assignmentId, 'superseded')
     if (RUNNING.has(status.state)) {
+      this.uncertain.delete(assignmentId)
       const waited = await this.dshd.wait(name, this.host.machine.dshd.watchSeconds, signal)
       if (waited !== 'not-found' && waited.outcome === 'still-running') throw new Later(`Unit ${name} still runs`)
       status = await this.dshd.get(name, signal)
@@ -394,25 +615,46 @@ export class DshdExecutor implements ExecutorPort {
     }
     const verdict = verdictOf(status)
     if (verdict === 'running') throw new Later(`Unit ${name} still runs`)
-    if (verdict === 'unknown') throw new Error(`Unit ${name} is ${status.state}: dsh-superagent keeps its Assignment until dshd can tell how it ended`)
+    if (verdict === 'unknown') return this.uncertainEnd(ticketId, assignmentId, name, status.state)
+    this.uncertain.delete(assignmentId)
     const events = await this.printed(name, binding.invocationId, signal)
     const child = status.lastRun?.child ?? {}
     this.settle(ticketId, assignmentId, verdict, { ...child, ending: status.lastRun?.ending ?? null }, events)
   }
   /**
-   * What the bound run printed, from `dshd read`: its answer from the newest lines, and its Session from them or, when they do
-   * not reach back to the run's start and name none, from a longer read. A longer read dshd does not answer readably, such as
-   * one past the read cap, leaves the Session unknown; the end settles either way.
+   * A look that found the unit in a state dshd cannot tell an end from. The Assignment keeps its slot while dshd may yet tell,
+   * for `dshd.uncertainWatchLimit` looks in a row (0: always), then settles as lost, as a stop of such a unit does; an orphaned
+   * unit, a unit dshd holds no record of, settles at once. Lost is a failed report: the Ticket waits for a person.
    */
-  private async printed(name: string, invocationId: string | undefined, signal: AbortSignal): Promise<{ sessionId?: string; final?: string }> {
+  private uncertainEnd(ticketId: string, assignmentId: string, name: string, state: string): void {
+    const looks = (this.uncertain.get(assignmentId) ?? 0) + 1
+    const limit = this.host.machine.dshd.uncertainWatchLimit
+    if (state !== 'orphaned' && (limit === 0 || looks < limit)) {
+      this.uncertain.set(assignmentId, looks)
+      throw new Error(`Unit ${name} is ${state}: dsh-superagent keeps its Assignment until dshd can tell how it ended (look ${looks}${limit ? ` of ${limit}` : ''})`)
+    }
+    this.uncertain.delete(assignmentId)
+    this.host.context.logger.warn('dsh-superagent settles the Assignment of unit %s as lost: dshd reports it %s', name, state)
+    this.settle(ticketId, assignmentId, 'lost')
+  }
+  /**
+   * What the bound run printed, from `dshd read`: its answer from the newest lines, and its Session from them or, when they do
+   * not reach back to the run's start and name none, from a longer read. Its usage comes from whichever of those reads reaches
+   * back to the run's start (see `usageOf`); no read is made for the usage alone, so a run whose newest lines name its Session
+   * but do not reach back leaves it unknown. A longer read dshd does not answer readably, such as one past the read cap, leaves
+   * the Session unknown; the end settles either way.
+   */
+  private async printed(name: string, invocationId: string | undefined, signal: AbortSignal): Promise<Printed> {
     const read = await this.dshd.read(name, signal)
     if (read === 'not-found' || read.invocationId !== invocationId) return {}
     const events = eventsOf(read)
-    if (events.sessionId !== undefined || read.complete) return events
+    if (read.complete) return withUsage(events, usageOf(read))
+    if (events.sessionId !== undefined) return events
     try {
       const longer = await this.dshd.read(name, signal, READ_RUN_LINES)
-      const sessionId = longer !== 'not-found' && longer.invocationId === invocationId ? eventsOf(longer).sessionId : undefined
-      return sessionId === undefined ? events : { ...events, sessionId }
+      if (longer === 'not-found' || longer.invocationId !== invocationId) return events
+      const sessionId = eventsOf(longer).sessionId
+      return withUsage(sessionId === undefined ? events : { ...events, sessionId }, usageOf(longer))
     } catch (error) {
       if (signal.aborted) throw error
       return events
@@ -424,13 +666,13 @@ export class DshdExecutor implements ExecutorPort {
    * that ended meanwhile, by a stop or an earlier run of this watch, is settled already and stays as it is.
    */
   private settle(ticketId: string, assignmentId: string, verdict: Verdict,
-    end: { exitCode?: number; signal?: number; ending?: string | null } = {}, events: { sessionId?: string; final?: string } = {}): void {
+    end: { exitCode?: number; signal?: number; ending?: string | null } = {}, events: Printed = {}): void {
     const { store, engine } = this.host
     store.atomic(() => {
       const binding = store.get(BINDING(assignmentId))
       if (!binding || binding.state === 'ended') return
       store.set(BINDING(assignmentId), { ...binding, state: 'ended', ended: { at: now(), verdict, ...end },
-        ...(events.sessionId ? { sessionId: events.sessionId } : {}) })
+        ...(events.sessionId ? { sessionId: events.sessionId } : {}), ...(events.usage ? { usage: events.usage } : {}) })
       const ticket = store.tickets.get(ticketId)
       // The end is recorded either way; the Engine hears of it only for the Assignment that still runs the Ticket.
       if (!ticket || !current(ticket, assignmentId)) return
@@ -443,13 +685,26 @@ export class DshdExecutor implements ExecutorPort {
     })
   }
   /**
+   * The `dshd-stop` effect: stops the unit of an Assignment the domain ended (see `stopUnit`), then sweeps the briefs of the
+   * Tickets that have ended: a Ticket's end stops every Assignment it has not ended, so each Ticket that wrote a brief passes
+   * here once it ends. Once the Ticket has ended, it also queues the removal of its units (see `removeLater`).
+   */
+  private async stopQueued(payload: { ticketId: string; assignmentId: string; reason: string }): Promise<void> {
+    await this.stopUnit(payload)
+    await this.sweepBriefs()
+    this.removeLater(payload.ticketId)
+  }
+  /**
    * Stops the unit of an Assignment the domain ended, only while its current run is the one this binding started; the domain
    * already ended the Assignment, so nothing is reported.
    */
-  private async stopQueued({ assignmentId }: { ticketId: string; assignmentId: string; reason: string }): Promise<void> {
+  private async stopUnit({ assignmentId }: { ticketId: string; assignmentId: string; reason: string }): Promise<void> {
     const binding = this.host.store.get(BINDING(assignmentId))
     // A launch under way checks the Assignment again when it binds, and queues the stop again then.
-    if (!binding || binding.state === 'ended' || (binding.state === 'launching' && this.launching.has(assignmentId))) return
+    if (!binding || binding.state === 'ended' || (binding.state === 'launching' && this.launching.has(assignmentId))) {
+      this.stopping.delete(assignmentId)
+      return
+    }
     this.sameHost(binding)
     const signal = this.host.lifetime
     const status = await this.dshd.get(binding.name, signal)
@@ -468,11 +723,94 @@ export class DshdExecutor implements ExecutorPort {
       // A watch that settled the unit meanwhile has recorded how it ended.
       if (latest.state !== 'ended') this.host.store.set(BINDING(assignmentId), { ...latest, state: 'ended', ended: { at: now(), verdict } })
     })
+    this.stopping.delete(assignmentId)
+  }
+  /**
+   * Under `dshd.removeEnded`, queues a `dshd-rm` for each ended unit of a Ticket that has ended. Every Ticket end stops its
+   * Assignments that had not ended, through `dshd-stop`, so this runs once a Ticket's last unit is recorded ended.
+   */
+  private removeLater(ticketId: string): void {
+    if (!this.host.machine.dshd.removeEnded) return
+    const ticket = this.host.store.tickets.get(ticketId)
+    if (!ticket || liveTicket(ticket)) return
+    for (const { id } of ticket.assignments) {
+      const binding = this.host.store.get(BINDING(id))
+      if (binding?.state === 'ended' && !binding.removedAt) this.host.effects.enqueue('dshd-rm', id, { ticketId, assignmentId: id })
+    }
+  }
+  /**
+   * Under `dshd.removeEnded`, queues at a start a `dshd-rm` for each ended unit this host launched whose Ticket ended with no
+   * removal recorded: Tickets that ended while the key was off, or while dshd stayed unavailable past a removal's retries. It
+   * queues at most `SWEEP_UNITS`, the units that ended first; `removeQueued` checks each one again before it removes it.
+   */
+  private sweepEnded(): void {
+    const { store, machine, effects } = this.host
+    if (!machine.dshd.removeEnded) return
+    const swept = store.keys(BINDING).flatMap(key => {
+      const binding = store.get(key), assignmentId = key.slice(BINDING.prefix.length), ticketId = binding?.recipe.labels[LABEL.ticket]
+      if (binding?.state !== 'ended' || binding.removedAt || binding.host !== this.hostname() || !ticketId) return []
+      const ticket = store.tickets.get(ticketId)
+      return ticket && !liveTicket(ticket) ? [{ ticketId, assignmentId, at: binding.ended?.at ?? binding.launchedAt }] : []
+    })
+    for (const { ticketId, assignmentId } of swept.sort((a, b) => a.at.localeCompare(b.at)).slice(0, SWEEP_UNITS)) {
+      effects.enqueue('dshd-rm', assignmentId, { ticketId, assignmentId })
+    }
+  }
+  /**
+   * Removes an ended unit's dshd record with `dshd rm` once its Ticket has ended and its binding records how it ended and its
+   * Session, reading the Session from the unit's journal first when the binding has none. Only a unit that holds the bound run,
+   * carries this orchestrator's labels and does not run is removed; one that names no Session is kept. Where dshd takes
+   * `rm --invocation`, the removal names the bound run, and dshd's refusal keeps the unit and is recorded as `kept`. DSH keeps the Session.
+   */
+  private async removeQueued({ ticketId, assignmentId }: { ticketId: string; assignmentId: string }): Promise<void> {
+    const { store, machine } = this.host
+    const ticket = store.tickets.get(ticketId)
+    const binding = store.get(BINDING(assignmentId))
+    if (!machine.dshd.removeEnded || !ticket || liveTicket(ticket) || binding?.state !== 'ended' || binding.removedAt) return
+    this.sameHost(binding)
+    const signal = this.host.lifetime
+    const status = await this.dshd.get(binding.name, signal)
+    if (status !== 'not-found') {
+      const ours = status.labels[LABEL.orchestrator] === this.host.masterId && status.labels[LABEL.assignment] === assignmentId
+        && (!binding.invocationId || invocationOf(status) === binding.invocationId)
+      const verdict = verdictOf(status)
+      if (!ours || verdict === 'running' || verdict === 'unknown') return
+      const sessionId = binding.sessionId ?? (await this.printed(binding.name, binding.invocationId, signal)).sessionId
+      if (sessionId === undefined) return
+      if (!binding.sessionId) store.atomic(() => { store.set(BINDING(assignmentId), { ...store.get(BINDING(assignmentId)) ?? binding, sessionId }) })
+      // Where dshd takes it, `rm --invocation` repeats the check under dshd's locks, so a run started since the get stays.
+      const invocation = binding.invocationId && await this.dshd.removesByInvocation(signal) ? binding.invocationId : undefined
+      const removed = await this.dshd.rm(binding.name, signal, invocation)
+      if (removed !== 'not-found' && 'refused' in removed) {
+        const kept = { at: now(), reason: `${removed.refused}: ${removed.message}` }
+        store.atomic(() => { store.set(BINDING(assignmentId), { ...store.get(BINDING(assignmentId)) ?? binding, kept }) })
+        return
+      }
+    }
+    store.atomic(() => { store.set(BINDING(assignmentId), { ...store.get(BINDING(assignmentId)) ?? binding, removedAt: now() }) })
   }
   /** A binding is observed only on the host that launched its unit: dshd units are local to one user manager. */
   private sameHost(binding: DshdBinding): void {
     if (binding.host !== this.hostname()) {
       throw new Error(`The unit ${binding.name} runs on ${binding.host}, and this process runs on ${this.hostname()}: only ${binding.host} can observe it`)
+    }
+  }
+  /**
+   * Removes the briefs under `stateDir/briefs` that belong to no Assignment of an open Ticket. A Ticket that has ended launches
+   * no unit again, and each Assignment has a brief of its own, so nothing reads them; an open Ticket's briefs stay whatever its
+   * units did, as do files not named `<Assignment ID>.json`. A brief that cannot be removed is logged and left for the next sweep.
+   */
+  private async sweepBriefs(): Promise<void> {
+    const directory = join(this.host.machine.stateDir, 'briefs')
+    const left = (error: unknown) => { this.host.context.logger.warn('dsh-superagent could not sweep %s: %s', directory, String(error)) }
+    let files: string[]
+    try { files = await readdir(directory) }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') left(error); return }
+    // Read after the listing: the Assignment of any brief listed exists by now, so an open Ticket's brief is never taken.
+    const open = new Set(this.host.store.tickets.open().flatMap(ticket => ticket.assignments.map(assignment => assignment.id)))
+    for (const file of files) {
+      if (!file.endsWith('.json') || open.has(file.slice(0, -'.json'.length))) continue
+      await rm(join(directory, file), { force: true }).catch(left)
     }
   }
   /** Records a failed launch on its Ticket and relays it to the main Session; the Ticket waits for a person's message or a retry. */

@@ -20,10 +20,11 @@ import { TextCache } from '../src/app/cache.ts'
 import { KV } from '../src/kv.ts'
 import { SettingsSchema, policyVersion, type SettingsOrigin } from '../src/policy.ts'
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { z } from 'zod'
 import { feishuKind } from '../src/sources/feishu.ts'
 import { githubKind, pollRound } from '../src/sources/github.ts'
 import { CliError, Commands } from '../src/infra/commands.ts'
-import { UserError, key, runningAssignment, said, threadKey, waitsForPerson, type Trigger } from '../src/core/index.ts'
+import { UserError, key, runningAssignment, said, threadKey, waitsForPerson, type Ticket, type Trigger } from '../src/core/index.ts'
 import { feishuTrigger } from '../src/sources/feishu.ts'
 import { feishuChannel } from '../src/sources/feishu-trigger.ts'
 import { commentTrigger, githubChannel } from '../src/sources/github-trigger.ts'
@@ -227,6 +228,8 @@ it('relays an explicit member mention as a candidate and creates the ticket, ack
   // The ticket's execution environment is fixed at accept time: its directory under the execution root, and the Sources' values from its Trigger.
   expect(ticket.execution!.directory).toBe(join(directory, 'work', ticket.execution!.name))
   expect(Object.fromEntries(runtime.ticketEnvironment(ticket).map(variable => [variable.key, variable.value]))).toMatchObject({ DSH_SUPERAGENT_DIR: ticket.execution!.directory, DSH_SUPERAGENT_NAME: ticket.execution!.name, DSH_SUPERAGENT_TICKET: ticket.id, DSH_SUPERAGENT_FEISHU_CHAT: CHAT, DSH_SUPERAGENT_GITHUB_REPOSITORY: 'acme/widgets', DSH_SUPERAGENT_GITHUB_ACCOUNT: 'agent-bot', DSH_SUPERAGENT_GITHUB_NUMBER: '' })
+  // The panel's Ticket page lists them, as the dsh executor gives them to the prepare command and the worker.
+  expect((await api('GET', `tickets/${ticket.id}`)).body).toMatchObject({ environment: runtime.ticketEnvironment(ticket) })
   expect(ticket.assignments).toEqual([expect.objectContaining({ state: 'running', startedAt: expect.any(String) })])
   expect(sessionId).toBe(`worker-${ticket.id}`)
   expect(runtime.store.threads.get(`feishu:${CHAT}:om_1`)?.subscriptions).toEqual([ticket.id])
@@ -375,6 +378,23 @@ it('ends a ticket on ready when no PR is bound', async () => {
   await runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'done locally' })
   expect(runtime.store.tickets.get(ticket.id)).toMatchObject({ ended: expect.objectContaining({ outcome: 'completed' }) })
   await expect(runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'late' })).rejects.toThrow('Ticket ended')
+})
+
+it('tells the Source kinds of an ended ticket once its end commits, and nothing of an end that a rollback undid', async () => {
+  const ticketEnded = vi.fn<(ticket: Ticket) => void>()
+  runtime.sources.register({ kind: 'listener', title: { zh: '监听', en: 'Listener' }, description: { zh: '', en: '' }, health: [],
+    schema: z.object({}).strict(), fields: [], ticketEnded })
+  const { ticket } = await acceptedTicket()
+  // Work after the end throws, so the transaction that ended the ticket rolls back, and with it the end.
+  expect(() => runtime.store.atomic(() => { runtime.engine.stopTicket(ticket.id, 'stop'); throw new Error('after the end') })).toThrow('after the end')
+  expect(runtime.store.tickets.get(ticket.id)?.ended).toBeUndefined()
+  expect(ticketEnded).not.toHaveBeenCalled()
+  // A committed end reaches each kind once, after the commit, with the ticket as it was committed.
+  let during = -1
+  runtime.store.atomic(() => { runtime.engine.stopTicket(ticket.id, 'stop'); during = ticketEnded.mock.calls.length })
+  expect(during).toBe(0)
+  expect(ticketEnded).toHaveBeenCalledOnce()
+  expect(ticketEnded.mock.calls[0]![0]).toMatchObject({ id: ticket.id, ended: { outcome: 'stopped' } })
 })
 
 it('stops a ticket on a person\'s instruction for good, and resumes an ended one on any person\'s message on its thread', async () => {

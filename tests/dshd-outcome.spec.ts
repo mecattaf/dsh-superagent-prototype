@@ -5,7 +5,8 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { latestAssignment, waitsForPerson, type Ticket, type Trigger } from '../src/core/index.ts'
 import { DshdCli, DshdUnavailable, invocationOf, type DshdLastRun, type DshdRecipe } from '../src/executor/dshd-cli.ts'
-import { BINDING, eventsOf, unitName, verdictOf, type Verdict } from '../src/executor/dshd.ts'
+import { BINDING, eventsOf, unitName, usageOf, verdictOf, type Verdict } from '../src/executor/dshd.ts'
+import { isNoAnswer, noAnswerSummary } from '../src/executor/dshd-summary.ts'
 import { testDshd } from './fixtures/deployment.ts'
 import { FakeDshd, runLines } from './fixtures/fake-dshd.ts'
 import { GET_EXITED, READ_JSON_RUN, READ_LINES, RUN_CREATED, WAIT_ENDED_EXITED, WAIT_ENDED_FAILED, WAIT_STILL_RUNNING } from './fixtures/dshd-0.1.0.ts'
@@ -67,6 +68,27 @@ describe('dshd 0.1.0 output (captured 12 Nov)', () => {
     expect(eventsOf(read)).toEqual({ sessionId: 'session-0a4a53d1-0169-42ca-a8bf-ad6731f124e6', final: 'READY' })
     // `dshd read -n 3`: the final event and dshd-run's last two lines.
     expect(eventsOf({ lines: read.lines.slice(-3) })).toEqual({ sessionId: 'session-0a4a53d1-0169-42ca-a8bf-ad6731f124e6', final: 'READY' })
+  })
+})
+
+describe('a run\'s token usage', () => {
+  // The usage two workers' DSH Sessions recorded on each step's assistant/message, which a headless --json run prints on that
+  // step's step_end status: an OpenAI-compatible provider (totals, no cache writes) and Claude (cache writes, no total).
+  const OPENAI = [{ inputTokens: 3076, outputTokens: 116, totalTokens: 8662, cacheReadTokens: 5470 },
+    { inputTokens: 38, outputTokens: 1, totalTokens: 8701, cacheReadTokens: 8662 }]
+  const CLAUDE = { inputTokens: 2, outputTokens: 239, cacheReadTokens: 32343, cacheWriteTokens: 372 }
+  const read = (lines: string[], complete = true) => ({ invocationId: 'invocation-1', complete, lines })
+
+  it('sums the usage every step of a whole run printed, keeping a bucket only when every step reports it', () => {
+    expect(usageOf(read(runLines('session-o', 'DONE', OPENAI)))).toEqual({ inputTokens: 3114, outputTokens: 117, totalTokens: 17363, cacheReadTokens: 14132 })
+    expect(usageOf(read(runLines('session-c', 'DONE', [CLAUDE])))).toEqual(CLAUDE)
+    expect(usageOf(read(runLines('session-m', 'DONE', [OPENAI[0], CLAUDE])))).toEqual({ inputTokens: 3078, outputTokens: 355, cacheReadTokens: 37813 })
+  })
+  it('knows no usage when a step printed none, the lines do not reach back to the run\'s start, or no step ended', () => {
+    expect(usageOf(read(runLines('session-o', 'DONE', [OPENAI[0], undefined])))).toBeUndefined()
+    expect(usageOf(read(runLines('session-o', 'DONE', OPENAI), false))).toBeUndefined()
+    expect(usageOf(read(runLines('session-o', 'DONE')))).toBeUndefined()
+    expect(usageOf(read(['dshd-run: run started', JSON.stringify({ type: 'status', phase: 'step_end', turn: 1, step: 1, usage: { inputTokens: 'many' } })]))).toBeUndefined()
   })
 })
 
@@ -197,6 +219,23 @@ describe('the dshd executor on these outcomes', () => {
       expect(latestAssignment(stored(ticket))!.report).toMatchObject({ state: 'failed', summary: `Unit ${name} ended task-failed (exit 1).\n\nUnit ${name}; session unknown.` })
       expect(reported()).toEqual([expect.objectContaining({ unit: name, session: null })])
     })
+    it('takes no Session from a longer read that answers for another run under the unit\'s name', async () => {
+      const other = JSON.stringify({ name: 'probe-20261112-c1', invocationId: '0123456789abcdef0123456789abcdef', complete: true, streams: ['stdout', 'stderr'], lines: all })
+      const ticket = await accepted(failing({ stdout: other, exit: 0 }))
+      expect(binding(ticket)).toMatchObject({ state: 'ended', ended: { verdict: 'task-failed', exitCode: 1 } })
+      expect(binding(ticket)!.sessionId).toBeUndefined()
+      expect(reported()).toEqual([expect.objectContaining({ session: null })])
+    })
+    it('keeps the answer of the newest lines when only the longer read names the Session', async () => {
+      // A final event that does not repeat the Session, as dsh before 0.2.2 printed it.
+      const answered = [...all.slice(0, -3), JSON.stringify({ type: 'final', reason: { kind: 'error' }, text: 'Stopped: the model went away.' }), ...all.slice(-3)]
+      const dshd = replay({ run: [{ stdout: RUN_CREATED, exit: 0 }], get: [{ stdout: RUN_CREATED, exit: 0 }, { stdout: WAIT_ENDED_FAILED, exit: 0 }],
+        wait: [{ stdout: WAIT_ENDED_FAILED, exit: 0 }], read: [{ stdout: envelope(answered.slice(-200), false), exit: 0 }, { stdout: envelope(answered, true), exit: 0 }] })
+      const ticket = await accepted(dshd)
+      expect(dshd.verbs.filter(verb => verb === 'read')).toHaveLength(2)
+      expect(binding(ticket)).toMatchObject({ state: 'ended', sessionId: 'session-long' })
+      expect(latestAssignment(stored(ticket))!.report!.summary).toContain('Stopped: the model went away.')
+    })
     it('reads it once when its final event names the Session', async () => {
       const lines = [...all.slice(-198, -3), JSON.stringify({ type: 'final', sessionId: 'session-long', reason: { kind: 'completed' }, text: 'Done.' }),
         'dshd-run: dsh exited with status 0; exiting 0', 'dshd-run: run ended: success']
@@ -205,12 +244,28 @@ describe('the dshd executor on these outcomes', () => {
       const ticket = await accepted(dshd)
       expect(dshd.verbs).toEqual(['run', 'get', 'get', 'read'])
       expect(binding(ticket)).toMatchObject({ state: 'ended', sessionId: 'session-long', ended: { verdict: 'completed' } })
+      // No read is made for the usage alone: these lines do not reach back to the run's start, so it is not known.
+      expect(binding(ticket).usage).toBeUndefined()
+      expect(latestAssignment(stored(ticket))!.report).toMatchObject({ state: 'ready', summary: 'Done.' })
+    })
+    it('records on the binding the usage of every step of the whole run, from the longer read made for its Session', async () => {
+      const usage = { inputTokens: 10, outputTokens: 2, cacheReadTokens: 100 }
+      // A final event that does not repeat the Session, as dsh before 0.2.2 printed it.
+      const whole = ['dshd-run: run started', JSON.stringify({ type: 'session', sessionId: 'session-long', cwd: '/srv/agency' }),
+        ...Array.from({ length: 300 }, (_, step) => JSON.stringify({ type: 'status', phase: 'step_end', turn: 1, step: step + 1, usage })),
+        JSON.stringify({ type: 'final', reason: { kind: 'completed' }, text: 'Done.' }), 'dshd-run: dsh exited with status 0; exiting 0', 'dshd-run: run ended: success']
+      const exited = (lines: string[], complete: boolean) => JSON.stringify({ name: 'probe-20261112-g4', invocationId: 'f72771583e9a465d810ef7da34505aa6',
+        complete, streams: ['stdout', 'stderr'], lines })
+      const dshd = replay({ run: [{ stderr: refusal('task-already-ran'), exit: 4 }], get: [{ stdout: GET_EXITED, exit: 0 }],
+        read: [{ stdout: exited(whole.slice(-200), false), exit: 0 }, { stdout: exited(whole, true), exit: 0 }] })
+      const ticket = await accepted(dshd)
+      expect(dshd.calls.filter(argv => argv[1] === 'read').map(argv => argv.slice(2))).toEqual([['--json', binding(ticket).name], ['--json', '-n', '65536', binding(ticket).name]])
+      expect(binding(ticket)).toMatchObject({ state: 'ended', sessionId: 'session-long', usage: { inputTokens: 3000, outputTokens: 600, cacheReadTokens: 30000 },
+        ended: { verdict: 'completed' } })
       expect(latestAssignment(stored(ticket))!.report).toMatchObject({ state: 'ready', summary: 'Done.' })
     })
   })
-  it('words only the summary of a unit that exited 0 with no final answer as the workflow Source\'s NO_ANSWER reads it', async () => {
-    // floor/workflow `src/sources/workflow-backend.ts` NO_ANSWER, copied: a change to either side must change the other in the same merge.
-    const NO_ANSWER = /^Unit [a-z0-9][a-z0-9_-]* exited 0\.$/
+  it('words only the summary of a unit that exited 0 with no final answer as isNoAnswer, which the workflow Source reads, recognises it', async () => {
     const fake = new FakeDshd()
     const ends: [Parameters<FakeDshd['end']>[1], boolean][] = [[{ lines: runLines('session-1') }, true], [{ lines: runLines('session-2', 'Done.') }, false],
       [{ lines: runLines('session-3', 'Unit sa-x-a1 exited 0. Then more.') }, false], [{ exitCode: 1, lines: runLines('session-4') }, false],
@@ -225,10 +280,10 @@ describe('the dshd executor on these outcomes', () => {
       summaries.push(latestAssignment(stored(ticket))!.report!.summary)
     }
     expect(summaries[0]).toBe(`Unit ${fake.runs[0]!.name} exited 0.`)
-    expect(summaries.map(summary => NO_ANSWER.test(summary))).toEqual(ends.map(([, none]) => none))
-    // Every name the executor gives a unit, named or not, is one NO_ANSWER's name pattern takes.
+    expect(summaries.map(isNoAnswer)).toEqual(ends.map(([, none]) => none))
+    // Every name the executor gives a unit, named or not, is one isNoAnswer's name pattern takes.
     for (const name of [...fake.runs.map(item => item.name), unitName('sa', 'x'.repeat(60), 'ticket-1', 1), unitName('sa', undefined, '0123456789abcdef', 999)]) {
-      expect(NO_ANSWER.test(`Unit ${name} exited 0.`)).toBe(true)
+      expect(isNoAnswer(noAnswerSummary(name))).toBe(true)
     }
   })
   it('records failed without retrying for every refusal of dshd run that dshd 0.1.0 lists, and tries only an unavailable dshd again', async () => {

@@ -11,9 +11,6 @@ import { ciCounts, ciFact, ciSummary } from '../src/sources/github-read.ts'
 import { apply as applyGithub, githubKind, pollFailure, pollRound } from '../src/sources/github.ts'
 import { pollThreads as pollGithubThreads } from '../src/sources/github.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
-import { sourceTool, type SourceKind } from '../src/sources/kind.ts'
-import { startRuntime } from './fixtures/host.ts'
-import { z } from 'zod'
 import { cursorAt, POLL_HORIZON_MS } from '../src/sources/poll.ts'
 import { Store } from '../src/app/store.ts'
 import { Commands, commandError } from '../src/infra/commands.ts'
@@ -1044,7 +1041,7 @@ describe('feishu event consumer', () => {
   })
   /**
    * A bot CLI whose `event consume` behaves as `mode` says: `never` gets ready, `warn` warns once ready, `ready` stays up,
-   * and `flaky` exits after its first ready. It records each run and the PID of the latest.
+   * `flaky` exits after its first ready, and `events` prints the event lines once `go` exists. It records each run and the PID of the latest.
    */
   function cli(mode: 'never' | 'warn' | 'ready' | 'flaky' | 'events' | 'late'): string {
     const path = join(dir, 'lark-bot')
@@ -1056,7 +1053,7 @@ describe('feishu event consumer', () => {
     warn) echo '[event] ready' >&2; echo 'WARN the connection was reset' >&2; exec sleep 60 ;;
     ready) echo '[event] ready' >&2; exec sleep 60 ;;
     flaky) echo '[event] ready' >&2; [ "$n" -gt 1 ] && exec sleep 60; exit 1 ;;
-    events) echo '[event] ready' >&2; cat '${dir}/events'; touch '${dir}/printed'; exec sleep 60 ;;
+    events) echo '[event] ready' >&2; until [ -e '${dir}/go' ]; do sleep 0.1; done; cat '${dir}/events'; touch '${dir}/printed'; exec sleep 60 ;;
     late) echo '[event] ready' >&2; sleep 1; cat '${dir}/events'; touch '${dir}/printed'; exec sleep 60 ;;
   esac
   `, { mode: 0o755 })
@@ -1094,6 +1091,9 @@ describe('feishu event consumer', () => {
       event('om_3', 'oc_group', 'group')].join('\n') + '\n')
     const { ctx, health, store } = consumerSource(cli('events'))
     running = runFeishu(ctx, controller.signal)
+    // The ready line and the events arrive on different pipes, so the CLI prints the events only once the consumer is ready.
+    await vi.waitFor(() => expect(health.feishu).toMatchObject({ state: 'ready' }), until)
+    writeFileSync(join(dir, 'go'), '')
     await vi.waitFor(() => expect(store.triggers.get(feishuTriggerId('om_3'))).toBeDefined(), until)
     expect(['om_1', 'om_2'].map(id => store.triggers.get(feishuTriggerId(id))?.meta.direct)).toEqual([false, true])
     expect(store.get(KV.feishu.chats)).toEqual({ oc_group: false, oc_dm: true })
@@ -1406,30 +1406,5 @@ describe('observing the GitHub repository', () => {
       meta: { ci: true, branch: 'main', sha: 'bbb2222' }, url: 'https://github.com/acme/widgets/commit/bbb2222' })
     expect(h.receive.mock.calls[0]![0].text).toContain('Read github/commits/bbb2222/checks for every check.')
     h.store.close()
-  })
-})
-
-describe('a Source kind\'s main-Session tools', () => {
-  const probe = (name: string): SourceKind => ({ kind: 'probe', title: { zh: 'probe', en: 'probe' }, description: { zh: 'probe', en: 'probe' },
-    schema: z.object({}).strict(), fields: [], health: ['probe'],
-    tools: [sourceTool({ name, description: 'Echo the text.', schema: z.object({ text: z.string() }).strict(), execute: async ({ text }) => ({ text }) })] })
-  it('a kind\'s tools must be prefixed orchestrator_<kind>_ and reach the main Session', async () => {
-    const host = await startRuntime()
-    expect(() => host.runtime.sources.register(probe('orchestrator_echo'))).toThrow('does not start with orchestrator_probe_')
-    expect(host.runtime.sources.kind('probe')).toBeUndefined()
-    expect(host.tools.get(host.runtime.masterId)!.has('orchestrator_echo')).toBe(false)
-    host.runtime.sources.register(probe('orchestrator_probe_echo'))
-    expect(await host.runTool(host.runtime.masterId, 'orchestrator_probe_echo', { text: 'hi' })).toEqual({ text: 'hi' })
-    await host.stop()
-  })
-  it('a kind\'s tools reach a main Session decorated before the kind registered, leave it when the kind unregisters, and come back', async () => {
-    const host = await startRuntime()
-    const unregister = host.runtime.sources.register(probe('orchestrator_probe_echo'))
-    expect(await host.runTool(host.runtime.masterId, 'orchestrator_probe_echo', { text: 'hi' })).toEqual({ text: 'hi' })
-    unregister()
-    expect(host.tools.get(host.runtime.masterId)!.has('orchestrator_probe_echo')).toBe(false)
-    host.runtime.sources.register(probe('orchestrator_probe_echo'))
-    expect(host.tools.get(host.runtime.masterId)!.has('orchestrator_probe_echo')).toBe(true)
-    await host.stop()
   })
 })
