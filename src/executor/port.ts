@@ -2,4 +2,10 @@
 import type { DshExecutor } from './dsh.ts'
 
 /** What Runtime uses of its Executor, picked from DshExecutor so the two cannot drift apart; DshdExecutor implements it too. */
-export type ExecutorPort = Pick<DshExecutor, 'prepare' | 'start' | 'stop' | 'deliver' | 'install' | 'resume' | 'shutdown' | 'dispose' | 'activeCount'>
+export type ExecutorPort = Pick<DshExecutor, 'prepare' | 'start' | 'stop' | 'deliver' | 'install' | 'resume' | 'shutdown' | 'dispose' | 'activeCount'> & {
+  /**
+   * `false` when a running Assignment reads only its brief, so an Input that arrives while it runs is not delivered to it
+   * (`deliver` does nothing). Absent, the in-process Executor's default, a running worker receives Inputs at its next step.
+   */
+  readonly takesInput?: boolean
+}

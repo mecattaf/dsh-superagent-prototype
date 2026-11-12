@@ -179,6 +179,8 @@ export interface DshdExecutorHost {
  * upstream restarts interrupted work. A unit outlives this process, so a restart adopts the units that still run.
  */
 export class DshdExecutor implements ExecutorPort {
+  /** A unit reads only its brief, see `deliver`. */
+  readonly takesInput = false
   private readonly slots: WorkerSlots
   private readonly dshd: DshdPort
   private readonly hostname: () => string
