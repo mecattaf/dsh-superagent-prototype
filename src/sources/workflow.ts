@@ -14,7 +14,7 @@ export { SOURCE } from './workflow-trigger.ts'
  */
 export const Config = s.object({
   pollMs: s.number().min(500).max(60000).step(1).default(2000)
-    .description('How often a node that waits reads its ticket, in milliseconds.').volatile(),
+    .description('How often a node that waits reads its ticket for a failed or blocked report, in milliseconds; a node settles as soon as its ticket ends.').volatile(),
   concurrency: s.number().min(1).max(64).step(1).default(16)
     .description('agent() calls of one run in flight at once; the Executor\'s worker limit still caps the tickets that run.'),
   maxAttempts: s.number().min(1).max(3).step(1).default(1)
@@ -25,7 +25,7 @@ export const Config = s.object({
 export type WorkflowConfig = ReturnType<typeof Config>
 
 /** The workflow kind: its nodes are senderless, so the Policy's admission row `workflow` decides whether they become candidates. */
-export const workflowKind = (floor: Pick<WorkflowFloor, 'startRun' | 'status'>): SourceKind<Record<string, never>> => ({
+export const workflowKind = (floor: Pick<WorkflowFloor, 'startRun' | 'status' | 'ticketEnded'>): SourceKind<Record<string, never>> => ({
   kind: SOURCE,
   title: { zh: '工作流', en: 'Workflows' },
   description: { zh: '运行工作流脚本；脚本的每个 agent() 调用成为一个候选，接受后成为一张工单。', en: 'Runs workflow scripts; each agent() call of a script becomes a candidate, and a ticket once accepted.' },
@@ -34,6 +34,7 @@ export const workflowKind = (floor: Pick<WorkflowFloor, 'startRun' | 'status'>):
   health: [SOURCE],
   scope: () => ({ listened: true, observed: true, row: SOURCE }),
   tools: workflowTools(floor),
+  ticketEnded: ticket => { floor.ticketEnded(ticket) },
 })
 
 export const name = 'dsh-superagent-workflow'

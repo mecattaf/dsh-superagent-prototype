@@ -19,7 +19,7 @@ The plugin's Config holds machine settings, set on the row `dsh-superagent-workf
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `pollMs` | 2000 | How often a node that waits reads its Ticket; a change applies at the next poll, without a restart |
+| `pollMs` | 2000 | How often a node that waits reads its Ticket for a failed or blocked report, which ends nothing; a node whose Ticket ends settles at once. A change applies at the next poll, without a restart |
 | `concurrency` | 16 | `agent()` calls of one run in flight; the Executor's `maxWorkers` still caps the Tickets that run |
 | `maxAttempts` | 1 | Attempts at each call, each a new Trigger; with 1, a failed node or a reply that does not match its schema is `null` |
 | `pair` | empty | The compute pair of a run that names none; empty leaves it to the Executor |
