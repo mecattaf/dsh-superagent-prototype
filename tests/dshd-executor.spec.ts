@@ -392,6 +392,18 @@ describe('restart', () => {
     fake.end(nameOf(ticket)); await later()
     expect(stored(ticket).ended?.outcome).toBe('completed')
   })
+  it('settles a unit that ended while the orchestrator was down on the first pass after restart, with no new unit', async () => {
+    await start()
+    const { ticket } = await accepted(request('1', { cwd: directory() }))
+    fake.end(nameOf(ticket), { lines: runLines('session-6', 'Finished meanwhile.') })
+    await h!.restart()
+    await h!.runtime.idle()
+    expect(stored(ticket).ended?.outcome).toBe('completed')
+    expect(latestAssignment(stored(ticket))!.report).toMatchObject({ state: 'ready', summary: 'Finished meanwhile.' })
+    expect(stored(ticket).assignments).toHaveLength(1)
+    expect(fake.runs).toHaveLength(1)
+    expect(binding(ticket)).toMatchObject({ state: 'ended', invocationId: 'invocation-1', sessionId: 'session-6' })
+  })
   it('restarts an Assignment that ran in-process before the switch as upstream does', async () => {
     fake = new FakeDshd()
     h = await startRuntime(undefined, { spawn: spec => fake.spawn(spec) })
