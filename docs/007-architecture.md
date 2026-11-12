@@ -356,7 +356,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/views/settings.ts` | The settings page's view: each block with its revision, each Source's settings with its kind's form, and the execution environment |
 | `src/app/views/overview.ts` | The overview: Tickets that need a person, problems, the last day's flow and the Executor's load |
 | `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
-| `src/executor/port.ts` | `ExecutorPort`, what Runtime uses of its Executor beyond the core port |
+| `src/executor/port.ts` | `ExecutorPort`, what Runtime uses of its Executor, picked from `DshExecutor` |
 | `src/executor/dshd.ts` | The DshdExecutor, one dshd headless unit per Assignment: `DshdBinding`, `unitName`, `composeBrief`, `verdictOf` and `eventsOf` |
 | `src/executor/dshd-cli.ts` | `DshdCli`, the dshd client over DSH's subprocess service, and the `DshdPort` it implements |
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
