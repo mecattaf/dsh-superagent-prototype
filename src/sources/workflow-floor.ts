@@ -3,7 +3,7 @@ import type { Volatile } from '@deepseek-ai/cordis'
 import { createHash, randomBytes } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import { key, threadKey, type Thread, type Ticket } from '../core/index.ts'
+import { UserError, key, threadKey, type Thread, type Ticket } from '../core/index.ts'
 import { KV } from '../kv.ts'
 import { extractMeta, runWorkflow, type LoadedJournal, type RunResult, type WorkflowSource } from '../workflow/index.ts'
 import { health, sourceContext, type SourceContext, type SourceHost } from './host.ts'
@@ -30,7 +30,7 @@ export interface RunStatus {
 const STATUS_RUNS = 20
 
 const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex')
-const refused = (message: string): Error => new Error(`orchestrator_workflow_start: ${message}`)
+const message = (error: unknown): string => error instanceof Error ? error.message : String(error)
 
 /**
  * Resolves `workflow()` as the interpreter does, with the run's directory in place of the process's, and keeps each child it
@@ -101,18 +101,20 @@ export class WorkflowFloor {
     this.stopped.abort()
     this.waiter?.stop()
   }
-  /** Starts a run of a script in a directory, once per `trigger_id`; the script's text is kept, and a resume reads that text. */
+  /**
+   * Starts a run of a script in a directory, once per `trigger_id`; the script's text is kept, and a resume reads that text.
+   * @throws UserError when the Source is not running, `cwd` is not an absolute directory, or the script cannot be read or has no valid meta.
+   */
   startRun(request: StartRequest): StartResult {
     const source = this.ready()
-    if (!isAbsolute(request.cwd)) throw refused(`cwd must be an absolute path: ${request.cwd}`)
     let directory = false
-    try { directory = statSync(request.cwd).isDirectory() } catch { /* A missing directory is refused below. */ }
-    if (!directory) throw refused(`cwd is not a directory: ${request.cwd}`)
+    try { directory = isAbsolute(request.cwd) && statSync(request.cwd).isDirectory() } catch { /* A missing directory is refused below. */ }
+    if (!directory) throw new UserError('workflowCwd', { cwd: request.cwd })
     const scriptPath = resolve(request.cwd, request.script)
     let text: string
-    try { text = readFileSync(scriptPath, 'utf8') } catch (error) { throw refused(`cannot read the script ${scriptPath}: ${String(error)}`) }
+    try { text = readFileSync(scriptPath, 'utf8') } catch (error) { throw new UserError('workflowScript', { script: scriptPath, error: message(error) }) }
     let name: string
-    try { name = extractMeta(text).meta.name } catch (error) { throw refused(`the script's meta is invalid: ${String(error)}`) }
+    try { name = extractMeta(text).meta.name } catch (error) { throw new UserError('workflowMeta', { script: scriptPath, error: message(error) }) }
     const digest = sha256(text)
     const args = request.args
     const pair = request.pair ?? (this.config.pair || undefined)
@@ -129,12 +131,15 @@ export class WorkflowFloor {
     this.reportHealth()
     return { run_id: id, state: 'started', script_sha256: digest, name }
   }
-  /** The state of one run and of each of its nodes, or of the newest runs when `runId` names none. */
+  /**
+   * The state of one run and of each of its nodes, or of the newest runs when `runId` names none.
+   * @throws UserError when the Source is not running or `runId` names no run.
+   */
   status(runId?: string): RunStatus[] {
     const source = this.ready()
     if (runId !== undefined) {
       const run = source.state.get(KV.workflow.run(runId))
-      if (!run) throw new Error(`orchestrator_workflow_status: no workflow run ${runId}`)
+      if (!run) throw new UserError('unknownWorkflowRun', { run: runId })
       return [this.runStatus(source, run)]
     }
     return this.runs().sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, STATUS_RUNS).map(run => this.runStatus(source, run))
@@ -145,7 +150,7 @@ export class WorkflowFloor {
   get active(): number { return this.driving.size }
 
   private ready(): SourceContext {
-    if (!this.source || !this.source.configured() || this.stopped.signal.aborted) throw new Error('The workflow Source is not running')
+    if (!this.source || !this.source.configured() || this.stopped.signal.aborted) throw new UserError('sourceNotRunning', { source: SOURCE })
     return this.source
   }
   private runs(): WorkflowRun[] {

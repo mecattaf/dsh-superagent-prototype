@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { sourceContextOf, type SourceContextDeps } from '../src/app/source-context.ts'
 import { Store } from '../src/app/store.ts'
-import type { Trigger } from '../src/core/index.ts'
+import { UserError, type Trigger } from '../src/core/index.ts'
 import { HealthBoard } from '../src/infra/health.ts'
 import { KV } from '../src/kv.ts'
 import { SettingsSchema } from '../src/policy.ts'
@@ -12,6 +12,7 @@ import { SourceRegistry } from '../src/sources/registry.ts'
 import * as workflowPlugin from '../src/sources/workflow.ts'
 import { TicketWaiter } from '../src/sources/workflow-backend.ts'
 import { WorkflowFloor } from '../src/sources/workflow-floor.ts'
+import { workflowTools } from '../src/sources/workflow-tools.ts'
 import { FIXTURE, newDirectory, workflowHost, type WorkflowHost } from './fixtures/workflow.ts'
 
 const until = (check: () => unknown) => vi.waitFor(() => { if (!check()) throw new Error('not yet') }, { timeout: 3000, interval: 5 })
@@ -170,11 +171,11 @@ describe('orchestrator_workflow_start', () => {
     const { h, directory } = start()
     await h.started
     writeFileSync(join(directory, 'bad.js'), 'return 1\n')
-    expect(() => h.floor.startRun({ script: FIXTURE, cwd: 'relative' })).toThrow('cwd must be an absolute path')
-    expect(() => h.floor.startRun({ script: FIXTURE, cwd: join(directory, 'missing') })).toThrow('cwd is not a directory')
-    expect(() => h.floor.startRun({ script: FIXTURE, cwd: FIXTURE })).toThrow('cwd is not a directory')
-    expect(() => h.floor.startRun({ script: 'missing.js', cwd: directory })).toThrow('cannot read the script')
-    expect(() => h.floor.startRun({ script: 'bad.js', cwd: directory })).toThrow('meta is invalid')
+    expect(() => h.floor.startRun({ script: FIXTURE, cwd: 'relative' })).toThrow(new UserError('workflowCwd', { cwd: 'relative' }))
+    expect(() => h.floor.startRun({ script: FIXTURE, cwd: join(directory, 'missing') })).toThrow('cwd must be an absolute path to an existing directory')
+    expect(() => h.floor.startRun({ script: FIXTURE, cwd: FIXTURE })).toThrow('cwd must be an absolute path to an existing directory')
+    expect(() => h.floor.startRun({ script: 'missing.js', cwd: directory })).toThrow('Cannot read the workflow script')
+    expect(() => h.floor.startRun({ script: 'bad.js', cwd: directory })).toThrow('must export a valid meta')
     expect(h.floor.status()).toEqual([])
   })
   it('the tools refuse once the Source stopped and while setup is pending, which resumes no run', async () => {
@@ -220,6 +221,36 @@ describe('orchestrator_workflow_start', () => {
     const { h: h2 } = start(directory)
     await until(() => h2.run(run)?.state !== 'running')
     expect(h2.run(run)).toMatchObject({ state: 'completed', result: 7 })
+  })
+})
+
+describe('the workflow tools\' refusals', () => {
+  /** What a tool call that throws settles to: DSH renders a thrown tool as `Error: <message>`, the text the brain reads. */
+  const refusal = async (call: Promise<unknown>) => {
+    const error = await call.then(() => undefined, (thrown: unknown) => thrown)
+    expect(error).toBeInstanceOf(UserError)
+    return `Error: ${(error as UserError).message}`
+  }
+  it('answers each refusal as a UserError whose text says what to change, as the host\'s own tools do', async () => {
+    const { h, directory } = start()
+    await h.started
+    writeFileSync(join(directory, 'bad.js'), 'return 1\n')
+    const [startTool, statusTool] = workflowTools(h.floor)
+    const signal = new AbortController().signal
+    const begin = (args: Record<string, unknown>) => startTool!.execute(startTool!.schema.parse(args), signal)
+    const missing = join(directory, 'missing')
+    expect(await refusal(begin({ script: FIXTURE, cwd: missing })))
+      .toBe(`Error: cwd must be an absolute path to an existing directory, which ${missing} is not`)
+    expect(await refusal(begin({ script: 'missing.js', cwd: directory })))
+      .toMatch(new RegExp(`^Error: Cannot read the workflow script ${join(directory, 'missing.js')} \\(ENOENT: .*\\); name an existing script, absolute or relative to cwd$`))
+    expect(await refusal(begin({ script: 'bad.js', cwd: directory })))
+      .toMatch(new RegExp(`^Error: The workflow script ${join(directory, 'bad.js')} must export a valid meta \\(.*export const meta.*\\)$`))
+    expect(await refusal(statusTool!.execute({ run_id: 'wf-none' }, signal)))
+      .toBe('Error: Unknown workflow run wf-none; orchestrator_workflow_status without run_id lists the newest runs')
+    h.floor.stop()
+    for (const call of [begin({ script: FIXTURE, cwd: directory }), statusTool!.execute({}, signal)]) {
+      expect(await refusal(call)).toBe('Error: The workflow Source is not running: it is off, stopping or waiting for setup; retry once it runs')
+    }
   })
 })
 

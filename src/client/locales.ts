@@ -728,6 +728,11 @@ const TEXT = {
   'userError.sourceNotInstalled': ['{source} 来源的插件没有安装。', USER_ERRORS.sourceNotInstalled[1]],
   'userError.noLabels': ['这个来源没有可以刷新的名称。', USER_ERRORS.noLabels[1]],
   'userError.nothingToSync': ['{source} 来源上的策略没有指定从哪里同步，或者这个来源已关闭或在等待部署检查。', USER_ERRORS.nothingToSync[1]],
+  'userError.sourceNotRunning': ['{source} 来源没有在运行：它已关闭、正在停止或在等待部署检查；等它运行后再试。', USER_ERRORS.sourceNotRunning[1]],
+  'userError.unknownWorkflowRun': ['找不到工作流运行 {run}；不带 run_id 调用 orchestrator_workflow_status 会列出最新的运行。', USER_ERRORS.unknownWorkflowRun[1]],
+  'userError.workflowCwd': ['cwd 必须是一个已存在目录的绝对路径，{cwd} 不是。', USER_ERRORS.workflowCwd[1]],
+  'userError.workflowScript': ['读不到工作流脚本 {script}（{error}）；请指定一个存在的脚本，绝对路径或相对 cwd 的路径都可以。', USER_ERRORS.workflowScript[1]],
+  'userError.workflowMeta': ['工作流脚本 {script} 必须导出有效的 meta（{error}）。', USER_ERRORS.workflowMeta[1]],
   // Setup problems and health codes; English reuses the host's own text read by the log and main Session
   'setup.repositoryUnset': ['GitHub 来源没有设置监听的仓库。', SETUP_PROBLEMS.repositoryUnset[1]],
   'setup.foreignFile': ['{file} 不是 dsh-superagent 写入的文件；移走它，或换一个状态目录。', SETUP_PROBLEMS.foreignFile[1]],
