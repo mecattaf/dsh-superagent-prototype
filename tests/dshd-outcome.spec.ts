@@ -5,9 +5,9 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { latestAssignment, waitsForPerson, type Ticket, type Trigger } from '../src/core/index.ts'
 import { DshdCli, DshdUnavailable, invocationOf, type DshdLastRun, type DshdRecipe } from '../src/executor/dshd-cli.ts'
-import { BINDING, eventsOf, verdictOf, type Verdict } from '../src/executor/dshd.ts'
+import { BINDING, eventsOf, unitName, verdictOf, type Verdict } from '../src/executor/dshd.ts'
 import { testDshd } from './fixtures/deployment.ts'
-import { FakeDshd } from './fixtures/fake-dshd.ts'
+import { FakeDshd, runLines } from './fixtures/fake-dshd.ts'
 import { GET_EXITED, READ_JSON_RUN, READ_LINES, RUN_CREATED, WAIT_ENDED_EXITED, WAIT_ENDED_FAILED, WAIT_STILL_RUNNING } from './fixtures/dshd-0.1.0.ts'
 import { feishu, startRuntime, type Host } from './fixtures/host.ts'
 
@@ -207,6 +207,29 @@ describe('the dshd executor on these outcomes', () => {
       expect(binding(ticket)).toMatchObject({ state: 'ended', sessionId: 'session-long', ended: { verdict: 'completed' } })
       expect(latestAssignment(stored(ticket))!.report).toMatchObject({ state: 'ready', summary: 'Done.' })
     })
+  })
+  it('words only the summary of a unit that exited 0 with no final answer as the workflow Source\'s NO_ANSWER reads it', async () => {
+    // floor/workflow `src/sources/workflow-backend.ts` NO_ANSWER, copied: a change to either side must change the other in the same merge.
+    const NO_ANSWER = /^Unit [a-z0-9][a-z0-9_-]* exited 0\.$/
+    const fake = new FakeDshd()
+    const ends: [Parameters<FakeDshd['end']>[1], boolean][] = [[{ lines: runLines('session-1') }, true], [{ lines: runLines('session-2', 'Done.') }, false],
+      [{ lines: runLines('session-3', 'Unit sa-x-a1 exited 0. Then more.') }, false], [{ exitCode: 1, lines: runLines('session-4') }, false],
+      [{ signal: 9, lines: [] }, false]]
+    const summaries: string[] = []
+    for (const [index, [how]] of ends.entries()) {
+      const ticket = await accepted(fake, request(String(index + 1)))
+      fake.end(binding(ticket).name, how)
+      // The watch looks again later: time moves on and it runs now.
+      vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 10 * 60_000 })
+      try { await h!.runtime.pump(); await h!.runtime.idle() } finally { vi.useRealTimers() }
+      summaries.push(latestAssignment(stored(ticket))!.report!.summary)
+    }
+    expect(summaries[0]).toBe(`Unit ${fake.runs[0]!.name} exited 0.`)
+    expect(summaries.map(summary => NO_ANSWER.test(summary))).toEqual(ends.map(([, none]) => none))
+    // Every name the executor gives a unit, named or not, is one NO_ANSWER's name pattern takes.
+    for (const name of [...fake.runs.map(item => item.name), unitName('sa', 'x'.repeat(60), 'ticket-1', 1), unitName('sa', undefined, '0123456789abcdef', 999)]) {
+      expect(NO_ANSWER.test(`Unit ${name} exited 0.`)).toBe(true)
+    }
   })
   it('records failed without retrying for every refusal of dshd run that dshd 0.1.0 lists, and tries only an unavailable dshd again', async () => {
     const fake = new FakeDshd()
