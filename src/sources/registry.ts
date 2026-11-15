@@ -1,5 +1,5 @@
 /** Registry of installed Source kinds, their configured instances, and the Engine's SourceScope implementation. */
-import type { ChannelRef, OutboundMessage, ScopeResult, SourceScope, Trigger } from '../core/index.ts'
+import type { ChannelRef, OutboundMessage, ScopeResult, SourceScope, Ticket, Trigger } from '../core/index.ts'
 import type { Commands } from '../infra/commands.ts'
 import { HealthBoard, type HealthEntry } from '../infra/health.ts'
 import { AdmissionTableSchema, type Settings } from '../policy.ts'
@@ -22,6 +22,9 @@ export class SourceRegistry implements SourceScope {
     const refused = (name: string) => new Error(`Source kind ${kind.kind} declares the health entry ${name}, which another part reports`)
     const synced = kind.health.find(name => name.startsWith('sync:'))
     if (synced) throw refused(synced)
+    // The prefix keeps a kind's tools apart from the host's and other kinds', and inside the `orchestrator_` names bridges pass.
+    const unprefixed = kind.tools?.find(tool => !tool.name.startsWith(`orchestrator_${kind.kind}_`))
+    if (unprefixed) throw new Error(`Source kind ${kind.kind} adds the tool ${unprefixed.name}, whose name does not start with orchestrator_${kind.kind}_`)
     const entries = new Map<string, HealthEntry>()
     const release = () => { for (const [name, entry] of entries) { entry.release(); this.health.delete(name) } }
     for (const name of kind.health) {
@@ -106,6 +109,8 @@ export class SourceRegistry implements SourceScope {
     return { threads: [...new Set(found.flatMap(item => item.threads))], terms: [...new Set(found.flatMap(item => item.terms))] }
   }
   repliesTo(trigger: Trigger): string | undefined { return this.kinds.get(trigger.source)?.repliesTo?.(trigger) }
+  /** Tells each registered kind that hears of ended Tickets that `ticket` ended. */
+  ticketEnded(ticket: Ticket): void { for (const kind of this.kinds.values()) kind.ticketEnded?.(ticket) }
   threadContext(trigger: Trigger, settings = this.settings()): TriggerContext | undefined {
     const kind = this.kinds.get(trigger.source)
     const context = kind?.threadContext

@@ -10,19 +10,21 @@ import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { Runtime } from '../src/app/runtime.ts'
 import { jobRegistry } from './fixtures/host.ts'
 import { evalsHealth } from '../src/app/views/overview.ts'
-import { mandateInstructions } from '../src/executor/dsh.ts'
+import { DshExecutor, mandateInstructions } from '../src/executor/dsh.ts'
+import { DshdExecutor } from '../src/executor/dshd.ts'
 import { masterPrompt } from '../src/app/context.ts'
-import { reference, testMachine } from './fixtures/deployment.ts'
+import { reference, testDshd, testMachine } from './fixtures/deployment.ts'
 import type { Machine } from '../src/deployment.ts'
 import { SCHEMA_VERSION, Store } from '../src/app/store.ts'
 import { TextCache } from '../src/app/cache.ts'
 import { KV } from '../src/kv.ts'
 import { SettingsSchema, policyVersion, type SettingsOrigin } from '../src/policy.ts'
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { z } from 'zod'
 import { feishuKind } from '../src/sources/feishu.ts'
 import { githubKind, pollRound } from '../src/sources/github.ts'
 import { CliError, Commands } from '../src/infra/commands.ts'
-import { UserError, key, runningAssignment, said, threadKey, waitsForPerson, type Trigger } from '../src/core/index.ts'
+import { UserError, key, runningAssignment, said, threadKey, waitsForPerson, type Ticket, type Trigger } from '../src/core/index.ts'
 import { feishuTrigger } from '../src/sources/feishu.ts'
 import { feishuChannel } from '../src/sources/feishu-trigger.ts'
 import { commentTrigger, githubChannel } from '../src/sources/github-trigger.ts'
@@ -226,6 +228,8 @@ it('relays an explicit member mention as a candidate and creates the ticket, ack
   // The ticket's execution environment is fixed at accept time: its directory under the execution root, and the Sources' values from its Trigger.
   expect(ticket.execution!.directory).toBe(join(directory, 'work', ticket.execution!.name))
   expect(Object.fromEntries(runtime.ticketEnvironment(ticket).map(variable => [variable.key, variable.value]))).toMatchObject({ DSH_SUPERAGENT_DIR: ticket.execution!.directory, DSH_SUPERAGENT_NAME: ticket.execution!.name, DSH_SUPERAGENT_TICKET: ticket.id, DSH_SUPERAGENT_FEISHU_CHAT: CHAT, DSH_SUPERAGENT_GITHUB_REPOSITORY: 'acme/widgets', DSH_SUPERAGENT_GITHUB_ACCOUNT: 'agent-bot', DSH_SUPERAGENT_GITHUB_NUMBER: '' })
+  // The panel's Ticket page lists them, as the dsh executor gives them to the prepare command and the worker.
+  expect((await api('GET', `tickets/${ticket.id}`)).body).toMatchObject({ environment: runtime.ticketEnvironment(ticket) })
   expect(ticket.assignments).toEqual([expect.objectContaining({ state: 'running', startedAt: expect.any(String) })])
   expect(sessionId).toBe(`worker-${ticket.id}`)
   expect(runtime.store.threads.get(`feishu:${CHAT}:om_1`)?.subscriptions).toEqual([ticket.id])
@@ -374,6 +378,23 @@ it('ends a ticket on ready when no PR is bound', async () => {
   await runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'done locally' })
   expect(runtime.store.tickets.get(ticket.id)).toMatchObject({ ended: expect.objectContaining({ outcome: 'completed' }) })
   await expect(runTool(sessionId, 'orchestrator_report', { state: 'progress', summary: 'late' })).rejects.toThrow('Ticket ended')
+})
+
+it('tells the Source kinds of an ended ticket once its end commits, and nothing of an end that a rollback undid', async () => {
+  const ticketEnded = vi.fn<(ticket: Ticket) => void>()
+  runtime.sources.register({ kind: 'listener', title: { zh: '监听', en: 'Listener' }, description: { zh: '', en: '' }, health: [],
+    schema: z.object({}).strict(), fields: [], ticketEnded })
+  const { ticket } = await acceptedTicket()
+  // Work after the end throws, so the transaction that ended the ticket rolls back, and with it the end.
+  expect(() => runtime.store.atomic(() => { runtime.engine.stopTicket(ticket.id, 'stop'); throw new Error('after the end') })).toThrow('after the end')
+  expect(runtime.store.tickets.get(ticket.id)?.ended).toBeUndefined()
+  expect(ticketEnded).not.toHaveBeenCalled()
+  // A committed end reaches each kind once, after the commit, with the ticket as it was committed.
+  let during = -1
+  runtime.store.atomic(() => { runtime.engine.stopTicket(ticket.id, 'stop'); during = ticketEnded.mock.calls.length })
+  expect(during).toBe(0)
+  expect(ticketEnded).toHaveBeenCalledOnce()
+  expect(ticketEnded.mock.calls[0]![0]).toMatchObject({ id: ticket.id, ended: { outcome: 'stopped' } })
 })
 
 it('stops a ticket on a person\'s instruction for good, and resumes an ended one on any person\'s message on its thread', async () => {
@@ -1793,4 +1814,35 @@ it('keeps the Policy the main Session judges by in its prompt, after admission a
   await runtime.settings.save('policy', { ...saved.policy, rules: rules.map(rule => ({ ...rule, enabled: false })) }, runtime.store.blockRevision('policy'), 'panel')
   expect(policy()).toContain('No rule is enabled: a proactive candidate can only be ignored.')
   expect(policy()).toContain('The accept mode and the rules decide proactive candidates only')
+})
+
+describe('the executor', () => {
+  const dshd = testDshd({ pairs: { opus: { profile: 'work-opus', env: {} } }, defaultPair: 'opus' })
+  it('builds DshExecutor by default and DshdExecutor with executor dshd', async () => {
+    expect(runtime.executor).toBeInstanceOf(DshExecutor)
+    const next = await restart({ executor: 'dshd', dshd })
+    await next.ready
+    expect(next.executor).toBeInstanceOf(DshdExecutor)
+  })
+  it('completes setup without a GitHub repository under executor dshd and changes no process environment', async () => {
+    await runtime.stop()
+    const environment = { ...process.env }
+    subprocess.spawn.mockClear()
+    const next = await restart({ executor: 'dshd', dshd }, { github: { repository: '' } })
+    await next.ready
+    expect(next.configured()).toBe(true)
+    expect(next.deployment).toMatchObject({ repository: '', github: { cli: '', login: '', noreply: '' } })
+    expect(next.health.runtime?.state).toBe('ready')
+    expect(process.env).toEqual(environment)
+    // No account probe ran.
+    expect(subprocess.spawn).not.toHaveBeenCalled()
+  })
+  it('resolves the GitHub account as upstream does under executor dshd once a repository is set', async () => {
+    subprocess.spawn.mockClear()
+    const next = await restart({ executor: 'dshd', dshd })
+    await next.ready
+    expect(next.configured()).toBe(true)
+    expect(next.deployment).toMatchObject({ repository: 'acme/widgets', github: { cli: AGENT(), login: 'agent-bot' } })
+    expect(subprocess.spawn.mock.calls.map(([spec]) => spec.argv)).toContainEqual(expect.arrayContaining([AGENT(), 'api', 'user']))
+  })
 })

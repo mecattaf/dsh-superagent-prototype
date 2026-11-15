@@ -1,4 +1,6 @@
 /** Session tool registration, role-scoped resource reads, and routing/settings tool contracts. */
+import { Context } from '@deepseek-ai/cordis'
+import { ToolRuntime, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { TICKET_STATES } from '../src/app/cards.ts'
 import { builtInBase, builtInParts, defaultPrompts } from '../src/app/prompts.ts'
@@ -102,6 +104,37 @@ it('keeps the main Session\'s resources from an Executor Session, which lists on
   const offered = registered.description + registered.parameters.properties.resource.description
   for (const { name, executor } of RESOURCES) expect(offered.includes(`${name}:`), name).toBe(!!executor)
   expect(offered).not.toMatch(/preview/i)
+})
+
+it('registers every tool so that DSH\'s own tool registry projects its schema with lossless parameters and runs a read through execute', async () => {
+  const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  const reads = new Map([[h.runtime.masterId, { resource: 'tickets' }], [sessionId, { resource: `ticket/${ticket.id}` }]])
+  for (const [session, read] of reads) {
+    const tools = [...h.tools.get(session)!.values()] as unknown as ToolDefinition[]
+    expect(tools.length, session).toBeGreaterThan(0)
+    // The real registry, not a copy of its rule: `schemas()` detaches each tool's parameters and throws on one that is not lossless JSON.
+    const ctx = new Context()
+    ctx.reflect.provide('systemPrompt', { tools: () => () => {}, section: () => () => {} })
+    const registry = new ToolRuntime(ctx, {})
+    for (const tool of tools) registry.register(tool)
+    const schemas = registry.schemas()
+    expect(schemas.map(({ name }) => name).sort(), session).toEqual(tools.map(({ name }) => name).sort())
+    for (const { name, parameters } of schemas) expect(parameters, name).toEqual(tools.find(tool => tool.name === name)!.parameters)
+    // One read through the registry's execute: the arguments snapshot, the output schema, the lossless value check and the render.
+    const result = await registry.execute({ callId: 'call-1' as never, name: 'orchestrator_read', arguments: read, signal: new AbortController().signal })
+    expect(result, session).toMatchObject({ isError: false, value: await h.runTool(session, 'orchestrator_read', read) })
+    expect(result.content.length, session).toBeGreaterThan(0)
+  }
+})
+
+it('lists an argument with a default as optional, since parsing supplies it', async () => {
+  await h.acceptedTicket(feishu('1', '@bot 修一下回归'))
+  type Listed = { parameters: { required?: string[]; properties: Record<string, { default?: unknown }> } }
+  for (const name of ['orchestrator_read', 'orchestrator_eval_read']) {
+    const { parameters } = h.tools.get(h.runtime.masterId)!.get(name) as unknown as Listed
+    expect(parameters.properties.offset?.default, name).toBe(0)
+    expect(parameters.required ?? [], name).not.toContain('offset')
+  }
 })
 
 it('answers every routing tool in one shape: the decision it recorded, why, and the ticket card', async () => {

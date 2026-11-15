@@ -22,6 +22,8 @@ import { IM_WORDS, NOTE_WORDS, checkedImText } from '../src/infra/text.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { feishuKind, feishuTrigger } from '../src/sources/feishu.ts'
 import { githubKind } from '../src/sources/github.ts'
+import { Config as ScheduledConfig, scheduledKind } from '../src/sources/scheduled.ts'
+import { workflowKind } from '../src/sources/workflow.ts'
 import { testMachine } from './fixtures/deployment.ts'
 
 type Role = 'orchestrator' | 'worker'
@@ -143,6 +145,9 @@ async function start() {
   const runtime = new Runtime(ctx, testMachine({ stateDir: directory }), () => {})
   await runtime.ready
   runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
+  // The optional Sources too, so their tools and text count against the budget; no run starts here.
+  runtime.sources.register(scheduledKind(ScheduledConfig({})))
+  runtime.sources.register(workflowKind({ startRun: () => { throw new Error('no run starts in this spec') }, status: () => [], ticketEnded: () => {} }))
   const settings = runtime.store.settings()
   const allowed = { feishu: { allowed: [{ id: MEMBER, name: 'Alice' }], syncChat: CHAT }, github: { allowed: [{ id: 'alice' }] } }
   const feishuSource = { enabled: true, config: { cli: BOT, chats: [{ chatId: CHAT, listen: 'all' }], directMessages: true } }
@@ -394,6 +399,12 @@ it.each(['orchestrator', 'worker'] as const)('keeps the %s within its character 
   const definitions = [...toolsOf(role).values()].map(({ name, description, parameters }) => ({ name, description, parameters }))
   const tools = JSON.stringify(definitions).length
   expect(prompt + tools, `${prompt} characters of prompt and ${tools} of tools`).toBeLessThanOrEqual(BUDGET[role])
+})
+
+it('shows a Source\'s ticket variables to workers only, as the Executor\'s', () => {
+  const prompt = (id: string) => host.sections.get(id)!({})
+  expect(prompt(host.runtime.masterId)).not.toContain('DSH_SUPERAGENT_SCHEDULED_ITEM')
+  expect(prompt(sessions.workerA)).toContain('DSH_SUPERAGENT_SCHEDULED_ITEM')
 })
 
 it('keeps the routing rules in dispatch, which says the main Session may accept the rest of a stop message as new work', () => {

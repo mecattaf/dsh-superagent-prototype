@@ -147,6 +147,8 @@ Running Assignments end with "host restarted" and new ones start with a recovery
 
 Assignments that are waiting, ready, blocked or failed stay as they are, unless an Input reached them after that Report, in which case they start again too.
 
+With the dshd executor an Assignment whose unit still runs is adopted: it goes on, its end settles it as any end does, and no recovery Assignment starts. A unit that a reboot or a power loss cut restarts as above. A unit's end settles its Assignment: exit 0 is ready, any other end failed.
+
 Sessions, directories, Subscriptions, pending messages and the stored work below survive a restart, and so does the record of which messages each Executor Session took into its history, which a step does once it claimed them and before its model call: a message taken by a turn the restart cut off counts as read once a Report or the end of a turn follows, while one a step claimed but a cancel or error cut off before the history counts as unread.
 
 A retry or a restart gives the new Assignment again the messages delivered to the Assignment it replaces that its Executor Session did not take, which a cancel or a cut-off step may have dropped; a copy still waiting in the Session, kept by a restart or persisted across a crash, is taken out before the new Assignment's first message, so the new delivery is the only copy.

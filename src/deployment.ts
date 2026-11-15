@@ -8,6 +8,7 @@ import { z } from 'zod'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { runAsWorker, sameDirectory, withoutDirectory, workerBin } from './infra/environment.ts'
 import { SetupError } from './setup.ts'
+import { DshdSchema, dshdOf, type DshdConfig } from './executor/dshd-config.ts'
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
 const absolute = (description: string) => s.string().pattern(/^\//).description(`${description} Absolute path.`)
@@ -20,13 +21,26 @@ export const Config = s.object({
     .description('Pages of thread context one assessment may read.').volatile(),
   admissionContextTimeoutMs: s.number().min(LIMITS.admissionContextTimeoutMs.min).max(LIMITS.admissionContextTimeoutMs.max).step(1)
     .default(15000).description('Time limit of one context read during an assessment, in milliseconds.').volatile(),
+  // Changing `engine`, `lockWaitMs`, `executor` or `dshd` remounts the plugin too.
+  engine: s.boolean().default(true)
+    .description('Whether this process runs dsh-superagent. Off, the entry loads but takes no lock, opens no database, changes no process environment, registers no route or tool and starts no Session, so a process that loads the bundle only for its agent presets stays inert.'),
+  lockWaitMs: s.number().min(0).max(300_000).step(1).default(35_000)
+    .description('How long a start waits for the state directory lock, and the scheduled Source for its inbox lock, while another process holds it, in milliseconds. The lock of a process that died goes stale within 30 s and is taken over; a live holder is refused once the time is up. 0: refuse at once.'),
+  executor: s.union(['dsh', 'dshd']).default('dsh')
+    .description('How Assignments run: dsh, one DSH Session per Ticket in this process; dshd, one dshd headless unit per Assignment.'),
+  dshd: DshdSchema,
 })
 export type DeploymentConfig = ReturnType<typeof Config>
+export type { DshdConfig, DshdPair } from './executor/dshd-config.ts'
 export interface Machine {
   stateDir: string
+  lockWaitMs: number
   promptMaxChars: Volatile<number>
   admissionContextMaxPages: Volatile<number>
   admissionContextTimeoutMs: Volatile<number>
+  engine: boolean
+  executor: 'dsh' | 'dshd'
+  dshd: DshdConfig
 }
 const MOVED: Record<string, string> = {
   repository: 'on the GitHub Source', branchPrefix: 'in the prepare command of the Execution settings', github: 'on the GitHub Source',
@@ -39,7 +53,8 @@ export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
   const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
-  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
+  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, lockWaitMs: config.lockWaitMs, engine: config.engine,
+    executor: config.executor, dshd: dshdOf(config.executor, config.dshd) }
 }
 
 export const GithubAccountsSchema = z.object({
