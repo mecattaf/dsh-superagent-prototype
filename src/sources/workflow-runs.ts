@@ -16,8 +16,8 @@ import { MAX_ATTEMPTS, nodeThread, nodeTriggerId, SOURCE } from './workflow-trig
 export interface RunsLogger { info(format: string, ...args: unknown[]): void; warn(format: string, ...args: unknown[]): void }
 /** The workflow Source's machine settings, as the plugin's Config declares them; `pollMs` and `offeredWarnSeconds` are read at each use. */
 export interface RunsConfig { pollMs: Volatile<number>; offeredWarnSeconds: Volatile<number>; concurrency: number; maxAttempts: number; pair: string }
-export interface StartRequest { script: string; cwd: string; args?: unknown; pair?: string; trigger_id?: string }
-export interface StartResult { run_id: string; state: 'started' | 'already-started'; script_sha256: string; name: string }
+export interface StartRequest { script: string; cwd: string; args?: unknown; pair?: string; trigger_id?: string; max_agents?: number }
+export interface StartResult { run_id: string; state: 'started' | 'already-started'; script_sha256: string; name: string; max_agents?: number }
 /**
  * Where a node is: `waiting` before its Trigger exists, `offered` while it waits for or is in an Eval, `held` once the main
  * Session or a person decided it without a Ticket, `unavailable` once its Eval ended without an assessment, as when the main
@@ -33,7 +33,7 @@ export interface NodeStatus {
   offered_since?: string
 }
 export interface RunStatus {
-  run_id: string; name: string; state: WorkflowRun['state']; cwd: string; started_at: string; ended_at?: string; error?: string; nodes: NodeStatus[]
+  run_id: string; name: string; state: WorkflowRun['state']; cwd: string; started_at: string; ended_at?: string; error?: string; nodes: NodeStatus[]; max_agents?: number
 }
 /** At most this many runs, the newest, answer a status request that names none; fixed, as it only bounds one answer and `run_id` reaches any older run. */
 const STATUS_RUNS = 20
@@ -149,6 +149,9 @@ export class WorkflowRuns {
    */
   startRun(request: StartRequest): StartResult {
     const source = this.ready()
+    if (request.max_agents !== undefined && (!Number.isSafeInteger(request.max_agents) || request.max_agents < 1 || request.max_agents > 1_000_000)) {
+      throw new RangeError('workflow max_agents must be a finite integer from 1 through 1000000')
+    }
     let directory = false
     try { directory = isAbsolute(request.cwd) && statSync(request.cwd).isDirectory() } catch { /* A missing directory is refused below. */ }
     if (!directory) throw new UserError('workflowCwd', { cwd: request.cwd })
@@ -164,14 +167,16 @@ export class WorkflowRuns {
       ? `wf-${key('workflow-run', request.trigger_id, digest, request.cwd, JSON.stringify(args ?? null)).slice(0, 12)}`
       : `wf-${randomBytes(6).toString('hex')}`
     const existing = source.state.get(KV.workflow.run(id))
-    if (existing) return { run_id: id, state: 'already-started', script_sha256: existing.scriptSha256, name: existing.name }
+    if (existing) return { run_id: id, state: 'already-started', script_sha256: existing.scriptSha256, name: existing.name,
+      ...existing.maxAgents !== undefined && { max_agents: existing.maxAgents } }
     const run: WorkflowRun = { id, name, scriptPath, scriptSha256: digest, cwd: request.cwd, ...args !== undefined && { args },
       ...pair !== undefined && { pair }, ...request.trigger_id !== undefined && { requestedBy: request.trigger_id },
+      ...request.max_agents !== undefined && { maxAgents: request.max_agents },
       state: 'running', startedAt: new Date().toISOString(), seq: 0 }
     source.atomic(() => { source.state.set(KV.workflow.script(digest), text); source.state.set(KV.workflow.run(id), run) })
     this.drive(run)
     this.reportHealth()
-    return { run_id: id, state: 'started', script_sha256: digest, name }
+    return { run_id: id, state: 'started', script_sha256: digest, name, ...run.maxAgents !== undefined && { max_agents: run.maxAgents } }
   }
   /**
    * The state of one run and of each of its nodes, or of the newest runs when `runId` names none.
@@ -212,6 +217,7 @@ export class WorkflowRuns {
       journal: new KvJournal(source, run.id, signal), ...resumeFrom && { resumeFrom },
       cacheIdentity: 'content', resumeFailures: 'replay', isRetryableFailure: retriedOnResume,
       concurrency: this.config.concurrency, maxAttempts: this.config.maxAttempts, resolveWorkflow: pinnedResolver(source, run),
+      ...run.maxAgents !== undefined && { maxAgents: run.maxAgents },
     }).catch((error: unknown) => ({ status: 'failed' as const, result: null, error: String(error) }))
       .then(result => {
         this.driving.delete(run.id)
@@ -254,7 +260,8 @@ export class WorkflowRuns {
         ...since !== undefined && { offered_since: since } }]
     })
     return { run_id: run.id, name: run.name, state: run.state, cwd: run.cwd, started_at: run.startedAt,
-      ...run.endedAt !== undefined && { ended_at: run.endedAt }, ...run.error !== undefined && { error: run.error }, nodes, usage }
+      ...run.endedAt !== undefined && { ended_at: run.endedAt }, ...run.error !== undefined && { error: run.error },
+      ...run.maxAgents !== undefined && { max_agents: run.maxAgents }, nodes, usage }
   }
   /**
    * A waiting node came to be held, unavailable or offered past the threshold, or left that state: the log says which once, and

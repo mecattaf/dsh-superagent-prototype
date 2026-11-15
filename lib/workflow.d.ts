@@ -1,5 +1,5 @@
 import { z as Ticket } from "./intake-YOZzjx_b.js";
-import { a as TokenUsage, i as WorkflowRun, r as SourceHost, t as SourceKind } from "./kind-8FRB3xyy.js";
+import { a as TokenUsage, i as WorkflowRun, r as SourceHost, t as SourceKind } from "./kind-DTPW9SF5.js";
 import { Context, Volatile } from "@deepseek-ai/cordis";
 import s from "@deepseek-ai/schemastery";
 //#region src/sources/workflow-runs.d.ts
@@ -22,12 +22,14 @@ interface StartRequest {
   args?: unknown;
   pair?: string;
   trigger_id?: string;
+  max_agents?: number;
 }
 interface StartResult {
   run_id: string;
   state: 'started' | 'already-started';
   script_sha256: string;
   name: string;
+  max_agents?: number;
 }
 /**
  * Where a node is: `waiting` before its Trigger exists, `offered` while it waits for or is in an Eval, `held` once the main
@@ -59,6 +61,7 @@ interface RunStatus {
   ended_at?: string;
   error?: string;
   nodes: NodeStatus[];
+  max_agents?: number;
 }
 /** A node's `usage`: the tokens its Tickets' workers used, once every unit of them ended and printed its usage (see `nodeUsage`). */
 interface NodeStatus {

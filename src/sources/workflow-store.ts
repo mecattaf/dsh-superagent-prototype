@@ -19,6 +19,7 @@ export interface WorkflowRun {
   cwd: string
   args?: unknown
   pair?: string
+  maxAgents?: number
   requestedBy?: string
   state: 'running' | 'completed' | 'failed'
   startedAt: string

@@ -7,12 +7,13 @@ export function workflowTools(runs: Pick<WorkflowRuns, 'startRun' | 'status'>): 
   return [
     sourceTool({
       name: 'orchestrator_workflow_start',
-      description: 'Start a workflow script on an explicit request naming the script and its directory. Each agent() call arrives as an inferred workflow candidate you assess like any other; accepting one runs its node as a ticket there, which the run waits for. Always pass the trigger_id of the request you are answering: the same request then never starts a second run.',
+      description: 'Start a workflow script on an explicit request naming the script and its directory. Each agent() call arrives as an inferred workflow candidate you assess like any other; accepting one runs its node as a ticket there, which the run waits for. Pass the actual trigger_id when answering a Source Trigger. A direct Session request has no Source Trigger: omit trigger_id, retain the returned run_id and never repeat a start merely because collecting its answer timed out.',
       schema: z.object({
         script: z.string().min(1).describe('Path, absolute or relative to cwd.'),
         cwd: z.string().regex(/^\//, 'An absolute path').describe('Absolute directory all nodes work in.'),
         args: z.unknown().optional().describe('Value the script reads as args.'),
         pair: z.string().min(1).optional().describe('Compute pair of all nodes; else the Source\'s, else the Executor\'s default.'),
+        max_agents: z.number().int().min(1).max(1_000_000).optional().describe('Finite lifetime agent() call budget, including replayed calls; default 1000. Recorded on this run and preserved on restart. This does not change node time or worker limits.'),
         trigger_id: z.string().min(1).optional().describe('The request\'s trigger; repeating it with the same script, cwd and args returns its run.'),
       }).strict(),
       execute: async args => runs.startRun(args),
