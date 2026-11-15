@@ -20,6 +20,8 @@ export interface WorkflowRun {
   args?: unknown
   pair?: string
   maxAgents?: number
+  /** A terminal failure and its actionable main-Session relay commit in one transaction. */
+  failureRelayQueued?: true
   requestedBy?: string
   state: 'running' | 'completed' | 'failed'
   startedAt: string

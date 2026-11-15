@@ -1,5 +1,5 @@
 import { z as Ticket } from "./intake-YOZzjx_b.js";
-import { a as TokenUsage, i as WorkflowRun, r as SourceHost, t as SourceKind } from "./kind-DTPW9SF5.js";
+import { a as TokenUsage, i as WorkflowRun, r as SourceHost, t as SourceKind } from "./kind-BuDxbI5h.js";
 import { Context, Volatile } from "@deepseek-ai/cordis";
 import s from "@deepseek-ai/schemastery";
 //#region src/sources/workflow-runs.d.ts
@@ -89,11 +89,12 @@ declare class WorkflowRuns {
   private readonly host;
   private readonly config;
   private readonly logger;
+  private readonly relayFailure;
   private source;
   private waiter;
   private readonly stopped;
   private readonly driving;
-  constructor(host: SourceHost, config: RunsConfig, logger: RunsLogger);
+  constructor(host: SourceHost, config: RunsConfig, logger: RunsLogger, relayFailure: (requestId: string, text: string) => void);
   /** Waits for setup, then resumes every run that had not ended; it resolves once they are under way, not once they end. */
   start(): Promise<void>;
   /** Parks every waiting call: nothing more is journaled, and the runs resume on the next start. */

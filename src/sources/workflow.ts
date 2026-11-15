@@ -2,6 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import s from '@deepseek-ai/schemastery'
 import { z } from 'zod'
+import type { Runtime } from '../app/runtime.ts'
 import type { SourceKind } from './kind.ts'
 import { WorkflowRuns } from './workflow-runs.ts'
 import { workflowTools } from './workflow-tools.ts'
@@ -50,7 +51,10 @@ function checked(config: WorkflowConfig): WorkflowConfig {
 export function apply(ctx: Context, config: WorkflowConfig): void {
   checked(config)
   ctx.effect(() => {
-    const runs = new WorkflowRuns(ctx.orchestrator, config, ctx.logger)
+    // The legacy context declaration names SourceHost; the injected service is this Runtime.
+    const runtime = ctx.orchestrator as Runtime
+    const runs = new WorkflowRuns(runtime, config, ctx.logger,
+      (requestId, text) => { runtime.sessions.relay(requestId, text) })
     const unregister = ctx.orchestrator.sources.register(workflowKind(runs))
     // DSH ends its process on an unhandled rejection, so a failure that escapes the start becomes the Source's health.
     const running = runs.start().catch((error: unknown) => { ctx.orchestrator.context({ kind: SOURCE, health: [SOURCE] }).report(SOURCE, { state: 'error', detail: String(error) }) })

@@ -122,7 +122,8 @@ export class WorkflowRuns {
   private waiter: TicketWaiter | undefined
   private readonly stopped = new AbortController()
   private readonly driving = new Set<string>()
-  constructor(private readonly host: SourceHost, private readonly config: RunsConfig, private readonly logger: RunsLogger) {}
+  constructor(private readonly host: SourceHost, private readonly config: RunsConfig, private readonly logger: RunsLogger,
+    private readonly relayFailure: (requestId: string, text: string) => void) {}
 
   /** Waits for setup, then resumes every run that had not ended; it resolves once they are under way, not once they end. */
   async start(): Promise<void> {
@@ -232,9 +233,31 @@ export class WorkflowRuns {
     const source = this.source!
     source.atomic(() => {
       const run = source.state.get(KV.workflow.run(id))
-      if (!run) return
-      source.state.set(KV.workflow.run(id), { ...run, state: result.status, result: result.result ?? null,
-        ...result.error !== undefined && { error: result.error }, endedAt: new Date().toISOString() })
+      if (!run || run.state !== 'running') return
+      const endedAt = new Date().toISOString()
+      const failed = result.status === 'failed'
+      const errorCode = /lifetime cap/i.test(result.error ?? '') ? 'agent-budget-exhausted'
+        : /schema/i.test(result.error ?? '') ? 'schema-failure' : 'workflow-failed'
+      const updated: WorkflowRun = { ...run, state: result.status, result: result.result ?? null,
+        ...result.error !== undefined && { error: result.error }, endedAt,
+        ...failed && { failureRelayQueued: true } }
+      source.state.set(KV.workflow.run(id), updated)
+      if (failed) {
+        // Sessions.relay enqueues in the same Store transaction and steers (wakes) this Runtime's captured main.
+        // A stable run key survives restart/delivery retry. Do not relay untrusted error text, prompts or raw paper data.
+        const started = KvJournal.load(source, id).startOrder.at(-1)
+        const match = started?.cid === undefined ? undefined : /^c1:([0-9a-f]{16})[0-9a-f]*#(\d+)$/.exec(started.cid)
+        const node = match ? `${match[1]!}-o${match[2]!}` : undefined
+        const latest = node ? latestAttempt(source, id, node) : undefined
+        const ticket = latest ? ticketOf(source, latest.trigger, latest.thread) : undefined
+        const evidence = node ? { node, ...latest && { trigger_id: latest.trigger },
+          ...ticket && { ticket_id: ticket.id } } : null
+        this.relayFailure(`workflow-terminal-failure:${id}`, JSON.stringify({
+          kind: 'workflow-terminal-failure', run_id: id, state: 'failed', ended_at: endedAt,
+          script_sha256: run.scriptSha256, error_code: errorCode, last_node: evidence,
+          instruction: 'Report this terminal failure and preserve its failed history and committed command reports. Do not restart, retry a command or start another workflow without explicit current authority. Read the local workflow status for the exact error; this notification contains no raw task content.',
+        }))
+      }
     })
   }
   private runStatus(source: SourceContext, run: WorkflowRun): RunStatus {

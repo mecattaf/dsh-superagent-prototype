@@ -20,14 +20,15 @@ const stream = (response, delta, finish) => {
   response.end('data: [DONE]\n\n');
 };
 
-async function fixture(label, limit, override = true) {
+async function fixture(label, limit, override = true, fail = false) {
   const root = mkdtempSync(join(tmpdir(), 'workflow-native-budget-'));
   const profile = join(root, 'profiles', 'fixture');
   mkdirSync(join(profile, 'node_modules'), { recursive: true });
   symlinkSync(resolve(baselineRoot), join(profile, 'node_modules', 'dsh-superagent'));
   const script = join(root, 'probe.workflow.js');
-  writeFileSync(script, "export const meta = { name: 'native-budget-probe', description: 'no nodes or inference' };\nreturn {probe:'complete'};\n");
+  writeFileSync(script, "export const meta = { name: 'native-budget-probe', description: 'no nodes or inference' };\n" + (fail ? "throw new Error('PRIVATE DETAIL NEVER RELAY');" : "return {probe:'complete'};") + '\n');
   const requests = [];
+  let observedFailure = false;
   let handlerError;
   const fake = createServer(async (request, response) => {
     try {
@@ -43,8 +44,9 @@ async function fixture(label, limit, override = true) {
         stream(response, { role: 'assistant', tool_calls: [{ index: 0, id: 'start-once', type: 'function',
           function: { name: 'orchestrator_workflow_start', arguments: JSON.stringify(args) } }] }, 'tool_calls');
       } else {
-        assert.equal(requests.length, 2, 'No extra provider request or model polling');
-        assert.ok(body.messages.some(item => item.role === 'tool'));
+        assert.ok(requests.length <= (fail ? 3 : 2), 'No extra provider request or model polling');
+        if (JSON.stringify(body.messages).includes('workflow-terminal-failure')) observedFailure = true;
+        if (!fail) assert.ok(body.messages.some(item => item.role === 'tool'));
         stream(response, { role: 'assistant', content: 'The fixture result is recorded.' }, 'stop');
       }
     } catch (error) {
@@ -129,22 +131,24 @@ ${override ? `- insert:
       mode: 'queue', content: [{ type: 'text', text: 'Execute the explicit literal workflow-start fixture once, then end.' }] });
     while (Date.now() < finishBy) {
       const session = await rpc('session/state', { sessionId: state.masterId });
-      if (requests.length === 2 && !session.running) break;
+      if (requests.length >= 2 && !session.running && (!fail || observedFailure)) break;
       await sleep(50);
     }
     if (handlerError) throw handlerError;
-    assert.equal(requests.length, 2, redact(err + out));
+    assert.ok(requests.length >= 2 && requests.length <= (fail ? 3 : 2), redact(err + out));
+    if (fail) assert.equal(observedFailure, true, 'Actionable relay must reach an actual model request on the existing main');
     const db = new DatabaseSync(join(root, 'state', 'orchestrator.sqlite'), { readOnly: true });
     rows = db.prepare("SELECT value FROM kv WHERE key LIKE 'workflow-run:%'").all().map(row => JSON.parse(row.value)); db.close();
     const shouldStart = override && (limit === undefined || limit >= 1);
     assert.equal(rows.length, shouldStart ? 1 : 0, 'Actual public tool schema controls the handler');
     if (shouldStart) {
-      assert.equal(rows[0].state, 'completed'); assert.equal(rows[0].maxAgents, limit);
-      assert.deepEqual(rows[0].result, { probe: 'complete' });
+      assert.equal(rows[0].state, fail ? 'failed' : 'completed'); assert.equal(rows[0].maxAgents, limit);
+      if (fail) assert.equal(rows[0].failureRelayQueued, true);
+      else assert.deepEqual(rows[0].result, { probe: 'complete' });
     }
     writeFileSync(join(root, 'sanitized-boot.log'), redact(err + out));
     writeFileSync(join(root, 'proof.json'), JSON.stringify({ label, override, limit: limit ?? 'default1000',
-      providerRequests: requests.length, workflowRuns: rows, sourceModule: resolve(builtRoot, 'lib/workflow.js') }, null, 2));
+      providerRequests: requests.length, observedFailure, mainSessionId:state.masterId, workflowRuns: rows, sourceModule: resolve(builtRoot, 'lib/workflow.js') }, null, 2));
     console.log(JSON.stringify({ label, outcome: 'PASS', root, limit: limit ?? 'default1000', runs: rows.length, providerRequests: requests.length }));
   } finally {
     writeFileSync(join(root, 'sanitized-boot.log'), redact(err + out));
@@ -159,3 +163,4 @@ await fixture('override', 1001);
 await fixture('default', undefined);
 await fixture('invalid-zero', 0);
 await fixture('old-source-negative-control', 1001, false);
+await fixture('actionable-terminal-failure', 1001, true, true);
