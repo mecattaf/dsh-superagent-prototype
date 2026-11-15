@@ -12,6 +12,8 @@ export interface AgentOpts {
   readonly phase?: string;
   readonly schema?: Record<string, unknown>;
   readonly model?: string;
+  /** A configured provider-harness pair; takes precedence over the run's default pair. */
+  readonly pair?: string;
   readonly effort?: string;
   readonly isolation?: string;
   readonly agentType?: string;

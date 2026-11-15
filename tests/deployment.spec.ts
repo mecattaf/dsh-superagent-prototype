@@ -65,7 +65,7 @@ describe('configuration schema', () => {
     expect(() => Config(minimal({ dshd: { pairs: { alpha: 'work-alpha' } } }))).toThrow()
     expect(() => Config(minimal({ dshd: { pairs: { alpha: { env: {} } } } }))).toThrow()
     // An unknown pair key still reaches machineOf, which refuses it.
-    expect(() => machineOf(Config(minimal({ dshd: { pairs: { alpha: { profile: 'work-alpha', model: 'x' } } } })))).toThrow('dshd.pairs.alpha')
+    expect(() => machineOf(Config(minimal({ dshd: { pairs: { alpha: { profile: 'work-alpha', selector: 'x' } } } })))).toThrow('dshd.pairs.alpha')
   })
   it('rejects executor dshd whose default pair is not among its pairs, or whose directory is not absolute', () => {
     const pairs = { alpha: { profile: 'work-alpha' } }

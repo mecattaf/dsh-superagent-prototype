@@ -38,7 +38,7 @@ export const nodeTriggerId = (run: string, node: string, attempt: number): strin
  */
 export function nodeTrigger(run: WorkflowRun, call: Call, at = new Date().toISOString()): Trigger {
   const node = nodeOf(call)
-  const { label, schema, model, effort } = call.opts
+  const { label, schema, model, effort, pair } = call.opts
   const retry = call.attempt > 1 && call.previousErrors?.length ? [`${RETRY_NOTE} ${call.previousErrors.join('; ')}`] : []
   const text = [call.prompt, ...retry, ...schema === undefined ? [] : [`${SCHEMA_INSTRUCTION}\n${JSON.stringify(schema)}`]].join('\n\n')
   return {
@@ -52,8 +52,11 @@ export function nodeTrigger(run: WorkflowRun, call: Call, at = new Date().toISOS
     meta: {
       kind: 'workflow-node', run: run.id, workflow: run.name, node, cid: call.cid, occurrence: call.occurrence, attempt: call.attempt,
       ...label !== undefined && { label: String(label) }, ...call.phase !== undefined && { phase: call.phase },
-      cwd: run.cwd, ...run.pair !== undefined && { pair: run.pair },
-      // Recorded for the Executor and for people; nodes run on their pair's model.
+      cwd: run.cwd,
+      // A node's route is explicit; the run's pair is only a default when a node selects a model or effort.
+      ...(pair !== undefined ? { pair } : model !== undefined || effort !== undefined
+        ? { ...run.pair !== undefined && { fallbackPair: run.pair } }
+        : { ...run.pair !== undefined && { pair: run.pair } }),
       ...model !== undefined && { model: String(model) }, ...effort !== undefined && { effort: String(effort) },
       labels: { 'superagent.run': run.id, 'superagent.node': node },
     },

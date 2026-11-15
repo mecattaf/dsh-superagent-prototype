@@ -381,6 +381,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
 | `src/executor/port.ts` | `ExecutorPort`, what Runtime uses of its Executor, picked from `DshExecutor` |
 | `src/executor/dshd-config.ts` | The `dshd` block of the entry's Config: `DshdSchema`, `DshdConfig`, `DshdPair`, and `dshdOf`, the checks `machineOf` makes of it |
+| `src/executor/dshd-route.ts` | Selects an exact configured pair for a node's pair, model and effort; refuses unknown, conflicting and ambiguous routes |
 | `src/executor/dshd.ts` | The DshdExecutor, one dshd headless unit per Assignment: `DshdBinding`, `unitName`, `composeBrief`, `verdictOf`, `eventsOf`, and `usageOf` with `addUsage`, which the workflow Source also uses to sum a node's usage |
 | `src/executor/dshd-cli.ts` | `DshdCli`, the dshd client over DSH's subprocess service, and the `DshdPort` it implements |
 | `src/executor/dshd-summary.ts` | `noAnswerSummary` and `isNoAnswer`: the summary of a unit that exited 0 without a final answer, which the DshdExecutor writes and the workflow Source reads as no result |
@@ -493,6 +494,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/dshd-cleanup.spec.ts` | The dshd executor's opt-in `dshd.removeEnded`: which ended units it removes with `dshd rm`, when (including the sweep at a start), and which it keeps |
 | `tests/dshd-cli.spec.ts` | The dshd client's argv and the JSON and error objects of dshd it reads |
 | `tests/dshd-executor.spec.ts` | The dshd executor on the simulated host with an in-memory dshd: recipe, idempotent launches, slots, settlement, restart and stop |
+| `tests/dshd-route.spec.ts` | Per-node pair/model/effort routing, refusal without subscription fallback and distinct resume identities |
+| `tests/workflow-agent-budget.spec.ts` | Finite agent-call budgets persist across run restarts |
+| `tests/workflow-terminal-failure.spec.ts` | A durable terminal workflow failure wakes its owning main Session once |
 | `tests/dshd-names.spec.ts` | Unit names stay inside dshd's name rule and apart for distinct Assignments |
 | `tests/dshd-outcome.spec.ts` | What dshd 0.1.0 printed, read as the dshd executor reads it; every state, ending and refusal dshd documents, and the executor's answer to each |
 | `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux` and `dsh` |

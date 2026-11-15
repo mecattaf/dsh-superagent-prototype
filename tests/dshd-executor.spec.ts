@@ -125,6 +125,16 @@ describe('launch and recipe', () => {
     expect(binding(ticket)).toMatchObject({ pair: 'opus', state: 'running' })
     expect(latestAssignment(stored(ticket))!.report).toBeUndefined()
   })
+  it('routes an exact node model and effort to its cloud profile and records the selected model', async () => {
+    await start({ pairs: { ...PAIRS, groq: { profile: 'work-groq', env: {}, provider: 'groq', model: 'qwen/qwen3.8-27b', effort: 'low' } } })
+    const { ticket } = await accepted(request('1', { cwd: directory(), model: 'groq/qwen/qwen3.8-27b', effort: 'low' }))
+    expect(fake.runs[0]).toMatchObject({ profile: 'work-groq', labels: { 'superagent.pair': 'groq', 'superagent.provider': 'groq',
+      'superagent.model': 'qwen/qwen3.8-27b', 'superagent.effort': 'low' } })
+    expect(binding(ticket)).toMatchObject({ pair: 'groq', state: 'running' })
+    const refused = await accepted(request('5', { cwd: directory(), model: 'absent' }))
+    expect(fake.runs).toHaveLength(1)
+    expect(latestAssignment(stored(refused.ticket))!.report!.summary).toContain('no configured pair')
+  })
   it('records failed without retrying for a pair the configuration does not name, or a directory that does not exist', async () => {
     await start()
     const unknown = await accepted(request('1', { cwd: directory(), pair: 'gpu' }))

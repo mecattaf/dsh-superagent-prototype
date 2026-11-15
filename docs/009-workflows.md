@@ -64,7 +64,7 @@ So every node costs one Eval of the main Session, and a run moves only as fast a
 | Not supported | Why |
 | --- | --- |
 | Token budgets | Usage is measured, not limited: the interpreter's budget is not set, and a node's tokens are not journaled |
-| A call's `model` and `effort` | Recorded in the Trigger's `meta`; nodes run on their pair |
+| A call's `pair`, `model` and `effort` | `pair` selects a configured worker profile. `model` selects its exact model ID or `provider/model`, with `effort` when supplied. A node overrides its run's default. Unknown, conflicting or ambiguous selections fail without falling back to another provider |
 | Nesting deeper than one `workflow()` | The interpreter's limit |
 | A run started by a Scheduled item's own key | A Scheduled nudge asks the main Session, which starts the run with the tool |
 

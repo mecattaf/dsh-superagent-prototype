@@ -1,5 +1,6 @@
 /** dshd executor: runs each Assignment as one dshd headless unit and settles it from the way the unit ended. */
 import type { Context } from '@deepseek-ai/cordis'
+import { selectPair } from './dshd-route.ts'
 import { mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { hostname as osHostname } from 'node:os'
 import { delimiter, isAbsolute, join } from 'node:path'
@@ -377,11 +378,8 @@ export class DshdExecutor implements ExecutorPort {
   /** The pair a Ticket runs on: its origin Trigger's `meta.pair`, else the default pair; an empty `meta.pair` names none. */
   private pairOf(ticket: Ticket): { name: string; pair: DshdPair } {
     const { pairs, defaultPair } = this.host.machine.dshd
-    const named = sourceTrigger(this.host, ticket)?.meta.pair
-    const name = typeof named === 'string' && named !== '' ? named : defaultPair
-    const pair = Object.hasOwn(pairs, name) ? pairs[name] : undefined
-    if (!pair) throw new LaunchRefused(`unknown pair ${name}`)
-    return { name, pair }
+    try { return selectPair(pairs, defaultPair, sourceTrigger(this.host, ticket)?.meta ?? {}) }
+    catch (error) { throw new LaunchRefused((error as Error).message) }
   }
   private async launchQueued({ ticketId, assignmentId }: { ticketId: string; assignmentId: string }): Promise<void> {
     this.release(assignmentId)
@@ -537,6 +535,10 @@ export class DshdExecutor implements ExecutorPort {
       if (EXTRA_LABEL.test(label) && typeof value === 'string' && value.length <= 256 && !value.includes('\n')) labels[label] = value
     }
     Object.assign(labels, { [LABEL.orchestrator]: this.host.masterId, [LABEL.ticket]: ticket.id, [LABEL.assignment]: assignment.id, [LABEL.pair]: pair })
+    for (const field of ['provider', 'model', 'effort'] as const) {
+      const value = config[field]
+      if (value !== undefined && value.length <= 256 && !value.includes('\n')) labels[`superagent.${field}`] = value
+    }
     const env = { ...inherited(dshd.passEnv, this.host.environment?.(), entries => { this.storePathsLeft(entries) }), ...dshd.env, ...config.env }
     const binding: DshdBinding = { executor: 'dshd', host: this.hostname(), name, pair, state: 'launching', launchedAt: now(),
       recipe: { name, cwd, labels, profile: config.profile, args: [...dshd.args], task, env }, inputIds }
