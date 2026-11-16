@@ -15,10 +15,11 @@
 # The box, from the inside:
 #   /nix /etc /usr /bin /lib64    read-only; the Nix daemon socket is hidden
 #                                 unless DSH_CONTAIN_NIX=1
-#   /run                          empty but for /run/current-system, /run/nscd
-#                                 and the files named in DSH_CONTAIN_SECRET
+#   /run                          a private tmpfs holding only /run/current-system,
+#                                 /run/nscd and the files in DSH_CONTAIN_SECRET
+#   /tmp                          a private tmpfs, discarded with the box
 #   /home                         empty and read-only, except the paths below
-#   /tmp /run                     private to the box, writable, discarded
+#   DSH_CONTAIN_ROOT              empty and read-only, except the paths below
 #   /mnt /srv /var /root /boot    absent
 #   $HOME                         empty but for ~/.nix-profile and the DSH home
 #   $DSH_HOME                     the one profile (read-only, writes discarded),
@@ -61,7 +62,11 @@
 # - With DSH_CONTAIN_EGRESS, the allowed hosts receive whatever the worker
 #   sends them; the allowlist bounds where data can go, not what.
 # - With DSH_CONTAIN_NET=host, every local and LAN service is reachable.
-# - It does not limit CPU, memory or time; dshd and systemd do that.
+# - It does not limit CPU, memory, disk or time; the workspace is on the
+#   host's file system.
+# - Symbolic links the worker leaves in the workspace may point anywhere. They
+#   resolve to nothing inside the box, but a tool outside it that follows them
+#   reads the host's file: copy results with links preserved, never followed.
 # - The worker may rewrite its own session record, which DSH writes in-process.
 # - A later tool run outside the box on the workspace (git, npm, a test
 #   runner) runs whatever the worker wrote there. Review and test in the box
@@ -158,6 +163,11 @@ done
 [ -d /run/nscd ] && b+=(--ro-bind /run/nscd /run/nscd)
 b+=(--dir "/run/user/$uid" --chmod 0700 "/run/user/$uid")
 
+# DSH_CONTAIN_ROOT is an empty tmpfs, read-only once the binds below are in
+# place, so a write beside the workspace fails instead of landing in the
+# box's /tmp, and only what is bound into it is visible.
+b+=(--tmpfs "$root")
+
 b+=(--dir "$home")
 [ -L "$home/.nix-profile" ] && b+=(--symlink "$(readlink -f -- "$home/.nix-profile")" "$home/.nix-profile")
 
@@ -200,9 +210,6 @@ done < <(split "${DSH_CONTAIN_SECRET-}")
 
 # The workspace, writable, with every Git directory under it read-only: a
 # hook or config planted there would run when someone uses git outside.
-# DSH_CONTAIN_ROOT itself is an empty read-only tmpfs around it, so a write
-# beside the workspace fails instead of landing in the box's /tmp.
-b+=(--tmpfs "$root")
 b+=(--bind "$ws" "$ws")
 while IFS= read -r -d '' g; do
   b+=(--ro-bind "$g" "$g")
