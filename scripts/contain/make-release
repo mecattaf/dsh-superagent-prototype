@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# make-release OUT_DIR [BASE_RELEASE]
+#
+# Assembles a dshd release whose bin/dsh is dsh-contain, from a base release
+# (default /etc/dshd/releases/default): the same dsh and dshd-run, the same
+# release.json. bwrap and python3 are taken from PATH and pinned by store
+# path. Print the directory; `nix-store --add OUT_DIR` turns it into the
+# release store path that `dshd run --release` and a pair's `release` take.
+# A Nix package (dotfiles) is the lasting form; this is the no-rebuild form.
+set -o errexit
+set -o nounset
+set -o pipefail
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+out="${1:?usage: make-release OUT_DIR [BASE_RELEASE]}"
+base="$(realpath -e -- "${2:-/etc/dshd/releases/default}")"
+store() { # store CMD: the store path of CMD on PATH, or fail
+  local p
+  p="$(realpath -e -- "$(command -v "$1")")" || { echo "make-release: $1 is not on PATH" >&2; exit 1; }
+  case "$p" in /nix/store/*) printf '%s\n' "$p" ;; *) echo "make-release: $1 ($p) is not in /nix/store" >&2; exit 1 ;; esac
+}
+dsh="$(realpath -e -- "$base/bin/dsh")"
+runner="$(realpath -e -- "$base/bin/dshd-run")"
+bash_="$(store bash)"
+bwrap="$(store bwrap)"
+python="$(store python3)"
+[ ! -e "$out" ] || { echo "make-release: $out exists" >&2; exit 1; }
+mkdir -p -- "$out/bin" "$out/libexec" "$out/share/dshd"
+install -m 0444 -- "$here/egress.py" "$out/libexec/egress.py"
+sed -e "1s|^#!/usr/bin/env bash$|#!$bash_|" -e "s|@DSH@|$dsh|" -e "s|@BWRAP@|$bwrap|" \
+  -e "s|@PYTHON@|$python|" \
+  -- "$here/dsh-contain" >"$out/bin/dsh"
+chmod 0555 -- "$out/bin/dsh"
+ln -s -- "$runner" "$out/bin/dshd-run"
+install -m 0444 -- "$base/share/dshd/release.json" "$out/share/dshd/release.json"
+if grep -q '@[A-Z]*@' "$out/bin/dsh" || [ "$(head -1 "$out/bin/dsh")" != "#!$bash_" ]; then
+  echo "make-release: bin/dsh still has a placeholder or the wrong interpreter" >&2
+  exit 1
+fi
+printf '%s\n' "$out"

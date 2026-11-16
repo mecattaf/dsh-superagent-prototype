@@ -511,6 +511,20 @@ The scheduled Source sets `cwd`, and `pair` when a record names one; the workflo
 
 Restart dsh-superagent and accept a Ticket. `dshd get <unit>` shows a unit's state and labels, and `dshd read <unit>` its output; the unit's last final answer is the summary of its Ticket's Report. Units go on while dsh-superagent restarts, and its next start adopts them. dshd keeps ended units until someone removes them.
 
+### 6. Contain a pair's units (optional)
+
+A pair's `release` names the dshd release its units run on. `scripts/contain/make-release` assembles one whose `bin/dsh` is `scripts/contain/dsh-contain`: it boots the whole worker, DSH's in-process tools and any agent CLI it starts included, in a bubblewrap box that writes only its working directory, sees an empty home but for its own profile and credentials file, and reaches only the `host:port` pairs of `DSH_CONTAIN_EGRESS`. The pair's `env` carries the box's settings; the header of `dsh-contain` lists them and what the box does not do. `nix-store --add` turns the assembled folder into the store path `release` takes; a Nix package is the lasting form.
+
+```yaml
+      pairs:
+        <pair>-box:
+          profile: <headless profile>
+          release: /nix/store/<hash>-dshd-release-dsh-contain
+          env: { DSH_CONTAIN_ROOT: <parent of every workspace>, DSH_CONTAIN_STATE: <records folder>, DSH_CONTAIN_EGRESS: '<provider host>:443' }
+```
+
+A unit whose directory is not strictly inside `DSH_CONTAIN_ROOT`, or that contains `$HOME`, refuses to start, so a workflow run on a contained pair names its workspace as the run's `cwd`.
+
 ### Checklist
 
 1. Create one headless profile per pair, with `engine: false` where it loads this bundle.

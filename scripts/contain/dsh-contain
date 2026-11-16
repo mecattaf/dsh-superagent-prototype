@@ -1,0 +1,274 @@
+#!/usr/bin/env bash
+# dsh-contain: run one dsh process, and every process it starts, inside a
+# bubblewrap box that can write only its working directory.
+#
+# It is the bin/dsh of a dshd release (make-release builds one), so that
+#   dshd run --release <that release> --cwd <workspace> -- <profile> ...
+# boots the whole worker in the box: DSH's in-process read, write and edit
+# tools, its bash tool, and any agent CLI a provider adapter starts (opencode
+# for the Zen pairs). DSH's own permission mode stays whatever the caller
+# passes; this box is the boundary, not DSH's sandbox.
+#
+#   dsh-contain PROFILE [DSH ARGS...]   boot dsh with PROFILE in the box
+#   dsh-contain --run CMD [ARGS...]     run CMD in the same box (tests, review)
+#
+# The box, from the inside:
+#   /nix /etc /usr /bin /lib64    read-only; the Nix daemon socket is hidden
+#                                 unless DSH_CONTAIN_NIX=1
+#   /run                          empty but for /run/current-system, /run/nscd
+#                                 and the files named in DSH_CONTAIN_SECRET
+#   /home                         empty and read-only, except the paths below
+#   /tmp /run                     private to the box, writable, discarded
+#   /mnt /srv /var /root /boot    absent
+#   $HOME                         empty but for ~/.nix-profile and the DSH home
+#   $DSH_HOME                     the one profile (read-only, writes discarded),
+#                                 its own credentials file (read-only) and fresh
+#                                 sessions, storages, logs, cache and plugins
+#                                 kept under DSH_CONTAIN_STATE/<run>/dsh
+#   /run/dsh-contain/scratch      writable, kept as DSH_CONTAIN_STATE/<run>/scratch
+#                                 (DSH_CONTAIN_SCRATCH inside the box)
+#   the working directory         writable; every .git under it read-only
+#   DSH_CONTAIN_READ              read-only, at the same paths
+#   network                       none (default); DSH_CONTAIN_EGRESS opens only
+#                                 the listed host:port pairs through a proxy;
+#                                 DSH_CONTAIN_NET=host shares the host network
+#
+# Settings, all from the unit's environment (dshd records them; no secrets):
+#   DSH_CONTAIN_ROOT    required. The working directory must lie strictly
+#                       inside it, so a unit sent to $HOME or / is refused.
+#   DSH_CONTAIN_STATE   required. Each run keeps DSH's session record and the
+#                       egress log in DSH_CONTAIN_STATE/<run>; outside the
+#                       working directory and outside DSH_HOME.
+#   DSH_CONTAIN_READ    colon-separated absolute files or directories to show
+#                       read-only. Never $HOME, /, or a parent of $HOME.
+#   DSH_CONTAIN_HIDE    colon-separated paths to blank out again inside
+#                       DSH_CONTAIN_READ entries (a directory becomes empty, a
+#                       file becomes /dev/null).
+#   DSH_CONTAIN_SECRET  colon-separated absolute files a provider needs, such
+#                       as one Zen key file; shown read-only. The profile's own
+#                       DSH_HOME/master-credentials/<profile>.yaml is added
+#                       when it exists.
+#   DSH_CONTAIN_EGRESS  comma-separated host:port pairs the worker may reach,
+#                       for example integrate.api.nvidia.com:443.
+#   DSH_CONTAIN_NET     egress (default) or host.
+#   DSH_CONTAIN_NIX     1 shows the Nix daemon socket (nix shell, nix develop).
+#   DSH_CONTAIN_PASSENV space-separated extra variable names to pass in.
+#
+# What it does not do, stated plainly:
+# - The worker can read what it is shown: the working directory, the READ
+#   entries, the Nix store, /etc, and the one credentials file of its own
+#   provider (DSH reads it in-process, so its read tool can too).
+# - With DSH_CONTAIN_EGRESS, the allowed hosts receive whatever the worker
+#   sends them; the allowlist bounds where data can go, not what.
+# - With DSH_CONTAIN_NET=host, every local and LAN service is reachable.
+# - It does not limit CPU, memory or time; dshd and systemd do that.
+# - The worker may rewrite its own session record, which DSH writes in-process.
+# - A later tool run outside the box on the workspace (git, npm, a test
+#   runner) runs whatever the worker wrote there. Review and test in the box
+#   (dsh-contain --run), and run git outside it only at the clone's top level.
+set -o errexit
+set -o nounset
+set -o pipefail
+
+real_dsh="@DSH@"
+bwrap="@BWRAP@"
+python="@PYTHON@"
+egress_py="$(dirname -- "$(realpath -e -- "${BASH_SOURCE[0]}")")/../libexec/egress.py"
+
+die() {
+  echo "dsh-contain: $*" >&2
+  exit 125
+}
+
+mode=dsh
+if [ "${1-}" = --run ]; then
+  mode=run
+  shift
+  [ "$#" -gt 0 ] || die "--run needs a command"
+else
+  [ "$#" -gt 0 ] || die "expected a profile name, or --run CMD"
+  case "$1" in
+    -V | --version | -h | --help) exec "$real_dsh" "$1" ;;
+  esac
+  [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]] || die "the first argument must be a profile name, got '$1'"
+  profile="$1"
+fi
+
+# --- settings ---------------------------------------------------------------
+absdir() { # absdir NAME VALUE: VALUE must be an existing absolute directory
+  [ -n "$2" ] || die "$1 is not set"
+  case "$2" in /*) ;; *) die "$1 ($2) is not an absolute path" ;; esac
+  [ -d "$2" ] || die "$1 ($2) is not a directory"
+  realpath -e -- "$2"
+}
+root="$(absdir DSH_CONTAIN_ROOT "${DSH_CONTAIN_ROOT-}")"
+state_base="$(absdir DSH_CONTAIN_STATE "${DSH_CONTAIN_STATE-}")"
+for wide in / /tmp /home /nix /etc /run; do
+  [ "$root" = "$wide" ] && die "DSH_CONTAIN_ROOT may not be $wide itself"
+done
+ws="$(pwd -P)"
+home="$(realpath -m -- "${HOME:?HOME is not set}")"
+dsh_home="${DSH_HOME-}"
+if [ -z "${dsh_home//[[:space:]]/}" ]; then dsh_home="$home/.dsh"; fi
+dsh_home="$(realpath -m -- "$dsh_home")"
+
+inside() { # inside CHILD PARENT: CHILD is PARENT or below it
+  case "${1%/}/" in "${2%/}/"*) return 0 ;; esac
+  return 1
+}
+if [ "$ws" = "$root" ] || ! inside "$ws" "$root"; then
+  die "the working directory $ws is not strictly inside DSH_CONTAIN_ROOT ($root)"
+fi
+for forbidden in / "$home" "$dsh_home"; do
+  inside "$forbidden" "$ws" && die "the working directory $ws contains $forbidden"
+done
+inside "$ws" "$dsh_home" && die "the working directory $ws is inside DSH_HOME"
+inside "$home" "$root" && die "DSH_CONTAIN_ROOT ($root) contains \$HOME"
+inside "$state_base" "$ws" && die "DSH_CONTAIN_STATE ($state_base) is inside the working directory"
+inside "$state_base" "$dsh_home" && die "DSH_CONTAIN_STATE ($state_base) is inside DSH_HOME"
+
+net="${DSH_CONTAIN_NET:-egress}"
+case "$net" in egress | host) ;; *) die "DSH_CONTAIN_NET must be egress or host, got '$net'" ;; esac
+egress="${DSH_CONTAIN_EGRESS-}"
+if [ -n "$egress" ]; then
+  IFS=, read -r -a hosts <<<"$egress"
+  for h in "${hosts[@]}"; do
+    [[ "$h" =~ ^[A-Za-z0-9.-]+:[0-9]{1,5}$ ]] || die "DSH_CONTAIN_EGRESS entry '$h' is not host:port"
+  done
+fi
+
+run_id="${INVOCATION_ID:-$(date +%s)-$$}"
+[[ "$run_id" =~ ^[A-Za-z0-9._-]+$ ]] || die "unusable run id '$run_id'"
+state="$state_base/$run_id"
+mkdir -p -- "$state"
+chmod 0700 -- "$state"
+
+# --- the box ----------------------------------------------------------------
+uid="$(id -u)"
+b=(--die-with-parent --new-session --unshare-user --unshare-pid --unshare-ipc
+  --unshare-uts --unshare-cgroup-try --disable-userns --hostname contained
+  --dev /dev --proc /proc --tmpfs /run --tmpfs /tmp --tmpfs /home)
+for d in /nix /etc /usr /bin /lib64; do
+  [ -e "$d" ] && b+=(--ro-bind "$d" "$d")
+done
+[ "${DSH_CONTAIN_NIX-}" = 1 ] || b+=(--tmpfs /nix/var/nix/daemon-socket)
+for link in /run/current-system /run/booted-system /run/opengl-driver; do
+  [ -L "$link" ] && b+=(--symlink "$(readlink -- "$link")" "$link")
+done
+[ -d /run/nscd ] && b+=(--ro-bind /run/nscd /run/nscd)
+b+=(--dir "/run/user/$uid" --chmod 0700 "/run/user/$uid")
+
+b+=(--dir "$home")
+[ -L "$home/.nix-profile" ] && b+=(--symlink "$(readlink -f -- "$home/.nix-profile")" "$home/.nix-profile")
+
+# The DSH home view: one profile, its own credentials, fresh state.
+b+=(--dir "$dsh_home")
+if [ "$mode" = dsh ]; then
+  pdir="$dsh_home/profiles/$profile"
+  [ -d "$pdir" ] || die "profile $profile has no directory $pdir"
+  b+=(--overlay-src "$pdir" --tmp-overlay "$pdir")
+  cred="$dsh_home/master-credentials/$profile.yaml"
+  [ -f "$cred" ] && b+=(--ro-bind "$cred" "$cred")
+fi
+for d in sessions storages logs cache plugins; do
+  mkdir -p -- "$state/dsh/$d"
+  b+=(--bind "$state/dsh/$d" "$dsh_home/$d")
+done
+# A kept scratch folder for tools that insist on writing records of their
+# own (the Zen launcher's invocation records and usage ledger, for example).
+mkdir -p -- "$state/scratch"
+b+=(--dir /run/dsh-contain --bind "$state/scratch" /run/dsh-contain/scratch)
+
+split() { # split VALUE: colon list -> lines
+  local IFS=:
+  for item in $1; do [ -n "$item" ] && printf '%s\n' "$item"; done
+}
+while IFS= read -r p; do
+  case "$p" in /*) ;; *) die "DSH_CONTAIN_READ entry '$p' is not absolute" ;; esac
+  [ -e "$p" ] || die "DSH_CONTAIN_READ entry '$p' does not exist"
+  r="$(realpath -e -- "$p")"
+  for forbidden in / "$home" "$dsh_home"; do
+    inside "$forbidden" "$r" && die "DSH_CONTAIN_READ entry '$p' is or contains $forbidden"
+  done
+  b+=(--ro-bind "$r" "$p")
+done < <(split "${DSH_CONTAIN_READ-}")
+while IFS= read -r p; do
+  case "$p" in /*) ;; *) die "DSH_CONTAIN_SECRET entry '$p' is not absolute" ;; esac
+  [ -f "$p" ] || die "DSH_CONTAIN_SECRET entry '$p' is not a file"
+  b+=(--ro-bind "$p" "$p")
+done < <(split "${DSH_CONTAIN_SECRET-}")
+
+# The workspace, writable, with every Git directory under it read-only: a
+# hook or config planted there would run when someone uses git outside.
+# DSH_CONTAIN_ROOT itself is an empty read-only tmpfs around it, so a write
+# beside the workspace fails instead of landing in the box's /tmp.
+b+=(--tmpfs "$root")
+b+=(--bind "$ws" "$ws")
+while IFS= read -r -d '' g; do
+  b+=(--ro-bind "$g" "$g")
+done < <(find "$ws" -maxdepth 4 -name node_modules -prune -o -name .git -print0)
+
+while IFS= read -r p; do
+  if [ -d "$p" ]; then b+=(--tmpfs "$p"); elif [ -e "$p" ]; then b+=(--ro-bind /dev/null "$p"); fi
+done < <(split "${DSH_CONTAIN_HIDE-}")
+# Writes outside the workspace and the state binds fail (read-only file
+# system) instead of landing in a throwaway tmpfs; /tmp and /run stay
+# writable and private to the box.
+b+=(--remount-ro /home --remount-ro /)
+b+=(--remount-ro "$root")
+
+# --- environment: only named variables enter the box -------------------------
+b+=(--clearenv)
+keep=(HOME USER LOGNAME LANG LC_ALL LOCALE_ARCHIVE TZ TZDIR PATH TERM
+  DSH_HOME DSH_TELEMETRY_DISABLED DSH_PERMISSION_MODE GUFO_API_KEY ZEN_SLOT)
+read -r -a extra <<<"${DSH_CONTAIN_PASSENV-}"
+for name in "${keep[@]}" "${extra[@]}"; do
+  [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "unusable variable name '$name'"
+  [ -n "${!name+set}" ] && b+=(--setenv "$name" "${!name}")
+done
+b+=(--setenv XDG_RUNTIME_DIR "/run/user/$uid" --setenv TMPDIR /tmp
+  --setenv DSH_CONTAIN_RUN "$run_id" --setenv DSH_CONTAIN_SCRATCH /run/dsh-contain/scratch)
+
+if [ "$mode" = dsh ]; then
+  cmd=("$real_dsh" "$@")
+else
+  cmd=("$@")
+fi
+
+# --- network ------------------------------------------------------------------
+if [ "$net" = host ]; then
+  exec "$bwrap" "${b[@]}" --chdir "$ws" -- "${cmd[@]}"
+fi
+b+=(--unshare-net)
+if [ -z "$egress" ]; then
+  exec "$bwrap" "${b[@]}" --chdir "$ws" -- "${cmd[@]}"
+fi
+
+# Egress: a proxy outside the box on a Unix socket, which allows only the
+# listed host:port pairs; inside, a loopback listener relays to it.
+sock="$state/egress.sock"
+rm -f -- "$sock"
+"$python" -I "$egress_py" serve --socket "$sock" --allow "$egress" --log "$state/egress.log" &
+proxy=$!
+trap 'kill "$proxy" 2>/dev/null || true' EXIT
+trap 'kill "$proxy" 2>/dev/null || true; kill "${box-}" 2>/dev/null || true; exit 143' TERM INT
+for _ in $(seq 1 100); do
+  [ -S "$sock" ] && break
+  kill -0 "$proxy" 2>/dev/null || die "the egress proxy did not start"
+  sleep 0.05
+done
+[ -S "$sock" ] || die "the egress proxy did not create $sock"
+proxy_url=http://127.0.0.1:3128
+b+=(--ro-bind "$egress_py" /run/dsh-contain/egress.py
+  --bind "$sock" /run/dsh-contain/egress.sock)
+for v in HTTPS_PROXY HTTP_PROXY https_proxy http_proxy ALL_PROXY all_proxy; do
+  b+=(--setenv "$v" "$proxy_url")
+done
+b+=(--setenv NODE_USE_ENV_PROXY 1 --setenv NO_PROXY "" --setenv no_proxy "")
+"$bwrap" "${b[@]}" --chdir "$ws" -- "$python" -I /run/dsh-contain/egress.py forward \
+  --listen 127.0.0.1:3128 --socket /run/dsh-contain/egress.sock -- "${cmd[@]}" &
+box=$!
+set +o errexit
+wait "$box"
+status=$?
+exit "$status"
