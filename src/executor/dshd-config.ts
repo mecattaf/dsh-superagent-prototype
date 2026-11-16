@@ -7,10 +7,11 @@ import { LIMITS } from '../limits.ts'
 // An unannotated `s.dict` makes the `Config` type unnameable for declaration emit (it needs cosmokit's `Dict`), so the two dshd maps
 // are annotated with `Record` types. Schemastery declares their shape, for the settings page and `--dump-config`; `dshdOf`
 // still checks them with zod, which also refuses unknown pair keys and names the profile rule.
-type PairInput = { profile?: string | null; env?: Record<string, string> | null; maxWorkers?: number | null; provider?: string | null; model?: string | null; effort?: string | null }
-type PairOutput = { profile: string; env: Record<string, string>; maxWorkers?: number; provider?: string; model?: string; effort?: string }
+type PairInput = { profile?: string | null; release?: string | null; env?: Record<string, string> | null; maxWorkers?: number | null; provider?: string | null; model?: string | null; effort?: string | null }
+type PairOutput = { profile: string; release?: string; env: Record<string, string>; maxWorkers?: number; provider?: string; model?: string; effort?: string }
 const DshdPairs: s<Record<string, PairInput>, Record<string, PairOutput>> = s.dict(s.object({
   profile: s.string().required().description('DSH profile the worker boots: a headless profile under the DSH home.'),
+  release: s.string().description('dshd release its units run on (`dshd run --release`): a name under /etc/dshd/releases or a release store path. Unset: dshd\'s default release.'),
   provider: s.string().description('Provider declared by the worker profile; used for exact per-node routing.'),
   model: s.string().description('Exact model declared by the worker profile; a node may select this or provider/model.'),
   effort: s.string().description('Reasoning effort declared by the worker profile; omitted when unsupported.'),
@@ -21,6 +22,8 @@ const DshdEnv: s<Record<string, string>> = s.dict(s.string())
 const DshdPairSchema = z.object({
   /** DSH profile the worker boots: a headless profile under the DSH home. */
   profile: z.string().regex(/^[A-Za-z0-9._-]+$/, 'a DSH profile name'),
+  /** dshd release its units run on: a registered release name, or a release store path (a directory directly under /nix/store). */
+  release: z.string().regex(/^(?:[A-Za-z0-9._-]+|\/nix\/store\/[0-9a-z]{32}-[A-Za-z0-9+._?=-]+)$/, 'a dshd release name or a release store path').optional(),
   provider: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
   effort: z.string().min(1).optional(),
@@ -54,7 +57,7 @@ export const DshdSchema = s.object({
     .description('How many looks in a row may find a unit masked, inconsistent or in a state dshd cannot tell before its Assignment settles as lost; an orphaned unit settles at once. 0: wait until dshd can tell.'),
 }).default({}).description('The dshd executor; read only when executor is dshd.')
 /** One provider-harness pair of the dshd executor: the headless profile its units boot, their added environment and their own limit. */
-export interface DshdPair { profile: string; env: Record<string, string>; maxWorkers?: number; provider?: string; model?: string; effort?: string }
+export interface DshdPair { profile: string; release?: string; env: Record<string, string>; maxWorkers?: number; provider?: string; model?: string; effort?: string }
 /** Configuration of the dshd executor (`executor: dshd`). */
 export interface DshdConfig {
   command: string

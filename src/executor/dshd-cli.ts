@@ -2,8 +2,11 @@
 import type { SubprocessOutputReader, SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { z } from 'zod'
 
-/** What one dshd headless unit runs: its name, directory, labels, profile, headless options, task and environment. */
-export interface DshdRecipe { name: string; cwd: string; labels: Record<string, string>; profile: string; args: string[]; task: string; env: Record<string, string> }
+/**
+ * What one dshd headless unit runs: its name, directory, labels, profile, headless options, task and environment, and the dshd
+ * release it runs on when its pair names one (`--release`; otherwise dshd's default).
+ */
+export interface DshdRecipe { name: string; cwd: string; labels: Record<string, string>; profile: string; args: string[]; task: string; env: Record<string, string>; release?: string }
 /** The last run of a dshd instance; `ending` is null while it runs. */
 export interface DshdLastRun { invocationId: string; ending: string | null; endedAt: number | null; child: { exitCode?: number; signal?: number } | null }
 /** `dshd get --json`, and the body of every mutating verb's outcome, as far as the executor reads it. */
@@ -78,7 +81,8 @@ export class DshdCli implements DshdPort {
   async run(recipe: DshdRecipe, signal: AbortSignal): Promise<DshdRunResult> {
     const env = Object.entries(recipe.env).sort(([a], [b]) => a.localeCompare(b)).map(([name, value]) => `${name}=${value}`)
     const labels = Object.entries(recipe.labels).sort(([a], [b]) => a.localeCompare(b)).flatMap(([name, value]) => ['--label', `${name}=${value}`])
-    const argv = ['env', '-i', ...env, this.command, 'run', '--bg', '--json', '--name', recipe.name, '--cwd', recipe.cwd, ...labels,
+    const release = recipe.release === undefined ? [] : ['--release', recipe.release]
+    const argv = ['env', '-i', ...env, this.command, 'run', '--bg', '--json', '--name', recipe.name, ...release, '--cwd', recipe.cwd, ...labels,
       '--', recipe.profile, ...recipe.args, '--json', recipe.task]
     const exit = await this.call(argv, recipe.cwd, signal)
     if (exit.exitCode !== 0) return this.refusal('run', recipe.name, exit)

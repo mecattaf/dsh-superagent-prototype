@@ -28,6 +28,15 @@ describe('DshdCli', () => {
       '--json', '{"ticket_id":"t1"}'])
     expect(spec.cwd).toBe('/srv/agency')
   })
+  it('passes a recipe\'s release as --release before --cwd, and none without one', async () => {
+    const subprocess = answering(JSON.stringify({ outcome: 'created', warnings: [], ...status() }))
+    const release = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-dshd-release-dsh-contain'
+    await cli(subprocess).run({ ...recipe, release }, signal)
+    const [spec] = subprocess.spawn.mock.calls[0]!
+    expect(spec.argv.slice(5, 14)).toEqual(['dshd', 'run', '--bg', '--json', '--name', 'sa-fix-a1', '--release', release, '--cwd'])
+    await cli(subprocess).run(recipe, signal)
+    expect(subprocess.spawn.mock.calls[1]![0].argv).not.toContain('--release')
+  })
   it('reads created, started and already-running as launched, with the unit\'s invocationId and instance id', async () => {
     for (const outcome of ['created', 'started', 'already-running']) {
       const result = await cli(answering(JSON.stringify({ outcome, warnings: [], ...status() }))).run(recipe, signal)

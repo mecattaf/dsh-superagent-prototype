@@ -40,7 +40,8 @@ export class FakeDshd implements DshdPort {
     this.fail('run')
     const existing = this.instances.get(recipe.name)
     if (existing) {
-      const same = (a: DshdRecipe) => JSON.stringify([a.cwd, a.profile, a.args, a.task])
+      // dshd's recipe includes the release when --release is given.
+      const same = (a: DshdRecipe) => JSON.stringify([a.cwd, a.profile, a.args, a.task, a.release ?? null])
       if (same(existing.recipe) !== same(recipe)) return { refused: 'exists-different-recipe', exit: 4, message: `${recipe.name} exists with another recipe` }
       existing.recipe = { ...existing.recipe, labels: { ...existing.recipe.labels, ...recipe.labels } }
       if (existing.state === 'running') return { outcome: 'already-running', ...this.status(existing) }
@@ -162,7 +163,8 @@ export class FakeDshd implements DshdPort {
           const after = argv.slice(argv.indexOf('--') + 1)
           const value = (flag: string) => flags[flags.indexOf(flag) + 1]!
           const labels = Object.fromEntries(flags.flatMap((flag, at) => flag === '--label' ? [flags[at + 1]!.split(/=(.*)/s).slice(0, 2)] : []))
-          const result = await this.run({ name: value('--name'), cwd: value('--cwd'), labels, profile: after[0]!, args: after.slice(1, -2), task: after.at(-1)!, env })
+          const release = flags.includes('--release') ? { release: value('--release') } : {}
+          const result = await this.run({ name: value('--name'), cwd: value('--cwd'), labels, profile: after[0]!, args: after.slice(1, -2), task: after.at(-1)!, env, ...release })
           if (this.hold) await Promise.race([this.hold, new Promise(resolve => { spec.signal?.addEventListener('abort', resolve, { once: true }) })])
           if (spec.signal?.aborted || this.answersNothing('run')) return null
           if ('refused' in result) { stderr = JSON.stringify({ error: { kind: result.refused, message: result.message, hint: null } }); return result.exit }

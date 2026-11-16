@@ -6,6 +6,7 @@ import "@deepseek-ai/dsh-subprocess";
 /** One provider-harness pair of the dshd executor: the headless profile its units boot, their added environment and their own limit. */
 interface DshdPair {
   profile: string;
+  release?: string;
   env: Record<string, string>;
   maxWorkers?: number;
   provider?: string;
@@ -45,6 +46,7 @@ declare const Config: s<Schemastery.ObjectS<NoInfer<{
     prefix: s<string, string, "defined">;
     pairs: s<Record<string, {
       profile?: string | null;
+      release?: string | null;
       env?: Record<string, string> | null;
       maxWorkers?: number | null;
       provider?: string | null;
@@ -52,6 +54,7 @@ declare const Config: s<Schemastery.ObjectS<NoInfer<{
       effort?: string | null;
     }>, Record<string, {
       profile: string;
+      release?: string;
       env: Record<string, string>;
       maxWorkers?: number;
       provider?: string;
@@ -74,6 +77,7 @@ declare const Config: s<Schemastery.ObjectS<NoInfer<{
     prefix: s<string, string, "defined">;
     pairs: s<Record<string, {
       profile?: string | null;
+      release?: string | null;
       env?: Record<string, string> | null;
       maxWorkers?: number | null;
       provider?: string | null;
@@ -81,6 +85,7 @@ declare const Config: s<Schemastery.ObjectS<NoInfer<{
       effort?: string | null;
     }>, Record<string, {
       profile: string;
+      release?: string;
       env: Record<string, string>;
       maxWorkers?: number;
       provider?: string;
@@ -112,6 +117,7 @@ declare const Config: s<Schemastery.ObjectS<NoInfer<{
     prefix: s<string, string, "defined">;
     pairs: s<Record<string, {
       profile?: string | null;
+      release?: string | null;
       env?: Record<string, string> | null;
       maxWorkers?: number | null;
       provider?: string | null;
@@ -119,6 +125,7 @@ declare const Config: s<Schemastery.ObjectS<NoInfer<{
       effort?: string | null;
     }>, Record<string, {
       profile: string;
+      release?: string;
       env: Record<string, string>;
       maxWorkers?: number;
       provider?: string;
@@ -141,6 +148,7 @@ declare const Config: s<Schemastery.ObjectS<NoInfer<{
     prefix: s<string, string, "defined">;
     pairs: s<Record<string, {
       profile?: string | null;
+      release?: string | null;
       env?: Record<string, string> | null;
       maxWorkers?: number | null;
       provider?: string | null;
@@ -148,6 +156,7 @@ declare const Config: s<Schemastery.ObjectS<NoInfer<{
       effort?: string | null;
     }>, Record<string, {
       profile: string;
+      release?: string;
       env: Record<string, string>;
       maxWorkers?: number;
       provider?: string;

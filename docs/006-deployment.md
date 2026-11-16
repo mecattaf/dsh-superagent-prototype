@@ -98,7 +98,7 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 | `engine` | no | `true` by default. `false` keeps the entry inert in this process: no lock, database, environment change, route, tool or Session, and the Source entries wait. With `false` the bundle leaves the entry's row disabled, so a headless app, which lacks the web app's services the entry waits for, starts without reporting it; a profile that sets `disabled` on the row decides instead. Leave the Source rows disabled there too, or DeepSeek Harness reports them waiting for the `orchestrator` service. Set it where another process loads the same bundles, for example only for the agent presets, while one process owns `stateDir`. Changing it restarts dsh-superagent |
 | `lockWaitMs` | no | `35000` by default. How long a start waits for the state directory lock, and the scheduled Source for its inbox lock, while another process holds it, in milliseconds. A process killed before its shutdown leaves its lock, which goes stale within 30 s and is then taken over, so a start right after a hard kill succeeds; a live holder is refused once the time is up. `0` refuses at once |
 | `executor` | no | `dsh` (default) runs each Ticket in a DSH Session of this process; `dshd` runs each Assignment as one dshd headless unit |
-| `dshd.*` | with `executor: dshd` | `pairs` (name → headless `profile`, `env`, `maxWorkers`), `defaultPair`, `cwd`, `env`, `passEnv`, `args`, `prefix`, `command`, `watchSeconds`, `briefArgvMaxChars` (bytes of UTF-8; Linux takes at most 131072 in one argument), `removeEnded`, `resumeDelaySeconds`, `resumeMaxAgeHours`, `uncertainWatchLimit` |
+| `dshd.*` | with `executor: dshd` | `pairs` (name → headless `profile`, `env`, `maxWorkers`, `release`), `defaultPair`, `cwd`, `env`, `passEnv`, `args`, `prefix`, `command`, `watchSeconds`, `briefArgvMaxChars` (bytes of UTF-8; Linux takes at most 131072 in one argument), `removeEnded`, `resumeDelaySeconds`, `resumeMaxAgeHours`, `uncertainWatchLimit` |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
 
 After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
@@ -109,7 +109,7 @@ With `executor: dshd`, each Assignment runs as one dshd headless unit instead of
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `pairs` | none | Provider-harness pairs by name. Each has `profile`, the headless profile its units boot; `env`, added for its units; and `maxWorkers`, its own limit within the overall one |
+| `pairs` | none | Provider-harness pairs by name. Each has `profile`, the headless profile its units boot; `env`, added for its units; `maxWorkers`, its own limit within the overall one; and optionally `release`, the dshd release its units run on (`dshd run --release`: a name under `/etc/dshd/releases` or a release store path), else dshd's default |
 | `defaultPair` | empty | The pair of a Ticket whose Trigger names none in `meta.pair`; it must be one of `pairs` |
 | `cwd` | empty | The directory of a Ticket whose Trigger names none in `meta.cwd`. Absolute; empty uses the Ticket's directory under the Execution directory |
 | `env` | none | Environment added for every unit |

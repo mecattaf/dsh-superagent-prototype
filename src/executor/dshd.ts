@@ -541,7 +541,7 @@ export class DshdExecutor implements ExecutorPort {
     }
     const env = { ...inherited(dshd.passEnv, this.host.environment?.(), entries => { this.storePathsLeft(entries) }), ...dshd.env, ...config.env }
     const binding: DshdBinding = { executor: 'dshd', host: this.hostname(), name, pair, state: 'launching', launchedAt: now(),
-      recipe: { name, cwd, labels, profile: config.profile, args: [...dshd.args], task, env }, inputIds }
+      recipe: { name, cwd, labels, profile: config.profile, args: [...dshd.args], task, env, ...config.release !== undefined && { release: config.release } }, inputIds }
     store.atomic(() => { store.set(BINDING(assignment.id), binding) })
     return binding
   }

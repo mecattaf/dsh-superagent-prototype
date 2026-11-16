@@ -64,6 +64,12 @@ describe('configuration schema', () => {
     expect(() => Config(minimal({ dshd: { env: { A: 1 } } }))).toThrow()
     expect(() => Config(minimal({ dshd: { pairs: { alpha: 'work-alpha' } } }))).toThrow()
     expect(() => Config(minimal({ dshd: { pairs: { alpha: { env: {} } } } }))).toThrow()
+    // A pair may name the dshd release its units run on: a registered name or a release store path, nothing else.
+    const contained = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-dshd-release-dsh-contain'
+    expect(machineOf(Config(minimal({ dshd: { pairs: { alpha: { profile: 'work-alpha', release: contained }, beta: { profile: 'work-beta', release: 'stable' } } } }))).dshd.pairs)
+      .toMatchObject({ alpha: { profile: 'work-alpha', release: contained }, beta: { profile: 'work-beta', release: 'stable' } })
+    for (const release of ['/tmp/release', '/nix/store/short-x', '../default', 'two words'])
+      expect(() => machineOf(Config(minimal({ dshd: { pairs: { alpha: { profile: 'work-alpha', release } } } })))).toThrow('dshd.pairs.alpha.release')
     // An unknown pair key still reaches machineOf, which refuses it.
     expect(() => machineOf(Config(minimal({ dshd: { pairs: { alpha: { profile: 'work-alpha', selector: 'x' } } } })))).toThrow('dshd.pairs.alpha')
   })

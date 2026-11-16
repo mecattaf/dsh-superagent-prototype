@@ -118,6 +118,14 @@ describe('launch and recipe', () => {
     expect(fake.runs[0]!.labels).not.toHaveProperty('superagent.lines')
     expect(fake.runs[0]!.labels['superagent.ticket']).not.toBe('forged')
   })
+  it('runs a unit on its pair\'s release when the pair names one, and on dshd\'s default otherwise', async () => {
+    const release = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-dshd-release-dsh-contain'
+    await start({ pairs: { ...PAIRS, contained: { profile: 'work-local', env: { DSH_CONTAIN_ROOT: '/srv/box' }, release } } })
+    await accepted(request('1', { cwd: directory(), pair: 'contained' }))
+    await accepted(request('2', { cwd: directory() }))
+    expect(fake.runs.map(recipe => [recipe.labels['superagent.pair'], recipe.release])).toEqual([['contained', release], ['opus', undefined]])
+    expect(fake.runs[0]!.env).toMatchObject({ DSH_CONTAIN_ROOT: '/srv/box' })
+  })
   it('runs the default pair for a Trigger whose meta.pair is empty, as for one that names none', async () => {
     await start()
     const { ticket } = await accepted(request('1', { cwd: directory(), pair: '' }))
